@@ -220,7 +220,9 @@ def build(root: Path, *, quick: bool = False) -> dict:
     for day, (lat, lon, alt) in enumerate(ROUTE):
         n = per_day[day % len(per_day)]
         for i in range(n):
-            hour = (5, 6, 7, 8, 11, 14, 15, 16, 17)[i % 9]
+            # offsets from TREK_START (06:00 Nepal): a real trekking day runs
+            # from first light to late afternoon, and the camera films inside it
+            hour = (0, 1, 2, 3, 5, 8, 9, 10, 11)[i % 9]
             when = TREK_START + timedelta(days=day, hours=hour, minutes=(i * 17) % 60)
             who = "keller" if i % 2 == 0 else "kulikov"
             skew = TRUE_KELLER_OFFSET if who == "keller" else TRUE_KULIKOV_OFFSET

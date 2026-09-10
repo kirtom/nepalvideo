@@ -59,6 +59,10 @@ probe:
   max_chapter_gap_s: 1.0
 
 spine:
+  # Reference data. Both are optional: absent, altitude and place names stay
+  # null and the stage reports it rather than failing.
+  srtm_dir: ./data/srtm             # SRTM .hgt tiles (see tools/fetch_reference.py)
+  geonames_path: ./data/geonames/NP.txt
   # S02.2 refuse to interpolate across gaps longer than this
   max_interp_gap_s: 14400     # 4 hours
   # S02.4 cluster distinct locations to ~500 m before reverse geocoding
