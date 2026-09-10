@@ -242,13 +242,31 @@ def parse_duration(value: Any) -> float | None:
     return float(m.group(1)) if m else None
 
 
-def walk_media(root: Path, *, skip_hidden: bool = True) -> list[Path]:
-    """Every regular file under root, sorted for deterministic asset ordering."""
+# Directories that turn up inside a delivered nepal_data/ but are not media.
+# The AWS CLI installer alone is 272 MB and 5,875 .rst files, which would
+# outnumber the actual footage in the manifest and pollute every count the
+# operator reads at the Milestone 1 checkpoint.
+DEFAULT_EXCLUDE_DIRS = frozenset({
+    "aws", "work", "node_modules", "__pycache__", "venv", ".venv",
+    "$RECYCLE.BIN", "System Volume Information", "lost+found",
+})
+
+
+def walk_media(root: Path, *, skip_hidden: bool = True,
+               exclude_dirs: frozenset[str] | set[str] | None = None) -> list[Path]:
+    """Every regular media-bearing file under root, sorted for deterministic
+    asset ordering. Excluded directories are pruned rather than filtered, so a
+    large tree of irrelevant files costs nothing to skip."""
+    excluded = {d.lower() for d in
+                (DEFAULT_EXCLUDE_DIRS if exclude_dirs is None else exclude_dirs)}
     out: list[Path] = []
     for p in sorted(root.rglob("*")):
         if not p.is_file():
             continue
-        if skip_hidden and any(part.startswith(".") for part in p.relative_to(root).parts):
+        parts = p.relative_to(root).parts
+        if skip_hidden and any(part.startswith(".") for part in parts):
+            continue
+        if any(part.lower() in excluded for part in parts[:-1]):
             continue
         out.append(p)
     return out
