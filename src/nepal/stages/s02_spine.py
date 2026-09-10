@@ -76,7 +76,7 @@ def build_gps_track(cfg: Config, conn) -> dict[str, Any]:
     # S02.3 for the track itself. A GPX elevation, where present, is a
     # barometric or survey reading and outranks the DEM; photo points have
     # none, so they take the DEM value.
-    srtm = dem_mod.Srtm(Path(cfg.get("spine.srtm_dir", "./data/srtm")).expanduser())
+    srtm = dem_mod.Srtm(cfg.srtm_dir)
     rows = []
     n_alt = 0
     for p in merged:
@@ -126,9 +126,9 @@ def geotag_assets(cfg: Config, conn) -> dict[str, Any]:
         return {"skipped": "no GPS track"}
 
     max_gap = float(cfg.get("spine.max_interp_gap_s"))
-    srtm = dem_mod.Srtm(Path(cfg.get("spine.srtm_dir", "./data/srtm")).expanduser())
+    srtm = dem_mod.Srtm(cfg.srtm_dir)
     gaz = geo_mod.Gazetteer(geo_mod.load_geonames(
-        Path(cfg.get("spine.geonames_path", "./data/geonames/NP.txt")).expanduser()))
+        cfg.geonames_path))
 
     rows = [dict(r) for r in conn.execute(
         "SELECT asset_id, created_at_utc, lat, lon, has_gps FROM assets "
@@ -174,7 +174,7 @@ def geotag_assets(cfg: Config, conn) -> dict[str, Any]:
                     len(srtm.missing), srtm.dir, ", ".join(sorted(srtm.missing)[:8]))
     if not gaz.places:
         log.warning("S02.4 no GeoNames gazetteer at %s -- place names stay null",
-                    cfg.get("spine.geonames_path", "./data/geonames/NP.txt"))
+                    cfg.geonames_path)
 
     log.info("S02.2 placed %d assets (%d interpolated, %d refused across gaps > %.0fh), "
              "%d with altitude, %d distinct places",

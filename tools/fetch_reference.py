@@ -133,8 +133,8 @@ def main() -> int:
     from nepal.spine.dem import tiles_for_bbox
     cfg = Config.load(args.config)
 
-    srtm_dir = Path(cfg.get("spine.srtm_dir", "./data/srtm")).expanduser()
-    geo_path = Path(cfg.get("spine.geonames_path", "./data/geonames/NP.txt")).expanduser()
+    srtm_dir = cfg.srtm_dir
+    geo_path = cfg.geonames_path
 
     rc = 0
     if not args.skip_srtm:

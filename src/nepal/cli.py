@@ -82,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         return s02_spine.print_chronology(cfg)
 
     if args.cmd == "doctor":
-        return _doctor()
+        return _doctor(cfg)
 
     return 1
 
@@ -114,8 +114,33 @@ def _print_s01(rep: dict) -> None:
     print()
 
 
-def _doctor() -> int:
+def _doctor(cfg) -> int:
     from nepal.util import proc
+
+    # Where the pipeline will actually read and write. Relative paths in the
+    # config resolve against the config file's project root, not the working
+    # directory, so this is the same wherever `nepal` is invoked from.
+    print(f"config      : {cfg.path}")
+    print(f"project root: {cfg.base_dir}")
+    print("paths:")
+    for label, path, need in [
+        ("data_root", cfg.data_root, "your nepal_data/ -- REQUIRED"),
+        ("work_root", cfg.work_root, "derived output, created as needed"),
+        ("db", cfg.db_path, "pipeline state"),
+        ("srtm_dir", cfg.srtm_dir, "elevation tiles (tools/fetch_reference.py)"),
+        ("geonames", cfg.geonames_path, "gazetteer (tools/fetch_reference.py)"),
+    ]:
+        mark = "ok" if path.exists() else "--"
+        print(f"  [{mark}] {label:<10} {path}")
+        if not path.exists():
+            print(f"       {' ' * 10} ^ missing: {need}")
+    if cfg.data_root.exists():
+        for sub in ("media_from_camera", "media_from_phones", "chat_export", "music"):
+            d = cfg.data_root / sub
+            n = sum(1 for _ in d.rglob("*")) if d.exists() else 0
+            print(f"       {'':<10}   {sub:<20} "
+                  f"{'%d files' % n if d.exists() else 'ABSENT'}")
+    print()
     print("external binaries:")
     ok = True
     for tool, why in [("ffmpeg", "S01.4 frames, S03 reprojection, S07/S08 render"),

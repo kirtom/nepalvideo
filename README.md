@@ -40,8 +40,36 @@ nepal doctor
 
 ## Running Milestone 1
 
-Point `project.data_root` in `config/pipeline.yaml` at your `nepal_data/`
-folder, then:
+Run everything **from the cloned repository**, and leave your media where it
+already is — `nepal_data/` is tens of gigabytes and there is no reason to copy
+or move it.
+
+```bash
+cd nepalvideo
+pip install -e .
+```
+
+Then point `project.data_root` at wherever the media actually lives. An
+absolute path is clearest:
+
+```yaml
+project:
+  data_root: /Users/you/Nepal/nepal_data      # or ../nepal_data, or ~/Nepal/nepal_data
+```
+
+Relative paths in the config resolve against the **project root** (the folder
+containing `config/`), not against your shell's working directory, so the same
+config behaves identically wherever you invoke `nepal` from. Confirm what it
+resolved to before running anything heavy:
+
+```bash
+nepal doctor        # prints every resolved path, and what is missing
+```
+
+`work/` and `data/` are created inside the repo and are already git-ignored, as
+is `nepal_data/` should you choose to symlink it in.
+
+Then:
 
 ```bash
 python tools/fetch_reference.py   # SRTM elevation tiles + GeoNames gazetteer (once)

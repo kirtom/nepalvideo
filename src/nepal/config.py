@@ -16,9 +16,37 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "pipeline.yaml
 
 
 class Config:
+    """Loaded pipeline configuration.
+
+    Relative paths in the config resolve against the config file's own
+    directory, NOT the process working directory. The config is found relative
+    to the installed package, so resolving its contents against the cwd instead
+    would mean running ``nepal`` from two different directories produced two
+    different work folders and two different databases -- with the second run
+    silently redoing everything into a new place.
+    """
+
     def __init__(self, data: dict[str, Any], path: Path | None = None):
         self._data = data
-        self.path = path
+        self.path = Path(path) if path else None
+
+    @property
+    def base_dir(self) -> Path:
+        """Directory that relative paths are resolved against.
+
+        The project root: the parent of a ``config/`` directory when the file
+        lives in one, otherwise the file's own directory. That way a config
+        kept beside the media, or anywhere else, resolves against a location
+        the person who put it there would predict.
+        """
+        if self.path is None:
+            return Path.cwd()
+        parent = self.path.resolve().parent
+        return parent.parent if parent.name == "config" else parent
+
+    def resolve(self, value: str | os.PathLike) -> Path:
+        p = Path(value).expanduser()
+        return p if p.is_absolute() else (self.base_dir / p).resolve()
 
     @classmethod
     def load(cls, path: str | os.PathLike | None = None) -> "Config":
@@ -42,15 +70,23 @@ class Config:
     # -- derived paths -------------------------------------------------
     @property
     def data_root(self) -> Path:
-        return Path(self.get("project.data_root")).expanduser()
+        return self.resolve(self.get("project.data_root"))
 
     @property
     def work_root(self) -> Path:
-        return Path(self.get("project.work_root")).expanduser()
+        return self.resolve(self.get("project.work_root"))
 
     @property
     def db_path(self) -> Path:
-        return Path(self.get("project.db_path")).expanduser()
+        return self.resolve(self.get("project.db_path"))
+
+    @property
+    def srtm_dir(self) -> Path:
+        return self.resolve(self.get("spine.srtm_dir", "./data/srtm"))
+
+    @property
+    def geonames_path(self) -> Path:
+        return self.resolve(self.get("spine.geonames_path", "./data/geonames/NP.txt"))
 
     def work(self, *parts: str) -> Path:
         """Path under work_root, with parent directories created."""
