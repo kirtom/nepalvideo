@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+work/
+nepal_data/
+tests/fixtures/nepal_data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.venv/

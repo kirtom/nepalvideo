@@ -1,0 +1,132 @@
+# Nepal Trek Film Pipeline — all tunables in one place.
+# Every value that the spec states as a number lives here, not in code.
+
+project:
+  name: nepal
+  # Where the raw tree lives when running locally (Milestone 1-2).
+  data_root: ./nepal_data
+  # Working directory for derived artefacts.
+  work_root: ./work
+  db_path: ./work/db/nepal.sqlite
+
+aws:
+  region: eu-north-1
+  bucket: nepal
+  # --proxy-only ingest mode (spec section 9): upload .lrv instead of .insv.
+  proxy_only: false
+
+film:
+  total_duration_s: 1200
+  short_duration_s: 180
+  shot_count_min: 150
+  shot_count_max: 200
+  duration_tolerance_s: 30
+
+# Act targets. duration_frac sums to 1.0; absolute targets derived from
+# film.total_duration_s. Ranges are the spec's stated minutes.
+acts:
+  - {act: 1, name: Planning,       min_s: 120, max_s: 180}
+  - {act: 2, name: Approach,       min_s: 240, max_s: 300}
+  - {act: 3, name: Climb,          min_s: 360, max_s: 420}
+  - {act: 4, name: Highest point,  min_s:  90, max_s: 120}
+  - {act: 5, name: Descent,        min_s: 180, max_s: 240}
+
+probe:
+  # S01.4 fisheye FOV auto-solve
+  fov:
+    candidates_start: 188
+    candidates_stop: 208      # exclusive, matches range(188, 208, 2)
+    candidates_step: 2
+    sample_frames: 20
+    min_distinct_files: 8
+    seam_band_px: 6
+    local_band_px: 60
+    min_confidence: 0.05
+    fallback_deg: 193
+  # S01.5 clock offset auto-solve (GCC-PHAT)
+  clock:
+    pair_window_s: 600        # +/- 10 min nominal overlap to consider a pair
+    max_lag_s: 600            # +/- 10 min search window
+    sample_rate: 16000
+    max_audio_s: 120
+    min_pair_confidence: 1.5
+    min_confident_pairs: 3
+  # S01.2 chapter grouping acceptance
+  max_chapter_gap_s: 1.0
+
+spine:
+  # S02.2 refuse to interpolate across gaps longer than this
+  max_interp_gap_s: 14400     # 4 hours
+  # S02.4 cluster distinct locations to ~500 m before reverse geocoding
+  geocode_cluster_m: 500
+  # S02.5 message classification
+  notable_window_s: 1200      # 20 min around an altitude-gain local max
+  card_max_chars: 180         # "short, self-contained, quotable"
+  # S02.6
+  whisper_model: large-v3
+  whisper_language: ru        # OPEN QUESTION 3 — confirm
+  # S02.7
+  music_segments: 8
+  swell_percentile: 75
+
+process:
+  # S03.2 shot detection
+  scene_threshold: 27.0
+  min_shot_len_s: 1.5
+  # S03.3
+  metric_samples_per_shot: 5
+  # S03.4 wind detection
+  wind_lf_ratio: 0.80
+  wind_lf_cutoff_hz: 200
+  # S03.1 proxy sizes
+  proxy_eq: [1024, 512]
+  proxy_view: [960, 540]
+  yaws: [0, 90, 180, 270]
+  view_h_fov: 100
+  view_v_fov: 70
+
+# S03.7 quality gate — one curve per source class.
+quality_curves:
+  camera:   {min_sharpness: 4.0, max_exposure_pen: 0.15, min_stability: 0.35, min_duration_s: 1.5}
+  phone:    {min_sharpness: 3.5, max_exposure_pen: 0.20, min_stability: 0.30, min_duration_s: 1.5}
+  telegram: {min_sharpness: 2.0, max_exposure_pen: 0.35, min_stability: 0.15, min_duration_s: 1.0}
+
+semantic:
+  max_caption_shots: 2500     # THE ONLY UNBOUNDED COST — spec section 8.1
+  frames_per_caption: 4
+  bedrock_model: null         # set at deploy time
+  clip_model: ViT-L-14
+  clip_pretrained: openai
+
+score:
+  tech:  {sharpness: 0.35, exposure: 0.25, stability: 0.30, duration_fit: 0.10}
+  sem:   {vlm_interest: 0.60, clip_act_sim: 0.40}
+  ctx:   {has_face: 0.25, has_speech: 0.20, new_max_alt: 0.20, first_at_place: 0.20, msg_proximity: 0.15}
+  total: {tech: 0.40, sem: 0.35, ctx: 0.25}
+  duration_fit_peak_s: [4.0, 8.0]
+  shortlist_size: 400
+  min_per_act: 40
+
+assemble:
+  mmr_lambda: 0.30
+  max_shots_per_place_per_act: 3
+  subject_shot_every_s: 40
+  levity_min_per_act: 1        # acts 2-5, hard constraint
+  shot_duration_s:
+    1: [3.0, 5.0]
+    2: [4.0, 6.0]
+    3: [3.0, 8.0]
+    4: [2.0, 4.0]
+    5: [5.0, 8.0]
+  act4_held_shot_s: [6.0, 10.0]
+  silence_window_s: 3.0
+  max_reassembly_loops: 3
+
+render:
+  draft: {width: 960, height: 540, crf: 23}
+  music_lufs: -14.0
+  duck_lufs: -28.0
+  duck_lufs_speech: -22.0
+
+music:
+  license_mode: personal       # personal | cleared — OPEN QUESTION 5

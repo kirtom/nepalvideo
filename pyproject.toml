@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nepal-film-pipeline"
+version = "0.1.0"
+description = "Automated trek-footage -> documentary assembly pipeline"
+requires-python = ">=3.10"
+
+# Milestone 1 (S01 probe + S02 spine) must install WITHOUT torch/CUDA.
+# Everything heavier lives in an extra.
+dependencies = [
+  "numpy>=1.24",
+  "scipy>=1.10",          # Hungarian assignment, KD-tree, signal
+  "pillow>=10.0",         # frame IO for the FOV solver
+  "pyyaml>=6.0",
+  "python-dateutil>=2.8",
+]
+
+[project.optional-dependencies]
+# S02.7 music analysis
+music = ["librosa>=0.10", "soundfile>=0.12"]
+# S02.6 / S03.5 speech
+asr = ["faster-whisper>=1.0"]
+# S03 vision metrics
+vision = ["opencv-python-headless>=4.8"]
+# S04 embeddings
+semantic = ["open-clip-torch>=2.24", "torch>=2.1"]
+# cloud stages
+cloud = ["boto3>=1.34"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+nepal = "nepal.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+markers = [
+  "slow: builds real media with ffmpeg (minutes, needs ffmpeg + exiftool)",
+]
+addopts = "-m 'not slow'"
