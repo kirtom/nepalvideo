@@ -155,6 +155,11 @@ EXIF_TAGS = [
     "-Duration", "-VideoFrameRate", "-CreateDate", "-DateTimeOriginal",
     "-MediaCreateDate", "-GPSLatitude", "-GPSLongitude", "-GPSAltitude",
     "-GPSDateTime", "-Make", "-Model",
+    # EXIF keeps a timestamp's UTC offset in a SEPARATE tag. Omitting these
+    # from the request makes asset_datetime()'s timezone handling dead code and
+    # silently shifts every Nepal photo by 5h45m onto the wrong day.
+    "-OffsetTimeOriginal", "-OffsetTime", "-OffsetTimeDigitized",
+    "-GPSHPositioningError",
 ]
 
 

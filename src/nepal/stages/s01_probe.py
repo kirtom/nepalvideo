@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import statistics
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,12 +56,20 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
 
     have_ffprobe = proc.have("ffprobe")
     rows: list[dict[str, Any]] = []
+    clock_evidence: dict[str, list[float]] = {}
     for path in files:
         rel = path.relative_to(root).as_posix()
         cls = manifest.classify(rel)
         exif = exif_rows.get(str(path.resolve()), {})
 
         created = manifest.asset_datetime(exif)
+        # GPSDateTime is satellite time: where a photo carries both, the
+        # agreement between them is direct evidence of whether that device's
+        # clock can be trusted as the pipeline's reference.
+        gps_dt = manifest.parse_exif_datetime(manifest.exif_get(exif, "GPSDateTime"))
+        if created is not None and gps_dt is not None:
+            clock_evidence.setdefault(cls["source"], []).append(
+                (created - gps_dt).total_seconds())
         lat, lon, alt = manifest.parse_gps(exif)
         duration = manifest.parse_duration(manifest.exif_get(exif, "Duration"))
         width = height = fps = None
@@ -138,8 +147,22 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
         by_source[r["source"]] = by_source.get(r["source"], 0) + 1
     log.info("S01.1 wrote %d assets (%d files, %d duplicate): %s",
              len(unique_rows), len(rows), len(duplicates), by_source)
+    gps_agreement: dict[str, dict[str, float]] = {}
+    for source, deltas in clock_evidence.items():
+        med = float(statistics.median(deltas))
+        spread = float(statistics.median([abs(d - med) for d in deltas]))
+        gps_agreement[source] = {"n": len(deltas), "median_delta_s": round(med, 2),
+                                 "mad_s": round(spread, 2)}
+        db.set_decision(conn, f"clock_vs_gps_{source}_s", round(med, 2),
+                        1.0 / (1.0 + spread),
+                        f"median over {len(deltas)} photos carrying both "
+                        f"DateTimeOriginal and GPSDateTime")
+        log.info("S01.1 %s clock vs GPS time: %+.1fs (MAD %.1fs) over %d photos",
+                 source, med, spread, len(deltas))
+
     return {"n_assets": len(unique_rows), "n_files_seen": len(rows),
             "by_source": by_source, "duplicates": duplicates,
+            "gps_agreement": gps_agreement,
             "exiftool": proc.have("exiftool"), "ffprobe": have_ffprobe}
 
 
@@ -276,80 +299,226 @@ def solve_fov(cfg: Config, conn, *, work: Path | None = None) -> fov.FovResult:
 
 # ---------------------------------------------------------------- clock
 
-def solve_clocks(cfg: Config, conn, *, work: Path | None = None) -> dict[str, clock.ClockResult]:
-    """S01.5 -- one offset per phone, measured against the camera."""
+def _clips(conn, source: str) -> list[clock.Clip]:
+    """Dated video clips for one device, with their reported start times."""
+    out = []
+    for r in conn.execute(
+        "SELECT asset_id, s3_key, source, created_at, duration_s FROM assets "
+        "WHERE source=? AND kind IN ('video360','video_flat') "
+        "AND created_at IS NOT NULL AND duration_s > 0", (source,)
+    ):
+        dt = manifest.parse_exif_datetime(r["created_at"])
+        if dt is not None:
+            out.append(clock.Clip(r["asset_id"], r["source"], dt,
+                                  float(r["duration_s"]), r["s3_key"]))
+    return out
+
+
+def _capture_times(conn, source: str) -> list:
+    """Every dated capture for a device -- photos included.
+
+    The coarse aligner wants volume: phone photos outnumber phone videos by an
+    order of magnitude here, and it is their hour-by-hour distribution that
+    makes the activity histogram legible.
+    """
+    times = []
+    for r in conn.execute(
+        "SELECT created_at FROM assets WHERE source=? AND created_at IS NOT NULL", (source,)
+    ):
+        dt = manifest.parse_exif_datetime(r["created_at"])
+        if dt is not None:
+            times.append(dt)
+    return sorted(times)
+
+
+def pick_reference(conn) -> tuple[str, str]:
+    """Which device's clock the pipeline treats as truth.
+
+    The spec nominates the camera. On this corpus that is the wrong choice: the
+    camera's dates sit two weeks off the phones', which is the signature of a
+    flat battery resetting an action camera's clock, while the phone photos
+    carry GPS fixes and therefore satellite time. Whichever device agrees most
+    closely with GPS wins; with no GPS evidence at all the order falls back to
+    keller, kulikov, camera.
+    """
+    best, best_err, evidence = None, None, {}
+    for source in ("phone_keller", "phone_kulikov"):
+        med = db.get_decision_float(conn, f"clock_vs_gps_{source}_s")
+        if med is None:
+            continue
+        evidence[source] = abs(med)
+        if best_err is None or abs(med) < best_err:
+            best, best_err = source, abs(med)
+
+    if best is not None:
+        return best, (f"GPS-validated: {best} sits {best_err:.1f}s from satellite "
+                      f"time (candidates {evidence})")
+
+    for source in ("phone_keller", "phone_kulikov", "camera"):
+        if conn.execute("SELECT 1 FROM assets WHERE source=? AND created_at IS NOT NULL "
+                        "LIMIT 1", (source,)).fetchone():
+            return source, f"fallback: no GPS timestamps available, defaulting to {source}"
+    return "camera", "fallback: no dated assets at all"
+
+
+def _measure_pairs(cfg, root: Path, work: Path, ref_clips, pairs, coarse: float,
+                   fs: int, max_audio: float) -> list:
+    """GCC-PHAT over each candidate pair, returning measurements in absolute
+    offset terms (coarse shift folded back in)."""
+    from datetime import timedelta
+    out = []
+    for ref_clip, tgt_clip, ref_off, tgt_off in pairs[:60]:
+        try:
+            ref_path = root / Path(ref_clip.path).relative_to("raw")
+            tgt_path = root / Path(tgt_clip.path).relative_to("raw")
+            if not (ref_path.exists() and tgt_path.exists()):
+                continue
+            ref_wav = proc.extract_audio(ref_path, work / f"{ref_clip.clip_id[:12]}_r.wav",
+                                         sample_rate=fs, start_s=ref_off, duration_s=max_audio)
+            tgt_wav = proc.extract_audio(tgt_path, work / f"{tgt_clip.clip_id[:12]}_t.wav",
+                                         sample_rate=fs, start_s=tgt_off, duration_s=max_audio)
+            lag, conf = clock.gcc_phat(
+                _read_wav(tgt_wav), _read_wav(ref_wav), fs,
+                max_lag_s=float(cfg.get("probe.clock.max_lag_s")))
+            fine = clock.offset_from_pair(
+                ref_clip.start + timedelta(seconds=ref_off),
+                tgt_clip.start + timedelta(seconds=tgt_off), lag)
+            out.append(clock.PairMeasurement(ref_clip.clip_id, tgt_clip.clip_id,
+                                             lag, conf, coarse + fine))
+        except (proc.ToolFailed, proc.ToolMissing, OSError, ValueError) as exc:
+            log.debug("clock pair failed: %s", exc)
+    return out
+
+
+def solve_clocks(cfg, conn, *, work: Path | None = None) -> dict[str, clock.ClockResult]:
+    """S01.5 -- one offset per device, measured against the reference clock.
+
+    Two stages, because a single one cannot span the errors that occur in
+    practice. Capture-activity histograms recover a bulk offset of days first;
+    GCC-PHAT over shared audio then refines it to sub-second. Skipping the
+    coarse stage leaves a fourteen-day camera error entirely invisible to a
+    +/-600 s audio search.
+    """
     work = work or cfg.workdir("clock")
     root = cfg.data_root
     fs = int(cfg.get("probe.clock.sample_rate"))
     max_audio = float(cfg.get("probe.clock.max_audio_s"))
+    coarse_bin = float(cfg.get("probe.clock.coarse_bin_s", 3600.0))
+    coarse_max = float(cfg.get("probe.clock.coarse_max_offset_s", 45 * 86400.0))
 
-    def clips(where: str) -> list[clock.Clip]:
-        out = []
-        for r in conn.execute(
-            "SELECT asset_id, s3_key, source, created_at, duration_s FROM assets "
-            f"WHERE {where} AND kind IN ('video360','video_flat') "
-            "AND created_at IS NOT NULL AND duration_s > 0"
-        ):
-            dt = manifest.parse_exif_datetime(r["created_at"])
-            if dt is None:
-                continue
-            out.append(clock.Clip(r["asset_id"], r["source"], dt,
-                                  float(r["duration_s"]), r["s3_key"]))
-        return out
+    reference, ref_why = pick_reference(conn)
+    db.set_decision(conn, "clock_reference", reference, 1.0, ref_why)
+    log.info("S01.5 reference clock: %s (%s)", reference, ref_why)
 
-    camera = clips("source='camera'")
+    ref_times = _capture_times(conn, reference)
+    ref_clips = _clips(conn, reference)
     results: dict[str, clock.ClockResult] = {}
 
-    for device in ("phone_keller", "phone_kulikov"):
-        phone = clips(f"source='{device}'")
+    for device in ("camera", "phone_keller", "phone_kulikov"):
         label = device.replace("phone_", "")
-
-        if not camera or not phone:
-            naive = clock.naive_offset(camera, phone)
-            results[label] = clock.reduce_measurements(
-                label, [], naive_offset_s=naive,
-                min_confident_pairs=int(cfg.get("probe.clock.min_confident_pairs")))
-            log.warning("S01.5 %s: no overlapping material (%d camera, %d phone clips)",
-                        label, len(camera), len(phone))
+        if device == reference:
+            results[label] = clock.ClockResult(
+                device=label, offset_s=0.0, confidence=1.0,
+                method=f"reference clock ({ref_why})")
             continue
 
-        pairs = clock.find_candidate_pairs(
-            camera, phone, window_s=float(cfg.get("probe.clock.pair_window_s")))
-        naive = clock.naive_offset(camera, phone, pairs)
-        log.info("S01.5 %s: %d candidate pairs (naive delta %.1fs)", label, len(pairs), naive)
+        target_times = _capture_times(conn, device)
+        target_clips = _clips(conn, device)
+        if not target_times:
+            results[label] = clock.ClockResult(
+                label, 0.0, 0.0, f"no dated {device} assets", needs_manual=True)
+            continue
 
-        measurements: list[clock.PairMeasurement] = []
-        for cam_clip, ph_clip, cam_off, ph_off in pairs[:60]:
-            try:
-                cam_path = root / Path(cam_clip.path).relative_to("raw")
-                ph_path = root / Path(ph_clip.path).relative_to("raw")
-                if not (cam_path.exists() and ph_path.exists()):
-                    continue
-                cam_wav = proc.extract_audio(cam_path, work / f"{cam_clip.clip_id[:12]}_c.wav",
-                                             sample_rate=fs, start_s=cam_off, duration_s=max_audio)
-                ph_wav = proc.extract_audio(ph_path, work / f"{ph_clip.clip_id[:12]}_p.wav",
-                                            sample_rate=fs, start_s=ph_off, duration_s=max_audio)
-                a, b = _read_wav(ph_wav), _read_wav(cam_wav)
-                lag, conf = clock.gcc_phat(a, b, fs,
-                                           max_lag_s=float(cfg.get("probe.clock.max_lag_s")))
-                from datetime import timedelta
-                offset = clock.offset_from_pair(
-                    cam_clip.start + timedelta(seconds=cam_off),
-                    ph_clip.start + timedelta(seconds=ph_off),
-                    lag)
-                measurements.append(clock.PairMeasurement(
-                    cam_clip.clip_id, ph_clip.clip_id, lag, conf, offset))
-            except (proc.ToolFailed, proc.ToolMissing, OSError, ValueError) as exc:
-                log.debug("clock pair failed: %s", exc)
+        # -- stage 1: coarse candidates --------------------------------
+        # The coarse aligner is treated as a candidate generator, not an
+        # answer. Its blind spot is a whole-day shift, and on sparse material
+        # it can also return a spurious single bin when the true offset is
+        # near zero -- which, if applied, moves clips out of overlap and
+        # starves the audio stage of the very pairs that would have corrected
+        # it. So zero is always a candidate too, and audio picks the winner.
+        coarse, coarse_conf = clock.coarse_offset_by_activity(
+            ref_times, target_times, bin_s=coarse_bin, max_offset_s=coarse_max)
+        # Coincidence votes first -- they survive sparse material, which the
+        # histogram does not -- then histogram peaks as a second opinion.
+        # Tolerance is tied to the audio stage's reach, NOT to the histogram
+        # bin: a window as wide as coarse_bin/2 lets background coincidences
+        # outvote real ones on a dense reference.
+        votes = clock.offset_candidates_by_coincidence(
+            ref_times, target_times,
+            tolerance_s=float(cfg.get("probe.clock.max_lag_s")) / 2,
+            max_offset_s=coarse_max, top_n=12)
+        candidates = [(c, float(v)) for c, v in votes]
+        candidates += clock.coarse_candidates(
+            ref_times, target_times, bin_s=coarse_bin, max_offset_s=coarse_max, top_n=4)
+        if votes:
+            coarse = votes[0][0]
+            top_votes = votes[0][1]
+            runner = votes[1][1] if len(votes) > 1 else 0
+            coarse_conf = top_votes / max(runner, 1)
+        if coarse:
+            log.info("S01.5 %s coarse candidates: %s (best confidence %.2f)", label,
+                     ", ".join(f"{c/86400:+.2f}d" for c, _ in candidates), coarse_conf)
+            db.set_decision(conn, f"clock_coarse_{label}_s", round(coarse, 1),
+                            round(coarse_conf, 3),
+                            "activity-histogram cross-correlation; candidates "
+                            + ", ".join(f"{c/86400:+.2f}d" for c, _ in candidates))
 
-        results[label] = clock.reduce_measurements(
-            label, measurements,
-            min_pair_confidence=float(cfg.get("probe.clock.min_pair_confidence")),
-            min_confident_pairs=int(cfg.get("probe.clock.min_confident_pairs")),
-            naive_offset_s=naive)
-        r = results[label]
-        log.info("S01.5 %s offset=%.2fs confidence=%.3f (%s)",
-                 label, r.offset_s, r.confidence, r.method)
+        # Candidates that put no clips in overlap cost nothing to reject --
+        # find_candidate_pairs returns empty and no audio is decoded -- so the
+        # list can afford to be generous.
+        offsets_to_try = [0.0]
+        for c, _ in candidates:
+            if all(abs(c - existing) > 2 * float(cfg.get("probe.clock.max_lag_s"))
+                   for existing in offsets_to_try):
+                offsets_to_try.append(c)
+
+        # -- stage 2: audio refines, and arbitrates between candidates --
+        best: clock.ClockResult | None = None
+        best_coarse = 0.0
+        for cand in offsets_to_try:
+            shifted = clock.apply_coarse(target_clips, cand)
+            pairs = clock.find_candidate_pairs(
+                ref_clips, shifted, window_s=float(cfg.get("probe.clock.pair_window_s")))
+            if not pairs:
+                continue
+            measurements = _measure_pairs(cfg, root, work, ref_clips, pairs, cand, fs, max_audio)
+            r = clock.reduce_measurements(
+                label, measurements,
+                min_pair_confidence=float(cfg.get("probe.clock.min_pair_confidence")),
+                min_confident_pairs=int(cfg.get("probe.clock.min_confident_pairs")),
+                naive_offset_s=cand + clock.naive_offset(ref_clips, shifted, pairs))
+            if best is None or (r.n_pairs_accepted, r.confidence) > \
+                    (best.n_pairs_accepted, best.confidence):
+                best, best_coarse = r, cand
+            if r.n_pairs_accepted >= int(cfg.get("probe.clock.min_confident_pairs")):
+                log.info("S01.5 %s: audio confirms candidate %+.2fd with %d pairs",
+                         label, cand / 86400.0, r.n_pairs_accepted)
+                break
+
+        if best is None:
+            best = clock.reduce_measurements(
+                label, [], min_confident_pairs=int(cfg.get("probe.clock.min_confident_pairs")),
+                naive_offset_s=coarse)
+        result = best
+
+        # A coarse-only answer beats nothing, but it is good only to the day.
+        if result.needs_manual and coarse:
+            result.offset_s = round(coarse, 1)
+            result.confidence = round(min(coarse_conf / 4.0, 0.5), 3)
+            result.method = (f"coarse-only ({coarse/86400:+.2f} days from activity "
+                             f"histogram, confidence {coarse_conf:.2f}); no confident "
+                             f"audio pair to arbitrate -- accurate to about a day, "
+                             f"confirm at Gate 1")
+            if coarse_conf < clock.DIURNAL_CONFIDENCE:
+                result.method += (" | WARNING not decisive against a whole-day shift; "
+                                  "candidates "
+                                  + ", ".join(f"{c/86400:+.2f}d" for c, _ in candidates[:3]))
+        elif best_coarse:
+            result.method += f" | coarse stage supplied {best_coarse/86400:+.2f}d, audio confirmed"
+
+        results[label] = result
+        log.info("S01.5 %s offset=%+.2fs confidence=%.3f (%s)",
+                 label, result.offset_s, result.confidence, result.method)
     return results
 
 
@@ -368,12 +537,13 @@ def _read_wav(path: Path):
 def apply_offsets(conn, offsets: dict[str, float]) -> int:
     """Write ``created_at_utc`` = created_at + offset for every asset.
 
-    Camera is the reference clock and takes offset 0. Telegram timestamps come
-    from the server, not a device, so they are already correct.
+    The reference device takes offset 0; every other device takes the offset
+    S01.5 measured for it. Telegram timestamps come from the server rather than
+    a device, so they are already correct and are never shifted.
     """
     from datetime import timedelta
     source_offset = {
-        "camera": 0.0,
+        "camera": offsets.get("camera", 0.0),
         "phone_keller": offsets.get("keller", 0.0),
         "phone_kulikov": offsets.get("kulikov", 0.0),
         "telegram": 0.0,
@@ -391,7 +561,6 @@ def apply_offsets(conn, offsets: dict[str, float]) -> int:
         n += 1
     conn.commit()
 
-    # recordings inherit the corrected start of their earliest asset
     conn.execute("""
         UPDATE recordings SET start_utc = (
           SELECT MIN(created_at_utc) FROM assets

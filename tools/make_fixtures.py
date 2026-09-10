@@ -18,14 +18,19 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import tempfile
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 TRUE_FOV = 196
-TRUE_KELLER_OFFSET = -37.0     # phone clock runs 37 s fast
+# Mirrors the real corpus: keller's phone agrees with GPS and becomes the
+# reference clock, kulikov's drifts by seconds, and the camera's battery went
+# flat so its clock is days out -- which only the coarse stage can find.
+TRUE_KELLER_OFFSET = 0.0
 TRUE_KULIKOV_OFFSET = 12.0
+TRUE_CAMERA_OFFSET = 14 * 86400 + 63.0
 NEPAL_TZ = timezone(timedelta(hours=5, minutes=45))
 TREK_START = datetime(2023, 10, 15, 6, 0, 0, tzinfo=NEPAL_TZ)
 
@@ -103,21 +108,49 @@ def stamp_video(dest: Path, when_utc: datetime) -> None:
          f"-Track1:MediaCreateDate={stamp}", str(dest)])
 
 
-def photo(dest: Path, seed: int, when: datetime, lat: float, lon: float, alt: float) -> None:
+_PHOTO_TEMPLATE: Path | None = None
+
+
+def _photo_template(tmp: Path) -> Path:
+    """Encode one JPEG and reuse it. Re-encoding per photo dominates fixture
+    build time for no benefit -- only the EXIF differs between them."""
+    global _PHOTO_TEMPLATE
+    if _PHOTO_TEMPLATE is None or not _PHOTO_TEMPLATE.exists():
+        tmp.mkdir(parents=True, exist_ok=True)
+        t = tmp / "_template.jpg"
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+             "-f", "lavfi", "-i", "testsrc2=size=1600x1200:duration=1:rate=1",
+             "-frames:v", "1", "-y", str(t)])
+        _PHOTO_TEMPLATE = t
+    return _PHOTO_TEMPLATE
+
+
+def photo(dest: Path, seed: int, when: datetime, lat: float, lon: float, alt: float,
+          *, gps_time: datetime | None = None) -> None:
+    """A phone photo with EXIF GPS.
+
+    ``gps_time`` writes GPSDateTime, which is satellite time. Where it differs
+    from DateTimeOriginal the device clock is provably wrong, and that is the
+    evidence S01 uses to choose its reference clock.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-         "-f", "lavfi", "-i", f"testsrc2=size=1600x1200:duration=1:rate=1",
-         "-frames:v", "1", "-y", str(dest)])
+    shutil.copyfile(_photo_template(Path(tempfile.gettempdir()) / "nepal_fixture_tmp"), dest)
     stamp = when.strftime("%Y:%m:%d %H:%M:%S")
     off = when.strftime("%z")
     off = f"{off[:3]}:{off[3:]}" if off else "+00:00"
-    run(["exiftool", "-overwrite_original", "-q",
-         f"-DateTimeOriginal={stamp}", f"-CreateDate={stamp}",
-         f"-OffsetTimeOriginal={off}",
-         f"-GPSLatitude={abs(lat)}", f"-GPSLatitudeRef={'N' if lat >= 0 else 'S'}",
-         f"-GPSLongitude={abs(lon)}", f"-GPSLongitudeRef={'E' if lon >= 0 else 'W'}",
-         f"-GPSAltitude={alt}", "-GPSAltitudeRef=0",
-         "-Make=Apple", "-Model=iPhone 14 Pro", str(dest)])
+    args = ["exiftool", "-overwrite_original", "-q",
+            f"-DateTimeOriginal={stamp}", f"-CreateDate={stamp}",
+            f"-OffsetTimeOriginal={off}",
+            f"-GPSLatitude={abs(lat)}", f"-GPSLatitudeRef={'N' if lat >= 0 else 'S'}",
+            f"-GPSLongitude={abs(lon)}", f"-GPSLongitudeRef={'E' if lon >= 0 else 'W'}",
+            f"-GPSAltitude={alt}", "-GPSAltitudeRef=0",
+            "-Make=Apple", "-Model=iPhone 14 Pro"]
+    if gps_time is not None:
+        g = gps_time.astimezone(timezone.utc)
+        args.append(f"-GPSDateStamp={g.strftime('%Y:%m:%d')}")
+        args.append(f"-GPSTimeStamp={g.strftime('%H:%M:%S')}")
+    args.append(str(dest))
+    run(args)
 
 
 def music_track(dest: Path, seconds: float, freq: int, tempo: float) -> None:
@@ -141,26 +174,31 @@ def build(root: Path, *, quick: bool = False) -> dict:
 
     # One take, split into two chapters, plus its .lrv proxy. These must
     # collapse into a single recording in S01.2.
+    # The camera's own clock is wrong, so both its filenames and its embedded
+    # timestamps are shifted back by TRUE_CAMERA_OFFSET.
+    def cam_clock(true_time: datetime) -> datetime:
+        return true_time - timedelta(seconds=TRUE_CAMERA_OFFSET)
+
     take = TREK_START + timedelta(days=2, hours=3)
-    stamp = take.strftime("%Y%m%d_%H%M%S")
+    stamp = cam_clock(take).strftime("%Y%m%d_%H%M%S")
     # the .lrv is a genuine lower-resolution proxy of the .insv, as on the
     # device -- same content, different bytes, so a distinct asset_id
     for name, w in [(f"VID_{stamp}_00_001.insv", 1440), (f"LRV_{stamp}_01_001.lrv", 720)]:
         dual_fisheye_clip(cam / name, dur, seed=1, audio_seed=900, width=w)
-        stamp_video(cam / name, take)
+        stamp_video(cam / name, cam_clock(take))
     dual_fisheye_clip(cam / f"VID_{stamp}_00_002.insv", dur, seed=2, audio_seed=901)
-    stamp_video(cam / f"VID_{stamp}_00_002.insv", take + timedelta(seconds=dur))
+    stamp_video(cam / f"VID_{stamp}_00_002.insv", cam_clock(take + timedelta(seconds=dur)))
 
     # N camera/phone pairs that recorded the same moment, so S01.5 has enough
     # confident pairs to clear min_confident_pairs instead of falling back.
     pairs = 4 if quick else 6
     for k in range(pairs):
         shared_sound_starts = TREK_START + timedelta(days=4 + k, hours=2)
-        cstamp = shared_sound_starts.strftime("%Y%m%d_%H%M%S")
+        cstamp = cam_clock(shared_sound_starts).strftime("%Y%m%d_%H%M%S")
         aseed = 700 + k
         cname = f"VID_{cstamp}_00_001.insv"
         dual_fisheye_clip(cam / cname, dur, seed=30 + k, audio_seed=aseed, audio_offset=0.0)
-        stamp_video(cam / cname, shared_sound_starts)
+        stamp_video(cam / cname, cam_clock(shared_sound_starts))
 
         for who, skew in (("keller", TRUE_KELLER_OFFSET), ("kulikov", TRUE_KULIKOV_OFFSET)):
             lead = 2.0 + k * 0.5          # how far into the shared sound the phone starts
@@ -175,17 +213,23 @@ def build(root: Path, *, quick: bool = False) -> dict:
     stamp_video(ph / "kulikov" / "VID_solo.mp4",
                 TREK_START + timedelta(days=4, hours=2, seconds=30))
 
-    # phone photos: the geolocation spine
-    n_per_day = 2 if quick else 4
+    # Phone photos: the geolocation spine, and the signal the coarse clock
+    # aligner locks onto. Counts vary per day on purpose -- an identical daily
+    # routine leaves the histogram ambiguous against a whole-day shift.
+    per_day = [5, 3, 8, 2, 6, 9, 4, 7] if not quick else [4, 2, 6, 2, 5, 7, 3, 5]
     for day, (lat, lon, alt) in enumerate(ROUTE):
-        for i in range(n_per_day):
-            when = TREK_START + timedelta(days=day, hours=3 + i * 2)
+        n = per_day[day % len(per_day)]
+        for i in range(n):
+            hour = (5, 6, 7, 8, 11, 14, 15, 16, 17)[i % 9]
+            when = TREK_START + timedelta(days=day, hours=hour, minutes=(i * 17) % 60)
             who = "keller" if i % 2 == 0 else "kulikov"
             skew = TRUE_KELLER_OFFSET if who == "keller" else TRUE_KULIKOV_OFFSET
-            # the device REPORTS a time that is wrong by -skew
             reported = when - timedelta(seconds=skew)
+            # GPSDateTime is satellite time: it records the TRUE instant, so it
+            # differs from the device reading by exactly the clock error.
             photo(ph / who / f"IMG_{day:02d}{i:02d}.jpg", day * 10 + i,
-                  reported, lat + i * 0.001, lon + i * 0.001, alt + i * 5)
+                  reported, lat + i * 0.001, lon + i * 0.001, alt + i * 5,
+                  gps_time=when)
 
     chat = root / "chat_export"
     rv = chat / "round_video_messages" / "video_1@15-10-2023.mp4"
@@ -200,22 +244,50 @@ def build(root: Path, *, quick: bool = False) -> dict:
     _write_gpx(chat / "files" / "route.gpx")
     _write_result_json(chat / "result.json")
 
-    music_track(root / "music" / "01_sparse_piano.mp3", 30 if quick else 90, 220, 60)
-    music_track(root / "music" / "02_strings.mp3", 30 if quick else 90, 330, 90)
-    music_track(root / "music" / "03_swell.mp3", 30 if quick else 90, 440, 120)
-    music_track(root / "music" / "04_peak.mp3", 30 if quick else 90, 660, 140)
-    music_track(root / "music" / "05_return.mp3", 30 if quick else 90, 220, 60)
+    # Distinct parameters per track: identical audio would be byte-identical and
+    # the content-hash asset_id would legitimately collapse the two.
+    dur_m = 30 if quick else 90
+    music_track(root / "music" / "01_sparse_piano.mp3", dur_m, 220, 60)
+    music_track(root / "music" / "02_strings.mp3", dur_m + 1, 330, 90)
+    music_track(root / "music" / "03_swell.mp3", dur_m + 2, 440, 120)
+    music_track(root / "music" / "04_peak.mp3", dur_m + 3, 660, 140)
+    music_track(root / "music" / "05_return.mp3", dur_m + 4, 221, 61)
+    _write_playlist_csv(root / "music" / "rinse_and_repeat.csv")
 
     truth = {
         "true_fov": TRUE_FOV,
+        "reference_clock": "phone_keller",
         "true_keller_offset_s": TRUE_KELLER_OFFSET,
         "true_kulikov_offset_s": TRUE_KULIKOV_OFFSET,
+        "true_camera_offset_s": TRUE_CAMERA_OFFSET,
         "expected_camera_recordings_min": 3,
         "route_points": len(ROUTE),
         "trek_start_utc": TREK_START.astimezone(timezone.utc).isoformat(),
     }
     (root / "_ground_truth.json").write_text(json.dumps(truth, indent=2))
     return truth
+
+
+def _write_playlist_csv(dest: Path) -> None:
+    """An Exportify-shaped playlist, including Russian-language entries so the
+    exclusion path is exercised end to end."""
+    rows = [
+        ("Says", "Nils Frahm", 275000, 62, 0.09, -22.0, 0.20, 0.95, 0.94, 9, 0),
+        ("Near Light", "Olafur Arnalds", 250000, 88, 0.28, -17.0, 0.34, 0.80, 0.90, 2, 1),
+        ("Longest Year", "Hammock", 380000, 95, 0.52, -12.0, 0.30, 0.30, 0.92, 4, 1),
+        ("The Mountain", "This Will Destroy You", 420000, 132, 0.88, -6.0, 0.42, 0.05, 0.88, 7, 1),
+        ("Ambre", "Nils Frahm", 300000, 60, 0.12, -21.0, 0.22, 0.93, 0.95, 9, 0),
+        ("Sudno", "Molchat Doma", 200000, 140, 0.80, -7.0, 0.70, 0.10, 0.10, 5, 0),
+        ("Группа крови", "Кино", 280000, 120, 0.75, -8.0, 0.65, 0.20, 0.05, 0, 1),
+    ]
+    header = ("Track URI,Track Name,Artist Name(s),Album Name,Duration (ms),Tempo,"
+              "Energy,Loudness,Danceability,Acousticness,Instrumentalness,Key,Mode")
+    lines = [header]
+    for i, (t, a, ms, tempo, en, loud, dance, acou, instr, key, mode) in enumerate(rows):
+        lines.append(f"spotify:track:{i:022d},{t},{a},Album,{ms},{tempo},{en},"
+                     f"{loud},{dance},{acou},{instr},{key},{mode}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _write_gpx(dest: Path) -> None:

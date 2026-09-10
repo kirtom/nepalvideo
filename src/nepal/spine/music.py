@@ -173,8 +173,15 @@ class Assignment:
 
 
 def assign_acts(tracks: Sequence[Track], *, acts: Sequence[int] = (1, 2, 3, 4, 5),
-                license_mode: str = "personal") -> Assignment:
+                license_mode: str = "personal",
+                feature_mask: Sequence[float] | None = None) -> Assignment:
     """Hungarian assignment of tracks to acts, with the Act 5 callback bonus.
+
+    ``feature_mask`` zeroes dimensions that the feature source cannot supply --
+    dynamic range is unavailable from a playlist export, and a masked dimension
+    must contribute nothing rather than contribute a fabricated value. The
+    remaining dimensions are rescaled so distances stay comparable to a
+    full-feature run.
 
     Falls back to reusing tracks when the library is smaller than the number of
     acts, which is a legitimate outcome for a five-act film scored from a
@@ -188,15 +195,17 @@ def assign_acts(tracks: Sequence[Track], *, acts: Sequence[int] = (1, 2, 3, 4, 5
         return Assignment({}, math.inf, 0.0, True,
                           f"no tracks available under license_mode={license_mode}")
 
+    mask = _resolve_mask(feature_mask)
+
     if len(pool) < len(acts):
-        return _assign_with_reuse(pool, acts, license_mode)
+        return _assign_with_reuse(pool, acts, license_mode, mask)
 
     z = znorm(_matrix(pool))
     other_acts = [a for a in acts if a != 1]
 
     best: Assignment | None = None
     for i1, cand1 in enumerate(pool):
-        d1 = float(np.linalg.norm((z[i1] - target_vector(1)) * ACT_WEIGHTS[1]))
+        d1 = float(np.linalg.norm((z[i1] - target_vector(1)) * ACT_WEIGHTS[1] * mask))
         rest_idx = [i for i in range(len(pool)) if i != i1]
         if len(rest_idx) < len(other_acts):
             continue
@@ -204,7 +213,7 @@ def assign_acts(tracks: Sequence[Track], *, acts: Sequence[int] = (1, 2, 3, 4, 5
         cost = np.zeros((len(other_acts), len(rest_idx)))
         bonus_m = np.zeros_like(cost)
         for r, act in enumerate(other_acts):
-            tgt, w = target_vector(act), ACT_WEIGHTS[act]
+            tgt, w = target_vector(act), ACT_WEIGHTS[act] * mask
             for c, i in enumerate(rest_idx):
                 d = float(np.linalg.norm((z[i] - tgt) * w))
                 b = callback_affinity(cand1, pool[i]) if act == 5 else 0.0
@@ -229,14 +238,30 @@ def assign_acts(tracks: Sequence[Track], *, acts: Sequence[int] = (1, 2, 3, 4, 5
     return best
 
 
+def _resolve_mask(feature_mask: Sequence[float] | None) -> np.ndarray:
+    """Normalise a feature mask so masking a dimension does not simply shrink
+    every distance -- the surviving dimensions carry the full weight."""
+    if feature_mask is None:
+        return np.ones(len(FEATURES))
+    m = np.asarray(feature_mask, dtype=float)
+    if m.shape != (len(FEATURES),):
+        raise ValueError(f"feature_mask must have {len(FEATURES)} entries")
+    live = float(m.sum())
+    if live <= 0:
+        raise ValueError("feature_mask masks every dimension")
+    return m * (len(FEATURES) / live)
+
+
 def _assign_with_reuse(pool: Sequence[Track], acts: Sequence[int],
-                       license_mode: str) -> Assignment:
+                       license_mode: str,
+                       mask: np.ndarray | None = None) -> Assignment:
     """Fewer tracks than acts: pick the nearest track per act, allowing reuse,
     and force Act 5 to echo Act 1 where more than one track exists."""
     z = znorm(_matrix(pool))
+    mask = np.ones(len(FEATURES)) if mask is None else mask
     by_act: dict[int, str] = {}
     for act in acts:
-        tgt, w = target_vector(act), ACT_WEIGHTS[act]
+        tgt, w = target_vector(act), ACT_WEIGHTS[act] * mask
         d = [float(np.linalg.norm((z[i] - tgt) * w)) for i in range(len(pool))]
         by_act[act] = pool[int(np.argmin(d))].track_id
     if 1 in by_act and 5 in acts and len(pool) > 1:

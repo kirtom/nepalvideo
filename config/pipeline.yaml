@@ -51,6 +51,10 @@ probe:
     max_audio_s: 120
     min_pair_confidence: 1.5
     min_confident_pairs: 3
+    # Stage 1: bulk offset from capture-activity histograms, for a device whose
+    # clock is days out (a flat battery resets an action camera's clock).
+    coarse_bin_s: 3600
+    coarse_max_offset_s: 3888000     # 45 days
   # S01.2 chapter grouping acceptance
   max_chapter_gap_s: 1.0
 
@@ -129,4 +133,17 @@ render:
   duck_lufs_speech: -22.0
 
 music:
-  license_mode: personal       # personal | cleared — OPEN QUESTION 5
+  license_mode: personal       # personal | cleared
+  # Source of track features: audio files in music/, or a playlist export.
+  # A playlist carries Spotify audio features but no dynamic range, so that
+  # dimension is masked out of the act distance rather than approximated.
+  source: playlist             # audio | playlist | auto
+  playlist_csv: null           # path; null means "the only .csv under music/"
+  # Russian-language vocals compete with the Russian narration in the round
+  # video messages, so they are excluded. Cyrillic detection is exact; the
+  # romanised-artist list is best-effort, and every exclusion is reported.
+  exclude_russian: true
+  exclude_artists: []          # extra artists to drop, by name
+  keep_artists: []             # overrides, kept even if detected as Russian
+  # Optional: drop tracks below this Spotify instrumentalness. Off by default.
+  min_instrumentalness: null

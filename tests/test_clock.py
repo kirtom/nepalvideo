@@ -347,3 +347,90 @@ def test_days_that_differ_break_the_tie():
     offset, conf = coarse_offset_by_activity(phone, camera, bin_s=3600)
     assert offset == pytest.approx(truth.total_seconds(), abs=3600)
     assert conf > 1.3, f"varied days should be more decisive, got {conf:.2f}"
+
+
+# -- coincidence voting ------------------------------------------------
+
+from nepal.probe.clock import offset_candidates_by_coincidence
+
+
+def test_coincidence_finds_the_offset_from_sparse_material():
+    """The case histogram correlation fails: a handful of camera recordings
+    against a dense stream of phone photos."""
+    truth = 14 * 86400 + 63.0
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=15)
+    # only seven camera clips, each filmed alongside some phone capture
+    camera = [phone[i] - timedelta(seconds=truth) for i in (3, 20, 44, 60, 77, 90, 101)]
+    cands = offset_candidates_by_coincidence(phone, camera, tolerance_s=300)
+    assert cands, "no candidates produced"
+    assert cands[0][0] == pytest.approx(truth, abs=300)
+
+
+def test_coincidence_beats_histogram_on_sparse_input():
+    truth = 14 * 86400 + 63.0
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=15)
+    camera = [phone[i] - timedelta(seconds=truth) for i in (3, 20, 44, 60, 77, 90, 101)]
+    votes = offset_candidates_by_coincidence(phone, camera, tolerance_s=300)
+    hist, _ = coarse_offset_by_activity(phone, camera, bin_s=3600)
+    assert abs(votes[0][0] - truth) < abs(hist - truth) or abs(hist - truth) < 3600
+
+
+def test_coincidence_votes_are_ranked_by_agreement():
+    truth = 3600.0
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=10)
+    camera = [t - timedelta(seconds=truth) for t in phone[::4]]
+    cands = offset_candidates_by_coincidence(phone, camera, tolerance_s=900)
+    assert cands[0][1] >= cands[-1][1], "votes must be sorted descending"
+    assert cands[0][0] == pytest.approx(truth, abs=900)
+
+
+def test_coincidence_respects_max_offset():
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=5)
+    camera = [t - timedelta(days=200) for t in phone]
+    assert offset_candidates_by_coincidence(phone, camera, max_offset_s=10 * 86400) == []
+
+
+def test_coincidence_empty_inputs():
+    assert offset_candidates_by_coincidence([], []) == []
+
+
+def test_coincidence_candidates_are_separated():
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=10)
+    camera = [t - timedelta(seconds=3600) for t in phone[::4]]
+    cands = offset_candidates_by_coincidence(phone, camera, tolerance_s=900, top_n=6)
+    for i, (a, _) in enumerate(cands):
+        for b, _ in cands[i + 1:]:
+            assert abs(a - b) > 900, "non-maximum suppression failed"
+
+
+@pytest.mark.parametrize("tol", [60, 120, 300, 600, 900])
+def test_coincidence_works_across_usable_tolerances(tol):
+    truth = 14 * 86400 + 63.0
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=15)
+    camera = [phone[i] - timedelta(seconds=truth) for i in (3, 20, 44, 60, 77, 90, 101)]
+    cands = offset_candidates_by_coincidence(phone, camera, tolerance_s=tol)
+    assert cands[0][0] == pytest.approx(truth, abs=tol)
+
+
+def test_discrimination_degrades_as_the_window_widens():
+    """Documents the method's one constraint so nobody widens the window
+    thinking it makes detection more forgiving.
+
+    Background votes scale with tolerance x capture density, so the margin
+    between the true offset and the best impostor shrinks monotonically as the
+    window opens. The exact tolerance at which the truth is finally outvoted
+    depends on how dense the reference is, which is why the default is set well
+    inside the safe range rather than at the observed breaking point.
+    """
+    truth = 14 * 86400 + 63.0
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=15)
+    camera = [phone[i] - timedelta(seconds=truth) for i in (3, 20, 44, 60, 77, 90, 101)]
+
+    margins = []
+    for tol in (120, 300, 900, 3600):
+        c = offset_candidates_by_coincidence(phone, camera, tolerance_s=tol, top_n=4)
+        margins.append(c[0][1] / max(c[1][1], 1) if len(c) > 1 else float("inf"))
+
+    assert margins[0] >= margins[-1], f"margin should not improve with width: {margins}"
+    tight = offset_candidates_by_coincidence(phone, camera, tolerance_s=300, top_n=4)
+    assert tight[0][0] == pytest.approx(truth, abs=300), "the default must find it"

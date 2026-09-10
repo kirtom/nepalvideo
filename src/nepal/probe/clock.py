@@ -280,6 +280,64 @@ def coarse_candidates(reference: Sequence[datetime], target: Sequence[datetime],
     return out
 
 
+def offset_candidates_by_coincidence(reference: Sequence[datetime],
+                                     target: Sequence[datetime], *,
+                                     tolerance_s: float = 300.0,
+                                     max_offset_s: float = 45 * 86400.0,
+                                     top_n: int = 12) -> list[tuple[float, int]]:
+    """Candidate offsets from capture coincidences. Returns (offset_s, votes).
+
+    Histogram cross-correlation needs both sides to be dense. A camera with a
+    few dozen recordings against a phone with a thousand photos is not that,
+    and on sparse input the correlation peak is close to arbitrary -- on the
+    fixture corpus it scored the truth outside the top four candidates.
+
+    This is the more robust formulation. Every (reference, target) pair implies
+    one offset: the value that would make those two captures simultaneous. Most
+    such implied offsets are meaningless coincidences and scatter. But whenever
+    the two devices really did film the same moment -- and over a trek they do
+    so constantly -- the implied offset is the true one. So the truth shows up
+    as the densest cluster of implied offsets, while noise stays spread out.
+
+    A Hough-style vote rather than a correlation: it does not care how sparse
+    either side is, only that some captures genuinely coincide.
+
+    ``tolerance_s`` must stay well below the reference's typical spacing
+    between captures, and this is the method's one real constraint. Background
+    votes grow with tolerance x capture density: widen the window far enough
+    and every offset finds a nearby capture, so genuine coincidences stop
+    standing out. Measured on a 1.34 captures/hour reference against seven
+    sparse clips, the true offset wins comfortably up to 900 s and is lost at
+    1800 s. The default is deliberately tighter than that, and tight enough
+    that the audio stage's +/-600 s search can refine whatever it returns.
+    """
+    if not reference or not target:
+        return []
+
+    deltas = np.array(sorted(
+        (r - t).total_seconds() for r in reference for t in target), dtype=float)
+    deltas = deltas[np.abs(deltas) <= max_offset_s]
+    if deltas.size == 0:
+        return []
+
+    # sliding window: how many implied offsets sit within tolerance of each
+    left = 0
+    scored: list[tuple[int, float]] = []
+    for right in range(deltas.size):
+        while deltas[right] - deltas[left] > tolerance_s:
+            left += 1
+        scored.append((right - left + 1, float(np.median(deltas[left:right + 1]))))
+
+    # non-maximum suppression so one broad cluster yields one candidate
+    out: list[tuple[float, int]] = []
+    for votes, centre in sorted(scored, key=lambda x: -x[0]):
+        if all(abs(centre - c) > tolerance_s for c, _ in out):
+            out.append((centre, votes))
+        if len(out) >= top_n:
+            break
+    return out
+
+
 def apply_coarse(clips: Sequence["Clip"], offset_s: float) -> list["Clip"]:
     """Shift a device's clips by a coarse offset, so the fine stage searches
     around the right place."""
