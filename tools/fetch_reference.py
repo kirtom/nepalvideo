@@ -25,6 +25,7 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -107,15 +108,70 @@ def fetch_geonames(country: str, dest: Path) -> bool:
 
 BBox = tuple[float, float, float, float]
 
+# A trek is at most a couple of hundred kilometres end to end. Anything much
+# further from the centre of the fixes is a photo from home, an airport, or a
+# stale cached location -- not part of the route.
+DEFAULT_MAX_RADIUS_KM = 200.0
 
-def bbox_from_db(db_path: Path) -> tuple[BBox, str] | None:
-    """Track extent from the database.
+# Refuse to fetch more than this without an explicit override. Four tiles covers
+# a Nepal trek; a hundred means the extent is wrong, and silently downloading
+# 2.6 GB is worse than stopping.
+DEFAULT_MAX_TILES = 12
 
-    Tries gps_points first (present after S02.1), then the assets table, whose
-    lat/lon come straight from photo EXIF and are therefore populated by S01.
-    Depending only on gps_points created a deadlock: the tiles are needed to
-    compute altitude in S02, but the track that says which tiles to fetch is
-    only written by S02.
+
+def robust_bbox(points: Sequence[tuple[float, float]], *,
+                max_radius_km: float = DEFAULT_MAX_RADIUS_KM
+                ) -> tuple[BBox, int, float] | None:
+    """Bounding box of the trek, ignoring fixes that are not on it.
+
+    Taking a raw min/max over every GPS fix is maximally sensitive to a single
+    outlier, and a corpus like this is full of them: planning photos taken at
+    home, an airport layover, a stale cached location from the last place with
+    signal. One photo from Dubai turns a four-tile Everest box into 132 tiles
+    and 3.4 GB; one from Berlin gives 1,950 tiles and 49 GB.
+
+    So the centre is taken as the median of the fixes -- which no outlier can
+    move -- and points beyond ``max_radius_km`` of it are dropped before the
+    extent is measured. That preserves genuine one-off extremes like the summit
+    push, which a percentile clip would discard.
+
+    Returns (bbox, n_dropped, furthest_dropped_km).
+    """
+    import statistics
+    from nepal.spine.gps import haversine_m
+
+    pts = [(float(la), float(lo)) for la, lo in points
+           if la is not None and lo is not None and not (la == 0 and lo == 0)]
+    if not pts:
+        return None
+
+    c_lat = statistics.median([p[0] for p in pts])
+    c_lon = statistics.median([p[1] for p in pts])
+
+    kept, dropped_km = [], []
+    for la, lo in pts:
+        d_km = haversine_m(c_lat, c_lon, la, lo) / 1000.0
+        if d_km <= max_radius_km:
+            kept.append((la, lo))
+        else:
+            dropped_km.append(d_km)
+
+    if not kept:
+        return None
+    lats = [p[0] for p in kept]
+    lons = [p[1] for p in kept]
+    return ((min(lats), min(lons), max(lats), max(lons)),
+            len(dropped_km), max(dropped_km) if dropped_km else 0.0)
+
+
+def points_from_db(db_path: Path) -> tuple[list[tuple[float, float]], str] | None:
+    """Every GPS fix in the database.
+
+    gps_points first (written by S02.1), then the assets table, whose lat/lon
+    come straight from photo EXIF and are therefore populated by S01. Depending
+    only on gps_points created a deadlock: the tiles are needed to compute
+    altitude in S02, but the track that says which tiles to fetch is only
+    written by S02.
     """
     if not db_path.exists():
         return None
@@ -127,23 +183,23 @@ def bbox_from_db(db_path: Path) -> tuple[BBox, str] | None:
     try:
         for table, label in (("gps_points", "GPS track"), ("assets", "photo EXIF")):
             try:
-                row = conn.execute(
-                    f"SELECT MIN(lat), MIN(lon), MAX(lat), MAX(lon) FROM {table} "
-                    "WHERE lat IS NOT NULL AND lon IS NOT NULL").fetchone()
+                rows = conn.execute(
+                    f"SELECT lat, lon FROM {table} "
+                    "WHERE lat IS NOT NULL AND lon IS NOT NULL").fetchall()
             except sqlite3.Error:
                 continue
-            if row and row[0] is not None:
-                return (float(row[0]), float(row[1]), float(row[2]), float(row[3])), label
+            if rows:
+                return [(r[0], r[1]) for r in rows], label
     finally:
         conn.close()
     return None
 
 
-def bbox_from_exif(data_root: Path) -> tuple[BBox, str] | None:
-    """Track extent read straight off the phone photos.
+def points_from_exif(data_root: Path) -> tuple[list[tuple[float, float]], str] | None:
+    """GPS fixes read straight off the phone photos.
 
-    Makes this tool independent of pipeline order entirely: it works before
-    anything has been run, on nothing but the delivered tree.
+    Makes this tool independent of pipeline order: it works before anything has
+    been run, on nothing but the delivered tree.
     """
     import shutil
     import subprocess
@@ -157,29 +213,37 @@ def bbox_from_exif(data_root: Path) -> tuple[BBox, str] | None:
         proc = subprocess.run(
             ["exiftool", "-q", "-r", "-n", "-if", "$GPSLatitude",
              "-p", "$GPSLatitude,$GPSLongitude", str(target)],
-            capture_output=True, text=True, timeout=900)
+            capture_output=True, text=True, timeout=1800)
     except (subprocess.TimeoutExpired, OSError) as exc:
         print(f" failed: {exc}")
         return None
 
-    lats, lons = [], []
+    pts = []
     for line in proc.stdout.splitlines():
         parts = line.strip().split(",")
         if len(parts) != 2:
             continue
         try:
-            la, lo = float(parts[0]), float(parts[1])
+            pts.append((float(parts[0]), float(parts[1])))
         except ValueError:
             continue
-        if la == 0 and lo == 0:          # the null-island signature of a bad fix
-            continue
-        lats.append(la)
-        lons.append(lo)
-    if not lats:
+    if not pts:
         print(" no fixes found")
         return None
-    print(f" {len(lats)} fixes")
-    return (min(lats), min(lons), max(lats), max(lons)), f"{len(lats)} phone photos"
+    print(f" {len(pts)} fixes")
+    return pts, f"{len(pts)} phone photos"
+
+
+def prune_tiles(keep: Sequence[str], tile_dir: Path, *, dry_run: bool) -> list[str]:
+    """Remove tiles outside the needed set -- cleanup after an over-large fetch."""
+    if not tile_dir.exists():
+        return []
+    keeping = set(keep)
+    victims = sorted(f for f in tile_dir.glob("*.hgt") if f.stem not in keeping)
+    for f in victims:
+        if not dry_run:
+            f.unlink(missing_ok=True)
+    return [f.stem for f in victims]
 
 
 def main() -> int:
@@ -195,6 +259,15 @@ def main() -> int:
     ap.add_argument("--skip-geonames", action="store_true")
     ap.add_argument("--pad", type=float, default=0.1,
                     help="degrees of padding around the track bbox (default 0.1)")
+    ap.add_argument("--max-radius-km", type=float, default=DEFAULT_MAX_RADIUS_KM,
+                    help="reject GPS fixes further than this from the route centre "
+                         f"(default {DEFAULT_MAX_RADIUS_KM:.0f})")
+    ap.add_argument("--max-tiles", type=int, default=DEFAULT_MAX_TILES,
+                    help=f"refuse to fetch more than this many tiles "
+                         f"(default {DEFAULT_MAX_TILES})")
+    ap.add_argument("--prune", action="store_true",
+                    help="delete tiles outside the needed set (cleans up an "
+                         "over-large earlier fetch)")
     args = ap.parse_args()
 
     from nepal.config import Config
@@ -210,7 +283,17 @@ def main() -> int:
         if args.bbox:
             found = (tuple(args.bbox), "--bbox")
         else:
-            found = bbox_from_db(cfg.db_path) or bbox_from_exif(cfg.data_root)
+            pts = points_from_db(cfg.db_path) or points_from_exif(cfg.data_root)
+            if pts:
+                reduced = robust_bbox(pts[0], max_radius_km=args.max_radius_km)
+                if reduced:
+                    bbox, n_dropped, furthest = reduced
+                    if n_dropped:
+                        print(f"  ignored {n_dropped} fix(es) more than "
+                              f"{args.max_radius_km:.0f} km from the route centre "
+                              f"(furthest {furthest:,.0f} km) -- photos from home or "
+                              f"in transit, not part of the trek")
+                    found = (bbox, f"{pts[1]}, outliers rejected")
         if found is None:
             print("could not determine the trek extent. Tried: gps_points and assets "
                   f"in {cfg.db_path}, then phone photo EXIF under {cfg.data_root}.\n"
@@ -225,6 +308,15 @@ def main() -> int:
                                    hi_la + args.pad, hi_lo + args.pad)
             print(f"SRTM tiles for bbox {lo_la:.3f},{lo_lo:.3f} .. "
                   f"{hi_la:.3f},{hi_lo:.3f} (pad {args.pad}): {len(tiles)}")
+            if len(tiles) > args.max_tiles:
+                print(f"\n  REFUSING: {len(tiles)} tiles is {len(tiles)*26/1024:.1f} GB, "
+                      f"above --max-tiles {args.max_tiles}.\n"
+                      f"  A Nepal trek needs 2-4. An extent this large means the GPS "
+                      f"fixes span more than the route --\n"
+                      f"  check with --dry-run, narrow it with --max-radius-km, or set "
+                      f"it explicitly with --bbox.")
+                return 1
+
             present = [t for t in tiles if (srtm_dir / f"{t}.hgt").exists()]
             missing = [t for t in tiles if t not in present]
             for t in tiles:
@@ -242,6 +334,16 @@ def main() -> int:
                   f"{len(res['failed'])} failed")
             if res["failed"]:
                 rc = 1
+            if args.prune:
+                removed = prune_tiles(tiles, srtm_dir, dry_run=args.dry_run)
+                if removed:
+                    verb = "would remove" if args.dry_run else "removed"
+                    print(f"  {verb} {len(removed)} unneeded tile(s), "
+                          f"{len(removed)*26/1024:.1f} GB: "
+                          f"{', '.join(removed[:8])}"
+                          f"{' ...' if len(removed) > 8 else ''}")
+                else:
+                    print("  no unneeded tiles to remove")
 
     if not args.skip_geonames:
         print(f"GeoNames {args.country} -> {geo_path.parent}")

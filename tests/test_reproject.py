@@ -81,8 +81,20 @@ def test_flat_graph_skips_v360_entirely():
 
 # -- plan and command --------------------------------------------------
 
-def test_plan_names_outputs_by_recording_and_yaw(tmp_path):
+def test_plan_defaults_to_phase_a_proxy_only(tmp_path):
+    """The default is the two-phase design: no yaw videos, since nothing
+    consumes them as video until S07 conforms the selected shots."""
     p = plan(tmp_path / "src.lrv", "rec_1", tmp_path / "work", is_360=True, fov_deg=196)
+    assert [path.name for _, path, _ in p.outputs] == ["rec_1_eq.mp4"]
+    assert p.yaws == ()
+    assert p.audio_path.name == "rec_1.wav"
+    assert "split" not in p.filter_complex, "a split with unused outputs fails the graph"
+
+
+def test_plan_names_outputs_by_recording_and_yaw(tmp_path):
+    """The spec's single-pass design, still reachable with yaw_videos=True."""
+    p = plan(tmp_path / "src.lrv", "rec_1", tmp_path / "work", is_360=True,
+             fov_deg=196, yaw_videos=True)
     names = [path.name for _, path, _ in p.outputs]
     assert names == ["rec_1_eq.mp4", "rec_1_y0.mp4", "rec_1_y90.mp4",
                      "rec_1_y180.mp4", "rec_1_y270.mp4"]
@@ -96,7 +108,8 @@ def test_plan_for_flat_source_has_one_output(tmp_path):
 
 
 def test_command_maps_every_output(tmp_path):
-    p = plan(tmp_path / "s.lrv", "r", tmp_path / "w", is_360=True, fov_deg=196)
+    p = plan(tmp_path / "s.lrv", "r", tmp_path / "w", is_360=True, fov_deg=196,
+             yaw_videos=True)
     cmd = build_command(p, encoder="libx264")
     for label, path, _ in p.outputs:
         assert f"[{label}]" in cmd
@@ -106,14 +119,14 @@ def test_command_maps_every_output(tmp_path):
 
 
 def test_command_omits_audio_when_the_source_is_silent(tmp_path):
-    p = plan(tmp_path / "s.lrv", "r", tmp_path / "w", is_360=True)
+    p = plan(tmp_path / "s.lrv", "r", tmp_path / "w", is_360=True, yaw_videos=True)
     cmd = build_command(p, encoder="libx264", has_audio=False)
     assert "0:a:0" not in cmd
     assert str(p.audio_path) not in cmd
 
 
 def test_command_omits_hwaccel_when_none_available(tmp_path):
-    p = plan(tmp_path / "s.lrv", "r", tmp_path / "w", is_360=True)
+    p = plan(tmp_path / "s.lrv", "r", tmp_path / "w", is_360=True, yaw_videos=True)
     assert "-hwaccel" not in build_command(p, hwaccel=None)
     assert "-hwaccel" in build_command(p, hwaccel="cuda")
 
@@ -196,3 +209,38 @@ def test_hwaccel_detection_is_cached():
     reset_detection_cache()
     first = detect_hwaccel()
     assert detect_hwaccel() == first
+
+
+# -- phase B stills ----------------------------------------------------
+
+from nepal.process.reproject import (build_proxy_only_graph, yaw_still_command,
+                                     flat_still_command)
+
+
+def test_proxy_only_graph_has_no_split():
+    fc, labels = build_proxy_only_graph(196)
+    assert "split" not in fc
+    assert labels == ["eqout"]
+    assert "v360=input=dfisheye:output=e" in fc
+
+
+def test_yaw_still_uses_the_signed_yaw(tmp_path):
+    cmd = yaw_still_command(tmp_path / "s.lrv", 4.0, 270, tmp_path / "f.jpg", fov_deg=196)
+    joined = " ".join(cmd)
+    assert "yaw=-90" in joined and "yaw=270" not in joined
+
+
+def test_yaw_still_reads_from_the_source_not_a_proxy(tmp_path):
+    """Sampling the original avoids a generation of H.264 loss before face
+    embedding and CLIP."""
+    src = tmp_path / "original.insv"
+    cmd = yaw_still_command(src, 4.0, 0, tmp_path / "f.jpg", fov_deg=196)
+    assert str(src) in cmd
+    assert "-ss" in cmd and "4.000" in cmd
+    assert cmd[cmd.index("-frames:v") + 1] == "1"
+
+
+def test_flat_still_skips_reprojection(tmp_path):
+    cmd = flat_still_command(tmp_path / "s.mp4", 2.0, tmp_path / "f.jpg")
+    assert "v360" not in " ".join(cmd)
+    assert "scale=960:540" in " ".join(cmd)
