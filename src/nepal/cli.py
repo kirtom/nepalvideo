@@ -4,6 +4,8 @@
     nepal s01 [--force] [--skip-fov] [--skip-clock]
     nepal fetch-reference        SRTM tiles + GeoNames gazetteer
     nepal s02 [--force] [--skip-asr]
+    nepal s03 [--force]          per-clip processing (S03.0 photo shots)
+    nepal fov-check              Gate 1 seam comparison sheets
     nepal report                 the chronological checkpoint table
     nepal decisions              auto-solved values with confidence
     nepal diagnose               when the checkpoint table looks wrong
@@ -55,6 +57,9 @@ def main(argv: list[str] | None = None) -> int:
     from nepal import diagnose as _diagnose
     _diagnose.add_arguments(pd)
 
+    p3 = sub.add_parser("s03", help="S03 -- per-clip processing (S03.0 photo shots)")
+    p3.add_argument("--force", action="store_true", help="recompute completed sub-steps")
+
     pfc = sub.add_parser("fov-check",
                          help="render the Gate 1 FOV comparison sheets")
     pfc.add_argument("--frames", type=int, default=2,
@@ -94,6 +99,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "diagnose":
         from nepal import diagnose
         return diagnose.run(cfg, args)
+
+    if args.cmd == "s03":
+        from nepal.stages import s03_process
+        rep = s03_process.run(cfg, force=args.force)
+        ph = rep.get("photos") or {}
+        if ph.get("error"):
+            print(f"S03.0 {ph['error']}")
+            return 1
+        if not ph.get("skipped"):
+            print(f"\n=== S03.0 photo shots ===")
+            print(f"dated photos : {ph.get('n_photos', 0)}")
+            print(f"became shots : {ph.get('n_shots', 0)}")
+            for act in sorted(ph.get("per_act") or {}):
+                print(f"      act {act} : {ph['per_act'][act]}")
+            for reason, n in sorted((ph.get("rejected") or {}).items(),
+                                    key=lambda kv: -kv[1]):
+                print(f"  {n:>5} rejected: {reason}")
+        return 0
 
     if args.cmd == "fov-check":
         import json as _json

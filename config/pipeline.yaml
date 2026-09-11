@@ -34,6 +34,17 @@ film:
   # regardless of material; 1 extends to whatever the material supports. Low by
   # design -- surplus footage is a weak reason to make a film longer.
   growth_bias: 0.35
+  # The film is motion; stills are punctuation. This is the share of each act's
+  # runtime that photographs may occupy -- applied per act, so it cannot pool
+  # into one place and turn Act 1 into a slideshow. Only the best stills compete
+  # for it; they are never ranked against footage, which they would either lose
+  # to everywhere or beat unfairly (a photograph wins every stability contest by
+  # not moving).
+  photo_share: 0.10
+  # Per-act overrides. Act 4 is the one worth a deliberate decision: the brief
+  # makes it one swell into a hard cut to silence. Set it to 0.0 to keep stills
+  # out of the summit entirely.
+  photo_share_by_act: {}
   # How much keepable footage a minute of finished film is cut from. The film
   # counts nothing as surplus until it has this many times its own length in
   # shots that survive the quality gate.
@@ -135,6 +146,15 @@ quality_curves:
   camera:   {min_sharpness: 4.0, max_exposure_pen: 0.15, min_stability: 0.35, min_duration_s: 1.5}
   phone:    {min_sharpness: 3.5, max_exposure_pen: 0.20, min_stability: 0.30, min_duration_s: 1.5}
   telegram: {min_sharpness: 2.0, max_exposure_pen: 0.35, min_stability: 0.15, min_duration_s: 1.0}
+
+process:
+  # S03.0 stills. Photographs are decoded at this size for the sharpness and
+  # exposure measures -- full resolution changes the numbers very little and
+  # costs a great deal on seven hundred files.
+  photo_analysis_px: 1024
+  # How long a still is held before S06 snaps it to the beat grid. Long enough
+  # to read, short enough not to stall the cut; a panorama earns 25% longer.
+  photo_slot_s: 3.0
 
 semantic:
   max_caption_shots: 2500     # THE ONLY UNBOUNDED COST — spec section 8.1

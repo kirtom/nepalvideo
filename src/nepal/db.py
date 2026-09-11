@@ -56,7 +56,12 @@ CREATE TABLE IF NOT EXISTS recordings (
 -- Detected shots -- the unit of selection
 CREATE TABLE IF NOT EXISTS shots (
   shot_id       TEXT PRIMARY KEY,
-  recording_id  TEXT NOT NULL REFERENCES recordings(recording_id),
+  -- A video shot spans part of a recording; a photo shot is one asset held on
+  -- screen. Exactly one of the two is set, which the CHECK enforces rather
+  -- than leaving to every query downstream.
+  recording_id  TEXT REFERENCES recordings(recording_id),
+  asset_id      TEXT REFERENCES assets(asset_id),
+  media_kind    TEXT NOT NULL DEFAULT 'video',   -- video | photo
   start_s       REAL NOT NULL,
   end_s         REAL NOT NULL,
   start_utc     TEXT,
@@ -82,7 +87,8 @@ CREATE TABLE IF NOT EXISTS shots (
   score_total   REAL,
   vote          INTEGER,
   tag_levity    INTEGER DEFAULT 0,
-  status        TEXT DEFAULT 'candidate'
+  status        TEXT DEFAULT 'candidate',
+  CHECK ((recording_id IS NOT NULL) <> (asset_id IS NOT NULL))
 );
 
 CREATE TABLE IF NOT EXISTS gps_points (
@@ -190,8 +196,39 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 MIGRATIONS: tuple[tuple[str, str, str], ...] = ()
 
 
+def _rebuild_shots_for_photo_slots(conn: sqlite3.Connection) -> bool:
+    """Relax shots.recording_id so a photo can be a shot.
+
+    A photo has no recording -- it is one asset held on screen -- but the
+    column was NOT NULL, and SQLite cannot relax that with ALTER TABLE. The
+    table is empty until S03 runs, so it is dropped and recreated from SCHEMA
+    rather than copied through a temporary table.
+
+    Refused if the table has rows: rebuilding then would discard a cut, and
+    silently discarding a cut is never the right trade. Returns whether a
+    rebuild happened.
+    """
+    info = list(conn.execute("PRAGMA table_info(shots)"))
+    if not info:
+        return False
+    notnull = {r[1]: r[3] for r in info}
+    if not notnull.get("recording_id"):
+        return False                      # already nullable
+    n = conn.execute("SELECT COUNT(*) FROM shots").fetchone()[0]
+    if n:
+        raise RuntimeError(
+            f"shots holds {n} row(s) under the old schema, where recording_id "
+            f"is NOT NULL and a photo cannot be a shot. Rebuilding would "
+            f"discard them. Re-run S03 on a fresh database, or drop the table "
+            f"deliberately if those shots are no longer wanted."
+        )
+    conn.execute("DROP TABLE shots")
+    return True
+
+
 def init(db_path: str | Path) -> sqlite3.Connection:
     conn = connect(db_path)
+    _rebuild_shots_for_photo_slots(conn)
     conn.executescript(SCHEMA)
     for table, column, coltype in MIGRATIONS:
         existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
