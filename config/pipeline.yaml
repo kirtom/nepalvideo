@@ -3,11 +3,15 @@
 
 project:
   name: nepal
-  # Where the raw tree lives when running locally (Milestone 1-2).
-  data_root: ./nepal_data
-  # Working directory for derived artefacts.
-  work_root: ./work
-  db_path: ./work/db/nepal.sqlite
+  # The delivered media tree. Absolute, so it is unambiguous.
+  data_root: /data/projects/nepal_data
+  # Derived artefacts: proxies, yaw views, sampled frames, audio, reports.
+  # Kept on the same volume as the media rather than inside the repository,
+  # because S03 writes a 540p equirect proxy plus four rectilinear yaw views
+  # and a 16 kHz audio track for every recording -- on the order of 10-15 GB
+  # for 4.9 hours of footage, which does not belong on a system disk.
+  work_root: /data/projects/nepal_work
+  db_path: /data/projects/nepal_work/db/nepal.sqlite
 
 aws:
   region: eu-north-1

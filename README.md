@@ -49,13 +49,18 @@ cd nepalvideo
 pip install -e .
 ```
 
-Then point `project.data_root` at wherever the media actually lives. An
-absolute path is clearest:
+`config/pipeline.yaml` is already pointed at the delivered media:
 
 ```yaml
 project:
-  data_root: /Users/you/Nepal/nepal_data      # or ../nepal_data, or ~/Nepal/nepal_data
+  data_root: /data/projects/nepal_data
+  work_root: /data/projects/nepal_work
 ```
+
+`work_root` sits beside the media rather than inside the repository on purpose:
+S03 writes a 540p equirect proxy, four rectilinear yaw views and a 16 kHz audio
+track for every recording, which is on the order of 10–15 GB for 4.9 hours of
+footage. Move it if that volume is tight.
 
 Relative paths in the config resolve against the **project root** (the folder
 containing `config/`), not against your shell's working directory, so the same
@@ -66,8 +71,8 @@ resolved to before running anything heavy:
 nepal doctor        # prints every resolved path, and what is missing
 ```
 
-`work/` and `data/` are created inside the repo and are already git-ignored, as
-is `nepal_data/` should you choose to symlink it in.
+`data/` holds the fetched reference data (SRTM tiles, GeoNames) inside the repo
+and is git-ignored; recreate it any time with `tools/fetch_reference.py`.
 
 Then:
 
