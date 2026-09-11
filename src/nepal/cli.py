@@ -1,9 +1,16 @@
 """Command line entry point.
 
+    nepal doctor                 check binaries, packages and resolved paths
     nepal s01 [--force] [--skip-fov] [--skip-clock]
-    nepal s02
-    nepal report
-    nepal decisions
+    nepal fetch-reference        SRTM tiles + GeoNames gazetteer
+    nepal s02 [--force] [--skip-asr]
+    nepal report                 the chronological checkpoint table
+    nepal decisions              auto-solved values with confidence
+    nepal diagnose               when the checkpoint table looks wrong
+
+Everything runs through this one entry point on purpose: a console script uses
+the interpreter the package was installed into, so it cannot pick up a
+different environment the way `python some_script.py` can.
 """
 from __future__ import annotations
 
@@ -38,6 +45,16 @@ def main(argv: list[str] | None = None) -> int:
     p2.add_argument("--force", action="store_true")
     p2.add_argument("--skip-asr", action="store_true", help="skip round-video transcription")
 
+    pf = sub.add_parser("fetch-reference",
+                        help="download SRTM elevation tiles and the GeoNames gazetteer")
+    from nepal import reference as _reference
+    _reference.add_arguments(pf)
+
+    pd = sub.add_parser("diagnose",
+                        help="report what S02 built, when the checkpoint looks wrong")
+    from nepal import diagnose as _diagnose
+    _diagnose.add_arguments(pd)
+
     sub.add_parser("decisions", help="print the auto-solved decisions table")
     sub.add_parser("report", help="print the chronological table (the Milestone 1 checkpoint)")
     sub.add_parser("doctor", help="check external binaries and optional packages")
@@ -60,6 +77,14 @@ def main(argv: list[str] | None = None) -> int:
         rep = s02_spine.run(cfg, force=args.force, skip_asr=args.skip_asr)
         print(json.dumps(rep, indent=2, default=str)[:4000])
         return 0
+
+    if args.cmd == "fetch-reference":
+        from nepal import reference
+        return reference.run(cfg, args)
+
+    if args.cmd == "diagnose":
+        from nepal import diagnose
+        return diagnose.run(cfg, args)
 
     if args.cmd == "decisions":
         from nepal import db
@@ -115,7 +140,31 @@ def _print_s01(rep: dict) -> None:
 
 
 def _doctor(cfg) -> int:
+    import shutil
+    import sys as _sys
     from nepal.util import proc
+
+    # An environment split is the likeliest cause of a confusing ImportError:
+    # `nepal` is a console script bound to the interpreter it was installed
+    # into, while a bare `python` picks up whatever is active. Showing both
+    # makes the mismatch obvious instead of surfacing as "No module named yaml".
+    print(f"interpreter : {_sys.executable}")
+    print(f"python      : {_sys.version.split()[0]}")
+    which_python = shutil.which("python") or shutil.which("python3")
+    if which_python:
+        import subprocess
+        try:
+            other = subprocess.run([which_python, "-c", "import sys; print(sys.executable)"],
+                                   capture_output=True, text=True, timeout=20).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            other = ""
+        if other and other != _sys.executable:
+            print(f"  NOTE  `python` on your PATH is a DIFFERENT interpreter:\n"
+                  f"        {other}\n"
+                  f"        Run everything as `nepal ...` rather than "
+                  f"`python tools/...`, or the two environments will disagree "
+                  f"about which packages exist.")
+    print()
 
     # Where the pipeline will actually read and write. Relative paths in the
     # config resolve against the config file's project root, not the working

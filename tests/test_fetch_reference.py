@@ -4,7 +4,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import pytest
 
-from tools.fetch_reference import (points_from_db, points_from_exif, robust_bbox,
+from nepal.reference import (points_from_db, points_from_exif, robust_bbox,
                                    prune_tiles, DEFAULT_MAX_RADIUS_KM)
 from nepal.spine.dem import tiles_for_bbox
 from nepal import db

@@ -77,12 +77,19 @@ and is git-ignored; recreate it any time with `tools/fetch_reference.py`.
 Then:
 
 ```bash
-nepal s01                         # manifest, chapters, FOV, clock offsets
-python tools/fetch_reference.py   # SRTM tiles + GeoNames gazetteer (once)
-nepal s02                         # track, altitude, places, telegram, music
-nepal report                      # the chronological table -- the checkpoint
-nepal decisions                   # auto-solved values, with confidence
+nepal s01                # manifest, chapters, FOV, clock offsets
+nepal fetch-reference    # SRTM tiles + GeoNames gazetteer (once)
+nepal s02                # track, altitude, places, telegram, music
+nepal report             # the chronological table -- the checkpoint
+nepal decisions          # auto-solved values, with confidence
+nepal diagnose           # when the checkpoint table looks wrong
 ```
+
+Run everything through `nepal`, not `python tools/...`. A console script is
+bound to the interpreter the package was installed into; a bare `python` picks
+up whatever environment happens to be active, which surfaces as a confusing
+`ModuleNotFoundError`. `nepal doctor` warns when the two differ. The scripts
+under `tools/` are thin shims kept for use before installation.
 
 Which SRTM tiles to fetch depends on where the trek was, so the fetcher works
 that out for itself — from the merged GPS track if S02 has run, otherwise from
@@ -171,10 +178,11 @@ src/nepal/
   probe/                 S01: manifest, chapters, FOV solver, clock solver
   spine/                 S02: gps, dem, geocode, telegram, music, playlist, acts
   stages/                stage drivers
+  reference.py           SRTM tiles and GeoNames gazetteer (nepal fetch-reference)
+  diagnose.py            spine diagnostics (nepal diagnose)
 tools/make_fixtures.py    synthetic nepal_data/ with ground truth
 tools/survey_data.sh      read-only survey of a delivered nepal_data/
 tools/survey_camera.sh    camera-clock and music deep dive
-tools/fetch_reference.py  SRTM tiles and GeoNames gazetteer
 tests/                   unit tests + end-to-end
 ```
 
