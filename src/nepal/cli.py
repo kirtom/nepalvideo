@@ -139,6 +139,26 @@ def _print_s01(rep: dict) -> None:
     print()
 
 
+def _git_head(path) -> str:
+    """`<short sha> <subject>` for the tree containing path, plus a dirty mark."""
+    import subprocess
+    def _git(*args: str) -> str:
+        try:
+            r = subprocess.run(["git", "-C", str(path), *args],
+                               capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return r.stdout.strip() if r.returncode == 0 else ""
+
+    sha = _git("rev-parse", "--short", "HEAD")
+    if not sha:
+        return ""
+    subject = _git("log", "-1", "--format=%s")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+    dirty = " +local changes" if _git("status", "--porcelain") else ""
+    return f"{sha} ({branch}){dirty}  {subject[:60]}"
+
+
 def _doctor(cfg) -> int:
     import pathlib
     import shutil
@@ -173,6 +193,26 @@ def _doctor(cfg) -> int:
                   f"        Run everything as `nepal ...` rather than "
                   f"`python tools/...`, or the two environments will disagree "
                   f"about which packages exist.")
+
+    # Which copy of the source is actually running. A non-editable install
+    # copies the package into site-packages, so `git pull` changes the checkout
+    # and nothing else -- the fix is pulled but not running, and every report
+    # looks unchanged for reasons no amount of re-running will reveal.
+    import nepal as _pkg
+    pkg_dir = pathlib.Path(_pkg.__file__).resolve().parent
+    print(f"package     : {pkg_dir}")
+    repo_src = (cfg.base_dir / "src" / "nepal").resolve()
+    if pkg_dir == repo_src:
+        print(f"              (editable -- this checkout is what runs)")
+    else:
+        print(f"  WARN  the running code is a COPY, not this checkout:\n"
+              f"        checkout    {repo_src}\n"
+              f"        `git pull` will not change what `nepal` runs. Either\n"
+              f"        reinstall after every pull, or install once as editable:\n"
+              f"          pip install -e .")
+    head = _git_head(repo_src)
+    if head:
+        print(f"checkout    : {head}")
     print()
 
     # Where the pipeline will actually read and write. Relative paths in the

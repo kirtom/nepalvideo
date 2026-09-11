@@ -688,6 +688,17 @@ def print_chronology(cfg: Config) -> int:
         "SELECT COUNT(*) n, SUM(CASE WHEN kind IN ('video360','video_flat') THEN "
         "COALESCE(duration_s,0) ELSE 0 END) secs FROM assets").fetchone()
     print("-" * 81)
+    # This table reads the database, not the media. A fix to a stage changes
+    # nothing here until that stage is re-run, and an unchanged report is the
+    # same whether the fix is wrong or was never applied. The timestamps
+    # distinguish the two.
+    built = {f"{r['stage']}.{r['unit_id']}": str(r["updated_at"])[:16]
+             for r in conn.execute("SELECT stage, unit_id, updated_at "
+                                   "FROM stage_units WHERE status='done'")}
+    if built:
+        shown = [(k, built[k]) for k in ("S01.manifest", "S01.clock", "S02.geotag",
+                                         "S02.music", "S02.acts") if k in built]
+        print("computed: " + ", ".join(f"{k}={v}" for k, v in shown or built.items()))
     secs = tot["secs"] or 0
     dur = f"{secs/3600:.1f} h" if secs >= 3600 else f"{secs/60:.1f} min"
     print(f"{tot['n']} assets, {dur} of video, {len(days)} days carrying material")
