@@ -123,10 +123,30 @@ def test_act_for_finds_the_containing_act():
     assert act_for(BASE + timedelta(days=6, hours=12), b) == 4
 
 
-def test_act_for_before_and_after_the_film_clamps():
+def test_act_for_outside_every_act_is_nowhere():
+    """Material outside the act windows must not be pulled into the nearest act.
+
+    The windows already say how far the film reaches; clamping past them filed
+    276 clips from a camera whose clock read eighteen months late under the
+    Descent, at 5147 m on the pass. Returning None makes the loss visible.
+    """
     b = segment_acts(EBC)
-    assert act_for(datetime(2020, 1, 1, tzinfo=UTC), b) == 1
-    assert act_for(datetime(2030, 1, 1, tzinfo=UTC), b) == 5
+    assert act_for(datetime(2020, 1, 1, tzinfo=UTC), b) is None
+    assert act_for(datetime(2030, 1, 1, tzinfo=UTC), b) is None
+
+
+def test_act_for_still_accepts_the_edges_themselves():
+    b = segment_acts(EBC)
+    first, last = by_act(b)[1], by_act(b)[5]
+    # this fixture carries no planning material, so act 1 is a zero-length
+    # boundary and act 2 claims the shared instant -- the opening act wins
+    assert act_for(first.start_utc, b) is not None
+    assert act_for(last.end_utc, b) == 5
+    # a sub-second overshoot is rounding, not misdated material
+    assert act_for(last.end_utc + timedelta(milliseconds=500), b) == 5
+    assert act_for(first.start_utc - timedelta(milliseconds=500), b) == 1
+    # a minute past is not
+    assert act_for(last.end_utc + timedelta(minutes=1), b) is None
 
 
 def test_act_for_on_a_shared_boundary_picks_the_opening_act():

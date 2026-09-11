@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import argparse
 import collections
+import json
+import re
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Nepal's bounding box, generously padded.
@@ -27,6 +30,97 @@ def hr(title: str) -> None:
 def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--top", type=int, default=25,
                     help="how many music tracks to list (default 25)")
+    ap.add_argument("--timestamps", action="store_true",
+                    help="why unreachable assets are dated the way they are: "
+                         "re-reads a sample of the files and prints every time and "
+                         "GPS tag exiftool can see in them")
+    ap.add_argument("--sample", type=int, default=4,
+                    help="files per outlier day to re-read with --timestamps")
+
+
+def timestamps_report(cfg, conn, sample: int) -> None:
+    """Where the dates on unreachable assets actually came from.
+
+    A clip dated eighteen months after the trek is either real material from
+    that date or a camera whose clock reset, and the two are indistinguishable
+    from the database alone. The file itself distinguishes them: a camera with a
+    GPS fix writes satellite time alongside its own, so if GPSDateTime is there
+    the stamp is recoverable, and if it is not, only the clip's position can
+    date it.
+    """
+    from nepal.spine import acts as acts_mod
+    from nepal.util import proc
+
+    hr("dates on assets that fall outside every act")
+    raw = db_decision(conn, "act_boundaries")
+    if not raw:
+        print("  no act boundaries recorded -- run `nepal s02` first")
+        return
+    bounds = [acts_mod.ActBoundary(b["act"], _iso(b["start_utc"]), _iso(b["end_utc"]),
+                                  b.get("method", "")) for b in json.loads(raw)]
+
+    rows = [r for r in conn.execute(
+        "SELECT s3_key, source, kind, created_at, created_at_utc, lat, lon, "
+        "COALESCE(duration_s,0) dur FROM assets WHERE created_at_utc IS NOT NULL "
+        "AND kind IN ('video360','video_flat','photo') ORDER BY created_at_utc")]
+    lost = [r for r in rows
+            if acts_mod.act_for(_iso(r["created_at_utc"]), bounds) is None]
+    if not lost:
+        print("  none -- every dated asset lands in an act")
+        return
+
+    by_day: dict[str, list] = {}
+    for r in lost:
+        by_day.setdefault(str(r["created_at_utc"])[:10], []).append(r)
+    print(f"  {len(lost)} asset(s) across {len(by_day)} day(s):")
+    for day, rs in sorted(by_day.items()):
+        secs = sum(r["dur"] for r in rs if r["kind"] != "photo")
+        withgps = sum(1 for r in rs if r["lat"] is not None)
+        srcs = ",".join(sorted({r["source"] for r in rs}))
+        print(f"    {day}  {len(rs):>4} asset(s)  {secs/60:>6.1f} min video  "
+              f"{withgps:>4} with GPS  source={srcs}")
+
+    if not proc.have("exiftool"):
+        print("\n  exiftool is not on PATH -- cannot re-read the files")
+        return
+
+    print(f"\n  re-reading up to {sample} file(s) per day. Every time and GPS tag "
+          f"exiftool\n  can see is listed; what matters is whether GPSDateTime is "
+          f"among them.")
+    want = re.compile(r"(date|time|gps)", re.I)
+    for day, rs in sorted(by_day.items()):
+        for r in rs[:sample]:
+            path = cfg.data_root / str(r["s3_key"]).removeprefix("raw/")
+            print(f"\n  -- {path.name}  (db: created_at={r['created_at']} "
+                  f"-> utc={r['created_at_utc']})")
+            if not path.exists():
+                print(f"     file not found at {path}")
+                continue
+            try:
+                tags = proc.exiftool_one(path)
+            except (proc.ToolFailed, proc.ToolMissing) as exc:
+                print(f"     exiftool failed: {exc}")
+                continue
+            hits = {k: v for k, v in tags.items()
+                    if want.search(k) and k not in ("SourceFile",)}
+            if not hits:
+                print("     no time or GPS tag at all -- the date came from elsewhere")
+            for k, v in sorted(hits.items()):
+                print(f"     {k:<44} {str(v)[:52]}")
+            print("     GPSDateTime present: "
+                  f"{'YES -- the stamp is recoverable from satellite time' if any('gpsdatetime' in k.lower() for k in hits) else 'no -- only its position can date it'}")
+
+
+def db_decision(conn, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM decisions WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def _iso(value) -> datetime | None:
+    if not value:
+        return None
+    dt = datetime.fromisoformat(str(value))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def run(cfg, args) -> int:
@@ -35,6 +129,11 @@ def run(cfg, args) -> int:
         return 1
     conn = sqlite3.connect(f"file:{cfg.db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+
+    if getattr(args, "timestamps", False):
+        timestamps_report(cfg, conn, int(getattr(args, "sample", 4)))
+        conn.close()
+        return 0
 
     hr("asset time span per source (corrected UTC)")
     for r in conn.execute(

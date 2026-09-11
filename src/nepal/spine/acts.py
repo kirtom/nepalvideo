@@ -338,9 +338,24 @@ def _repair(bounds: list[ActBoundary]) -> list[ActBoundary]:
     return out
 
 
-def act_for(ts: datetime, bounds: Sequence[ActBoundary]) -> int | None:
-    """Which act a moment falls in. Later acts win ties on a shared edge, so a
-    shot exactly on a boundary belongs to the act it opens."""
+def act_for(ts: datetime, bounds: Sequence[ActBoundary],
+            *, grace_s: float = 1.0) -> int | None:
+    """Which act a moment falls in, or None if it falls in none.
+
+    Later acts win ties on a shared edge, so a shot exactly on a boundary
+    belongs to the act it opens.
+
+    A moment outside every act is *not* pulled into the nearest one. The act
+    windows already state how far from the trek the film may reach: Act 1 opens
+    at the first planning asset and Act 5 closes ``after_window_days`` past the
+    descent. Clamping past them contradicts the decision those windows encode,
+    and it hid a real failure -- 276 clips from a camera whose clock read
+    eighteen months late were filed under the Descent, while their own GPS put
+    them at 5147 m on the pass. Material that lands nowhere has to be visible,
+    because it is material the film loses.
+
+    ``grace_s`` absorbs sub-second rounding at the outer edges only.
+    """
     chosen = None
     for b in sorted(bounds, key=lambda b: b.act):
         if b.start_utc <= ts <= b.end_utc:
@@ -348,8 +363,9 @@ def act_for(ts: datetime, bounds: Sequence[ActBoundary]) -> int | None:
     if chosen is not None:
         return chosen
     first, last = min(bounds, key=lambda b: b.act), max(bounds, key=lambda b: b.act)
-    if ts < first.start_utc:
+    grace = timedelta(seconds=max(grace_s, 0.0))
+    if first.start_utc - grace <= ts < first.start_utc:
         return first.act
-    if ts > last.end_utc:
+    if last.end_utc < ts <= last.end_utc + grace:
         return last.act
     return None

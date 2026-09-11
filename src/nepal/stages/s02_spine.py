@@ -15,7 +15,7 @@ import logging
 import statistics
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from nepal import db
 from nepal.config import Config
@@ -575,6 +575,41 @@ def day_stats(conn) -> list[acts_mod.DayStat]:
 
 # ------------------------------------------------------------ chronology
 
+def print_unreachable(conn, bounds: Sequence[acts_mod.ActBoundary]) -> dict[str, Any]:
+    """Report media that falls in no act, with what it costs the film."""
+    rows = conn.execute(
+        "SELECT created_at_utc, kind, source, COALESCE(duration_s,0) dur, lat "
+        "FROM assets WHERE created_at_utc IS NOT NULL "
+        "AND kind IN ('video360','video_flat','photo')").fetchall()
+    lost: list[Any] = [r for r in rows
+                       if acts_mod.act_for(_dt(r["created_at_utc"]), bounds) is None]
+    if not lost:
+        return {"n": 0}
+
+    all_video_s = sum(r["dur"] for r in rows if r["kind"] != "photo")
+    lost_video_s = sum(r["dur"] for r in lost if r["kind"] != "photo")
+    n_clips = sum(1 for r in lost if r["kind"] != "photo")
+    n_photos = sum(1 for r in lost if r["kind"] == "photo")
+    share = (lost_video_s / all_video_s * 100.0) if all_video_s else 0.0
+
+    print(f"{len(lost)} media asset(s) fall outside every act window and cannot "
+          f"enter the film: {n_clips} clip(s), {n_photos} photo(s)")
+    if lost_video_s:
+        print(f"  that is {lost_video_s/60:.0f} min of video, {share:.0f}% of all "
+              f"{all_video_s/3600:.1f} h shot")
+    by_source: dict[str, int] = {}
+    for r in lost:
+        by_source[r["source"]] = by_source.get(r["source"], 0) + 1
+    print("  by source: " + ", ".join(f"{k}={v}" for k, v in
+                                      sorted(by_source.items(), key=lambda kv: -kv[1])))
+    positioned = sum(1 for r in lost if r["lat"] is not None)
+    if positioned:
+        print(f"  {positioned} of them DO carry a GPS position, so their timestamp is "
+              f"wrong rather than their location -- run `nepal diagnose --timestamps`")
+    return {"n": len(lost), "n_clips": n_clips, "n_photos": n_photos,
+            "lost_video_s": round(lost_video_s, 1), "share_pct": round(share, 1)}
+
+
 def print_chronology(cfg: Config) -> int:
     """The Milestone 1 checkpoint table.
 
@@ -668,6 +703,13 @@ def print_chronology(cfg: Config) -> int:
                   f"({', '.join(d.date for d in far[:4])}"
                   f"{' ...' if len(far) > 4 else ''}) -- almost always a device clock "
                   f"error rather than real material from that date")
+
+    # Material outside every act window cannot enter the timeline. Naming the
+    # day it sits on is not enough: what matters is how much film is being lost,
+    # and on real material one mis-clocked camera accounted for nearly half the
+    # footage. An unreachable clip is a silent deletion unless it is counted.
+    if bounds:
+        print_unreachable(conn, bounds)
 
     # Anything the spine could not place is worth naming: an unplaced shot
     # cannot be act-assigned, and silently dropping it shrinks the film.
