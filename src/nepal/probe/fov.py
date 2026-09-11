@@ -258,3 +258,51 @@ def pick_textured_frames(candidates: Sequence[tuple[Path, float, float]],
             break
 
     return picked[:n_frames]
+
+
+# -- Gate 1 thumbnails -------------------------------------------------
+
+def seam_strip(img: np.ndarray, seam_frac: float, crop_w: int = 200,
+               height_frac: float = 0.5) -> np.ndarray:
+    """A crop centred on one seam meridian, for looking at rather than scoring.
+
+    Only the middle band of the height is kept. An equirectangular frame is
+    wildly stretched at the poles, where a join is both unreadable and least
+    important; the horizon is where a bad stitch shows.
+    """
+    h, w = img.shape[:2]
+    x = int(round(w * seam_frac))
+    half = max(1, crop_w // 2)
+    lo, hi = max(0, x - half), min(w, x + half)
+    band = max(1, int(round(h * height_frac)))
+    top = max(0, (h - band) // 2)
+    return img[top:top + band, lo:hi]
+
+
+def contact_sheet(rows: "Sequence[tuple[str, np.ndarray]]", dest: "Path",
+                  *, pad: int = 6, label_w: int = 74) -> "Path":
+    """Stack labelled image rows into one PNG.
+
+    The operator's question at Gate 1 is "which of these looks right", and that
+    is answered by putting the candidates next to each other rather than in ten
+    separate files.
+    """
+    from PIL import Image, ImageDraw
+    if not rows:
+        raise ValueError("nothing to render")
+    tiles = [(label, np.asarray(a)) for label, a in rows]
+    cell_h = max(t.shape[0] for _, t in tiles)
+    cell_w = max(t.shape[1] for _, t in tiles)
+    sheet = Image.new("RGB",
+                      (label_w + cell_w + pad * 2,
+                       (cell_h + pad) * len(tiles) + pad),
+                      (18, 18, 20))
+    draw = ImageDraw.Draw(sheet)
+    for i, (label, arr) in enumerate(tiles):
+        y = pad + i * (cell_h + pad)
+        a = arr if arr.ndim == 3 else np.stack([arr] * 3, axis=-1)
+        sheet.paste(Image.fromarray(a.astype(np.uint8)), (label_w, y))
+        draw.text((6, y + cell_h // 2 - 4), label, fill=(235, 235, 235))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(dest)
+    return dest

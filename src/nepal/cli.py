@@ -55,6 +55,15 @@ def main(argv: list[str] | None = None) -> int:
     from nepal import diagnose as _diagnose
     _diagnose.add_arguments(pd)
 
+    pfc = sub.add_parser("fov-check",
+                         help="render the Gate 1 FOV comparison sheets")
+    pfc.add_argument("--frames", type=int, default=2,
+                     help="how many source frames to compare (default 2)")
+    pfc.add_argument("--width", type=int, default=2048,
+                     help="equirect width to render at (default 2048)")
+    pfc.add_argument("--proxy", action="store_true",
+                     help="use .lrv proxies instead of full-resolution source")
+
     sub.add_parser("decisions", help="print the auto-solved decisions table")
     sub.add_parser("report", help="print the chronological table (the Milestone 1 checkpoint)")
     sub.add_parser("doctor", help="check external binaries and optional packages")
@@ -85,6 +94,42 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "diagnose":
         from nepal import diagnose
         return diagnose.run(cfg, args)
+
+    if args.cmd == "fov-check":
+        import json as _json
+        from nepal import db
+        from nepal.probe import fov as _fov
+        from nepal.stages import s01_probe
+        conn = db.init(cfg.db_path)
+        # the curve the solve already measured, so the numbers and the pictures
+        # are read side by side rather than one standing in for the other
+        rep = cfg.work_root / "reports" / "s01_probe.json"
+        if rep.exists():
+            try:
+                scores = _json.loads(rep.read_text()).get("fov", {}).get("scores") or {}
+            except (OSError, ValueError):
+                scores = {}
+            if scores:
+                print("seam discontinuity by candidate "
+                      "(1.0 = the join is invisible):")
+                print("\n".join(_fov.score_curve({int(k): float(v)
+                                                  for k, v in scores.items()})))
+        res = s01_probe.fov_thumbnails(cfg, conn, n_frames=args.frames,
+                                       width=args.width, prefer_proxy=args.proxy)
+        conn.close()
+        if res.get("error"):
+            print(f"\ncould not render: {res['error']}")
+            return 1
+        print(f"\n{len(res['sheets'])} sheet(s) from {res['n_frames']} frame(s), "
+              f"{res['source']} at {res['width']}px:")
+        for f in res["sheets"]:
+            print(f"  {f}")
+        print("\nEach sheet stacks the candidates over one seam meridian. Pick the\n"
+              "row where the vertical join disappears -- look for doubled or\n"
+              "sliced detail, not for sharpness. Then set probe.fov.fallback_deg\n"
+              "in the config, or record it with:\n"
+              "  nepal decisions   (to see what is stored now)")
+        return 0
 
     if args.cmd == "decisions":
         from nepal import db

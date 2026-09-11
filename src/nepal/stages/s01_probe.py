@@ -374,6 +374,77 @@ def solve_fov(cfg: Config, conn, *, work: Path | None = None) -> fov.FovResult:
     return result
 
 
+def fov_thumbnails(cfg: Config, conn, *, n_frames: int = 2, width: int = 2048,
+                   prefer_proxy: bool = False, out: Path | None = None
+                   ) -> dict[str, Any]:
+    """Render the Gate 1 FOV comparison the spec asks for.
+
+    The automatic solve minimises a seam-discontinuity ratio, and when that
+    ratio is flat across every candidate -- as it is on this corpus, where the
+    best score is 3.11 against an ideal of 1.0 -- the number cannot settle the
+    question and a person looking at the seam can. Each sheet stacks the
+    candidates so the join is compared directly rather than across ten files.
+
+    Full-resolution source by default. The solve reads .lrv proxies because
+    decoding 5.7K H.265 two hundred times is most of its runtime, but a proxy is
+    exactly the wrong input for judging a stitch seam.
+    """
+    rows = [dict(r) for r in conn.execute(
+        "SELECT s3_key, container, duration_s FROM assets "
+        "WHERE source='camera' AND kind='video360' AND duration_s > 0")]
+    if not rows:
+        return {"error": "no 360 camera clips"}
+
+    lrv = [r for r in rows if (r["container"] or "").lower() == "lrv"]
+    full = [r for r in rows if (r["container"] or "").lower() != "lrv"]
+    pool = (lrv or full) if prefer_proxy else (full or lrv)
+    work = out or cfg.workdir("fov", "gate1")
+    root = cfg.data_root
+
+    # the same texture-first pick the solve uses: a seam over flat sky says
+    # nothing, and this trek has a great deal of flat sky
+    candidates: list[tuple[Path, float, float]] = []
+    for r in pool[:12]:
+        src = root / Path(r["s3_key"]).relative_to("raw")
+        if not src.exists():
+            continue
+        for t in fov.sample_timestamps(float(r["duration_s"] or 0), 2):
+            try:
+                png = proc.extract_frame(src, t, work / f"tex_{src.stem}_{t:.1f}.png")
+                candidates.append((src, t, fov.texture_score(fov.load_image(png))))
+            except (proc.ToolFailed, proc.ToolMissing, OSError) as exc:
+                log.debug("texture probe failed %s@%.1f: %s", src.name, t, exc)
+    picked = fov.pick_textured_frames(candidates, n_frames, min(2, len(pool)))
+    if not picked:
+        return {"error": "could not sample any frames"}
+
+    fovs = fov.candidate_fovs(int(cfg.get("probe.fov.candidates_start")),
+                              int(cfg.get("probe.fov.candidates_stop")),
+                              int(cfg.get("probe.fov.candidates_step")))
+    sheets: list[str] = []
+    for src, t in picked:
+        left, right = [], []
+        for f in fovs:
+            try:
+                png = fov.render_candidate(src, t, f,
+                                           work / f"{src.stem}_{t:.1f}_{f}.png",
+                                           width=width)
+                img = fov.load_image(png)
+            except (proc.ToolFailed, proc.ToolMissing, OSError, ValueError) as exc:
+                log.warning("fov %d failed on %s@%.1f: %s", f, src.name, t, exc)
+                continue
+            left.append((f"{f} deg", fov.seam_strip(img, 0.25)))
+            right.append((f"{f} deg", fov.seam_strip(img, 0.75)))
+        for name, band in (("left", left), ("right", right)):
+            if not band:
+                continue
+            dest = work / f"seam_{name}_{src.stem}_{t:.0f}s.png"
+            sheets.append(str(fov.contact_sheet(band, dest)))
+    return {"sheets": sheets, "dir": str(work), "n_frames": len(picked),
+            "source": "proxy" if prefer_proxy else "full-resolution",
+            "fovs": fovs, "width": width}
+
+
 # ---------------------------------------------------------------- clock
 
 def _clips(conn, source: str) -> list[clock.Clip]:

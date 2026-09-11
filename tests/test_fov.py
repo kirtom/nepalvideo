@@ -233,3 +233,52 @@ def test_score_curve_marks_the_lowest_and_covers_every_candidate():
 
 def test_score_curve_of_nothing_is_nothing():
     assert score_curve({}) == []
+
+
+# -- Gate 1 thumbnails --------------------------------------------------
+
+from nepal.probe.fov import seam_strip, contact_sheet
+
+
+def test_seam_strip_is_centred_on_the_meridian_and_keeps_the_horizon():
+    """The poles of an equirect frame are wildly stretched: a join there is
+    unreadable and least important. The horizon is where a bad stitch shows."""
+    img = np.zeros((200, 1000, 3), dtype=np.uint8)
+    img[:, 250] = 255                      # a marker exactly on the left seam
+    strip = seam_strip(img, 0.25, crop_w=100, height_frac=0.5)
+    assert strip.shape[:2] == (100, 100)   # middle half of the height
+    # the marker lands in the middle column of the crop
+    assert strip[:, 50].max() == 255
+
+
+def test_seam_strip_handles_the_right_meridian():
+    img = np.zeros((200, 1000, 3), dtype=np.uint8)
+    img[:, 750] = 255
+    assert seam_strip(img, 0.75, crop_w=100)[:, 50].max() == 255
+
+
+def test_seam_strip_clamps_at_the_frame_edge():
+    img = np.zeros((100, 400, 3), dtype=np.uint8)
+    strip = seam_strip(img, 0.0, crop_w=200)
+    assert strip.shape[1] > 0 and strip.shape[1] <= 200
+
+
+def test_contact_sheet_stacks_every_candidate(tmp_path):
+    tiles = [(f"{f} deg", np.full((40, 120, 3), f % 256, dtype=np.uint8))
+             for f in range(188, 208, 2)]
+    out = contact_sheet(tiles, tmp_path / "sheet.png")
+    assert out.exists()
+    from PIL import Image
+    w, h = Image.open(out).size
+    assert h > 40 * len(tiles)      # one row per candidate, plus padding
+    assert w > 120                  # room for the labels
+
+
+def test_contact_sheet_accepts_greyscale_rows(tmp_path):
+    tiles = [("a", np.zeros((20, 60), dtype=np.uint8))]
+    assert contact_sheet(tiles, tmp_path / "g.png").exists()
+
+
+def test_contact_sheet_refuses_to_render_nothing(tmp_path):
+    with pytest.raises(ValueError):
+        contact_sheet([], tmp_path / "empty.png")
