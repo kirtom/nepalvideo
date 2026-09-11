@@ -335,9 +335,6 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
             log.error("S02.7 music.source=audio but music/ holds no playable audio")
             return {"source": "audio", "error": "no audio files"}
         licences = _licence_manifest(music_dir)
-        exclude_ru = bool(cfg.get("music.exclude_russian", False))
-        extra = cfg.get("music.exclude_artists", []) or []
-        keep = cfg.get("music.keep_artists", []) or []
         excluded: list[dict[str, Any]] = []
         for i, f in enumerate(audio, 1):
             try:
@@ -350,16 +347,6 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
             except Exception as exc:                      # noqa: BLE001
                 log.warning("S02.7 could not analyse %s: %s", f.name, exc)
                 continue
-            # The same exclusion applies whether metadata came from a playlist
-            # or from the file's own tags.
-            if exclude_ru:
-                drop, reason = playlist_mod.is_russian(
-                    t.title or f.stem, t.artist, extra_artists=extra, keep_artists=keep)
-                if drop:
-                    excluded.append({"title": t.title, "artist": t.artist,
-                                     "file": f.name, "reason": reason})
-                    log.info("S02.7 excluded %s - %s (%s)", t.artist, t.title, reason)
-                    continue
             tracks.append(t)
             log.info("S02.7 [%d/%d] %s - %s: %.0f bpm, %d beats, dyn %.3f, key %s",
                      i, len(audio), t.artist or "?", t.title or f.stem,
@@ -374,9 +361,6 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
             return {"source": "playlist", "error": "no playlist csv"}
         tracks, prep = playlist_mod.parse_playlist(
             csv_path,
-            exclude_russian=bool(cfg.get("music.exclude_russian", False)),
-            exclude_artists=cfg.get("music.exclude_artists", []) or [],
-            keep_artists=cfg.get("music.keep_artists", []) or [],
             min_instrumentalness=cfg.get("music.min_instrumentalness", None))
         report.update({
             "playlist_csv": str(csv_path.relative_to(cfg.data_root)),

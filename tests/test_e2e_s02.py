@@ -190,18 +190,6 @@ def test_beat_grids_are_populated(spined):
 
 
 @needs_tools
-def test_russian_track_is_excluded_by_its_id3_tag(spined):
-    """The fixture ships one track tagged with a Cyrillic artist."""
-    _, report, _ = spined
-    m = report["music"]
-    if m.get("skipped"):
-        pytest.skip("librosa not installed")
-    assert m["n_excluded"] >= 1
-    assert all(e["reason"] for e in m["excluded"])
-    assert any("Cyrillic" in e["reason"] for e in m["excluded"])
-
-
-@needs_tools
 def test_act_assignment_spans_quiet_to_loud(spined):
     """Sparse and quiet opens; the loudest thing peaks at Act 4."""
     from nepal import db

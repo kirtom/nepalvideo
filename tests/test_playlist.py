@@ -3,9 +3,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 import pytest
 
-from nepal.spine.playlist import (detect_columns, spotify_key, is_russian, parse_playlist,
-                                  feature_mask_for, _first_artist, _energy_from_loudness,
-                                  RU_LATIN_ARTISTS)
+from nepal.spine.playlist import (detect_columns, spotify_key, parse_playlist,
+                                  feature_mask_for, _first_artist,
+                                  _energy_from_loudness)
 from nepal.spine.music import assign_acts, _resolve_mask, FEATURES
 
 EXPORTIFY_HEADER = ("Track URI,Track Name,Artist Name(s),Album Name,Duration (ms),"
@@ -61,46 +61,6 @@ def test_spotify_key_out_of_range_or_missing():
     assert spotify_key("", "") is None
 
 
-# -- russian detection -------------------------------------------------
-
-@pytest.mark.parametrize("title,artist,expected", [
-    ("Тайны", "Молчат Дома", True),
-    ("Sudno", "Molchat Doma", True),
-    ("Группа крови", "Kino", True),
-    ("Says", "Nils Frahm", False),
-    ("Near Light", "Ólafur Arnalds", False),
-    ("Discovery", "Scott Buckley", False),
-    ("Snowfall", "Kai Engel", False),
-])
-def test_russian_detection(title, artist, expected):
-    assert is_russian(title, artist)[0] is expected
-
-
-def test_cyrillic_verdict_reports_its_evidence():
-    ok, reason = is_russian("Тайны", "Молчат Дома")
-    assert ok and "Cyrillic" in reason
-
-
-def test_keep_artists_overrides_detection():
-    ok, reason = is_russian("Sudno", "Molchat Doma", keep_artists=["molchat doma"])
-    assert not ok and "kept explicitly" in reason
-
-
-def test_extra_exclusions_are_honoured():
-    ok, reason = is_russian("Whatever", "Some Band", extra_artists=["Some Band"])
-    assert ok and "known Russophone artist" in reason
-
-
-def test_artist_matched_inside_a_collaboration_credit():
-    ok, _ = is_russian("Track", "Someone, Molchat Doma")
-    assert ok
-
-
-def test_short_list_entries_do_not_match_substrings_loosely():
-    """'kino' is 4 characters -- it must not fire on 'Kinobe' or 'Thinking'."""
-    assert not is_russian("Thinking Out Loud", "Ed Sheeran")[0]
-
-
 # -- parsing -----------------------------------------------------------
 
 def test_parses_tracks_and_features():
@@ -119,34 +79,6 @@ def test_dynamic_range_is_reported_as_unavailable():
     tracks, rep = parse_playlist(csv_of([row("Says", "Nils Frahm")]))
     assert "dyn_range" in rep.missing_features
     assert any("dynamic range" in n for n in rep.notes)
-
-
-def test_russian_tracks_excluded_with_an_audit_trail():
-    text = csv_of([
-        row("Says", "Nils Frahm"),
-        row("Sudno", "Molchat Doma"),
-        row("Тайны", "Молчат Дома"),
-        row("Near Light", "Ólafur Arnalds"),
-    ])
-    tracks, rep = parse_playlist(text, exclude_russian=True)
-    assert rep.n_tracks == 2
-    assert rep.n_excluded == 2
-    assert {t.artist for t in tracks} == {"Nils Frahm", "Ólafur Arnalds"}
-    dropped = [e for e in rep.exclusions if e.excluded]
-    assert len(dropped) == 2
-    assert all(e.reason for e in dropped), "every exclusion must carry its reason"
-
-
-def test_exclusion_is_off_by_default():
-    text = csv_of([row("Sudno", "Molchat Doma")])
-    tracks, rep = parse_playlist(text)
-    assert rep.n_tracks == 1 and rep.n_excluded == 0
-
-
-def test_keep_artists_survives_the_filter():
-    text = csv_of([row("Sudno", "Molchat Doma")])
-    tracks, _ = parse_playlist(text, exclude_russian=True, keep_artists=["Molchat Doma"])
-    assert len(tracks) == 1
 
 
 def test_instrumentalness_filter():

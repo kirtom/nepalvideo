@@ -62,32 +62,6 @@ PLAYLIST_FEATURE_MASK = {
 }
 
 
-CYRILLIC_RE = re.compile(r"[\u0400-\u04FF\u0500-\u052F]")
-
-# Best-effort list of Russophone acts that render their names in Latin script,
-# where Cyrillic detection cannot help. Deliberately not exhaustive -- it exists
-# to raise recall, and every exclusion is reported so the operator can correct
-# both directions. Extend via music.exclude_artists in the config.
-RU_LATIN_ARTISTS = frozenset({
-    "molchat doma", "kino", "viktor tsoi", "tsoi", "bi-2", "bi2", "zemfira",
-    "splean", "spleen", "aquarium", "akvarium", "mumiy troll", "mumiy trol",
-    "nautilus pompilius", "leningrad", "ddt", "alisa", "agatha christie",
-    "grazhdanskaya oborona", "civil defense", "egor letov", "yanka diaghileva",
-    "pornofilmy", "lumen", "korol i shut", "king and the clown", "pilot",
-    "chizh", "chaif", "mashina vremeni", "time machine", "kipelov", "aria",
-    "arya", "louna", "tequilajazzz", "auktyon", "auktsyon", "zveri", "mumiytroll",
-    "basta", "oxxxymiron", "oxxxxymiron", "husky", "khaski", "monetochka",
-    "grechka", "lucidvox", "shortparis", "gsh", "glintshake", "ic3peak",
-    "little big", "kis-kis", "tatu", "t.a.t.u.", "nogu svelo", "bravo",
-    "sektor gaza", "krematorij", "krematorium", "gorshok", "noize mc",
-    "kasta", "25/17", "krovostok", "scriptonite", "skriptonit", "miyagi",
-    "pharaoh", "face", "kizaru", "lsp", "dolphin", "delfin", "mgzavrebi",
-    "sirotkin", "buerak", "pasosh", "spasibo", "sonic death", "utro",
-    "electroforez", "elektroforez", "mnogoznaal", "kate nv", "kedr livanskiy",
-    "nina kraviz", "gone.fludd", "thomas mraz", "obladaet", "sqwoz bab",
-})
-
-
 @dataclass
 class ExclusionRule:
     """One decision about one track, kept so the operator can audit it."""
@@ -226,42 +200,7 @@ def _read_source(source: str | Path) -> str:
     return text
 
 
-def is_russian(title: str, artist: str | None, *,
-               extra_artists: Iterable[str] = (),
-               keep_artists: Iterable[str] = ()) -> tuple[bool, str]:
-    """Whether a track is Russian-language, and on what evidence.
-
-    Cyrillic in the title or artist is decisive. Beyond that, a curated list
-    covers acts that romanise their names, which is where this becomes
-    best-effort rather than exact -- transliteration has no reliable signature,
-    and guessing from name endings would sweep up Ukrainian, Polish and Balkan
-    artists along with false positives. So the verdict is always returned with
-    its reason, and ``keep_artists`` overrides it.
-    """
-    keep = {k.strip().lower() for k in keep_artists if k}
-    a_low = (artist or "").strip().lower()
-    if a_low and a_low in keep:
-        return False, f"kept explicitly: {artist}"
-
-    if artist and CYRILLIC_RE.search(artist):
-        return True, f"Cyrillic in artist: {artist}"
-    if title and CYRILLIC_RE.search(title):
-        return True, f"Cyrillic in title: {title}"
-
-    known = RU_LATIN_ARTISTS | {e.strip().lower() for e in extra_artists if e}
-    if a_low and a_low in known:
-        return True, f"known Russophone artist: {artist}"
-    # a listed artist appearing inside a longer credit string
-    for name in known:
-        if len(name) >= 5 and a_low and name in a_low:
-            return True, f"known Russophone artist matched in credit: {artist}"
-    return False, ""
-
-
 def parse_playlist(source: str | Path, *, licence: str = "personal",
-                   exclude_russian: bool = False,
-                   exclude_artists: Iterable[str] = (),
-                   keep_artists: Iterable[str] = (),
                    min_instrumentalness: float | None = None
                    ) -> tuple[list[Track], PlaylistReport]:
     """Read a playlist CSV into Track rows plus a report on what was usable."""
@@ -318,11 +257,8 @@ def parse_playlist(source: str | Path, *, licence: str = "personal",
         seen.add(track_id)
 
         drop, reason = (False, "")
-        if exclude_russian:
-            drop, reason = is_russian(title, artist, extra_artists=exclude_artists,
-                                      keep_artists=keep_artists)
         instr = _num(row.get(cols.get("instrumentalness", ""), ""))
-        if not drop and min_instrumentalness is not None and instr is not None \
+        if min_instrumentalness is not None and instr is not None \
                 and instr < min_instrumentalness:
             drop = True
             reason = f"instrumentalness {instr:.2f} below {min_instrumentalness:.2f}"
@@ -364,9 +300,7 @@ def parse_playlist(source: str | Path, *, licence: str = "personal",
     if report.n_excluded:
         report.notes.append(
             f"{report.n_excluded} track(s) excluded; every decision is listed in "
-            f"exclusions with its reason. Cyrillic detection is exact, the "
-            f"romanised-artist list is best-effort -- review it and use "
-            f"music.keep_artists / music.exclude_artists to correct either way")
+            f"exclusions with its reason")
     report.missing_features = [k for k, ok in PLAYLIST_FEATURE_MASK.items() if not ok]
     if report.has_audio_features:
         report.notes.append(

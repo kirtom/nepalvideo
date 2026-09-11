@@ -286,9 +286,10 @@ def build(root: Path, *, quick: bool = False) -> dict:
                 click_gain=0.55, swell_period=9, artist="Loud Crescendo", title="The Mountain")
     music_track(root / "music" / "05_return.mp3", dur_m + 4, 186, 60,
                 click_gain=0.12, swell_period=24, artist="Quiet Piano", title="Ambre")
-    # A Russian-language track, so the exclusion path is exercised on real audio
-    music_track(root / "music" / "06_russian.mp3", dur_m, 300, 120,
-                click_gain=0.4, artist="Молчат Дома", title="Судно")
+    # A sixth track so the library has more to choose from than acts to fill
+    music_track(root / "music" / "06_mid.mp3", dur_m, 300, 110,
+                click_gain=0.34, swell_period=16, artist="Cold Orchestral",
+                title="Thin Air")
 
     truth = {
         "true_fov": TRUE_FOV,

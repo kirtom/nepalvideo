@@ -160,13 +160,9 @@ music:
   # and which no playlist export provides.
   source: audio                # audio | playlist | auto
   playlist_csv: null           # path; null means "the only .csv under music/"
-  # Russian-language tracks are excluded at the operator's request. Detection is
-  # on metadata, not audio: Cyrillic in the artist or title tag is exact, and the
-  # romanised-artist list is best-effort. Every exclusion is reported with its
-  # reason so it can be corrected in either direction.
-  exclude_russian: true
-  exclude_artists: []          # extra artists to drop, by name
-  keep_artists: []             # overrides, kept even if detected as Russian
+  # To exclude a track, take it out of music/. The folder is the source of
+  # truth; a name-matching filter here only risked dropping the wrong thing
+  # (Aria, Pilot, Bravo, Kino and Husky are all names of unrelated bands).
   # Optional: drop tracks below this Spotify instrumentalness (playlist source
   # only -- an mp3 carries no such field). Off by default.
   min_instrumentalness: null
