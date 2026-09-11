@@ -31,6 +31,13 @@ STAGE = "S01"
 # from its own GPSDateTime is the stamp that is wrong, not the satellite.
 GPS_OVERRIDE_S = 3600.0
 
+# A file whose own capture-time tags disagree by more than a day has had its
+# timestamp rewritten -- an export, an AirDrop, an iCloud download. The right
+# tag is still chosen (see manifest.CAPTURE_TAGS), but the disagreement is
+# reported, because a whole device arriving this way is the difference between
+# material that reaches the film and material that silently does not.
+STAMP_CONFLICT_S = 86400.0
+
 
 # ---------------------------------------------------------------- manifest
 
@@ -62,12 +69,19 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     clock_evidence: dict[str, list[float]] = {}
     regstamped: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
     for path in files:
         rel = path.relative_to(root).as_posix()
         cls = manifest.classify(rel)
         exif = exif_rows.get(str(path.resolve()), {})
 
         created = manifest.asset_datetime(exif)
+        spread = manifest.capture_time_spread(exif)
+        if spread and spread[0] > STAMP_CONFLICT_S:
+            conflicts.append({"path": rel, "source": cls["source"],
+                              "spread_days": round(spread[0] / 86400.0, 1),
+                              "earliest_tag": spread[1], "latest_tag": spread[2],
+                              "used": created.isoformat() if created else None})
         # GPSDateTime is satellite time: where a photo carries both, the
         # agreement between them is direct evidence of whether that device's
         # clock can be trusted as the pipeline's reference.
@@ -171,6 +185,22 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
                     ", ".join(f"{r['path'].split('/')[-1]} ({r['delta_days']:+.0f}d)"
                               for r in regstamped[:4]))
 
+    if conflicts:
+        by_source: dict[str, int] = {}
+        for c in conflicts:
+            by_source[c["source"]] = by_source.get(c["source"], 0) + 1
+        worst = max(conflicts, key=lambda c: abs(c["spread_days"]))
+        log.warning(
+            "S01.1 %d asset(s) carry capture-time tags that disagree by more than "
+            "%.0fh -- a rewritten timestamp, usually an export or an iCloud "
+            "download. The tag with the most authority was used (%s over %s). "
+            "By source: %s. Worst: %s, %.0f days apart.",
+            len(conflicts), STAMP_CONFLICT_S / 3600,
+            worst["earliest_tag"], worst["latest_tag"],
+            ", ".join(f"{k}={v}" for k, v in sorted(by_source.items(),
+                                                    key=lambda kv: -kv[1])),
+            worst["path"].split("/")[-1], abs(worst["spread_days"]))
+
     gps_agreement: dict[str, dict[str, float]] = {}
     for source, deltas in clock_evidence.items():
         med = float(statistics.median(deltas))
@@ -189,6 +219,8 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
             "gps_agreement": gps_agreement,
             "n_restamped_from_gps": len(regstamped),
             "restamped_from_gps": regstamped[:50],
+            "n_stamp_conflicts": len(conflicts),
+            "stamp_conflicts": conflicts[:50],
             "exiftool": proc.have("exiftool"), "ffprobe": have_ffprobe}
 
 

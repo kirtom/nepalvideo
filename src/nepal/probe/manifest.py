@@ -172,6 +172,25 @@ def parse_offset(value: Any) -> timezone | None:
     return timezone(delta if m.group("sign") == "+" else -delta)
 
 
+# Capture-time tags in order of authority.
+#
+# CreationDate is Apple's com.apple.quicktime.creationdate, which exiftool
+# reports as Keys:CreationDate. It is the only capture stamp in a .MOV that
+# carries its own UTC offset, and -- crucially -- the only one that survives
+# being exported, AirDropped or pulled out of iCloud. QuickTime:CreateDate and
+# the per-track MediaCreateDate are rewritten by those operations, so a phone's
+# whole library can arrive stamped with the minute it was copied. On this
+# corpus that is exactly what happened: 276 clips carried
+# QuickTime:CreateDate 2025-11-22 23:24-23:25 -- four-second intervals, the
+# signature of a batch export -- while Keys:CreationDate held the true
+# 2024-05-11 15:45:12+05:30. Reading CreateDate first put every one of them
+# eighteen months after the trek, outside every act, unreachable by the film.
+#
+# A JPEG or HEIC has no Keys group, so DateTimeOriginal still wins there.
+CAPTURE_TAGS = ("CreationDate", "DateTimeOriginal", "CreateDate",
+                "MediaCreateDate", "GPSDateTime")
+
+
 def asset_datetime(row: dict[str, Any], *,
                    assume_tz: timezone | None = None) -> datetime | None:
     """The device-reported capture time, with its zone resolved.
@@ -182,9 +201,11 @@ def asset_datetime(row: dict[str, Any], *,
     5 h 45 m -- which would land photos on the wrong day, corrupt the GPS
     interpolation in S02.2 and mis-assign acts. An inline zone on the
     timestamp itself still wins, since it is unambiguous.
+
+    Tags are tried in ``CAPTURE_TAGS`` order; see the note there for why
+    Apple's CreationDate outranks QuickTime's CreateDate.
     """
-    raw = exif_get(row, "DateTimeOriginal", "CreateDate", "MediaCreateDate",
-                   "GPSDateTime")
+    raw = exif_get(row, *CAPTURE_TAGS)
     if raw is None:
         return None
     if DATE_RE.search(str(raw)) and DATE_RE.search(str(raw)).group("tz"):
@@ -192,6 +213,34 @@ def asset_datetime(row: dict[str, Any], *,
     tz = parse_offset(exif_get(row, "OffsetTimeOriginal", "OffsetTime",
                                "OffsetTimeDigitized"))
     return parse_exif_datetime(raw, assume_tz=tz or assume_tz)
+
+
+def capture_time_spread(row: dict[str, Any], *,
+                        assume_tz: timezone | None = None
+                        ) -> tuple[float, str, str] | None:
+    """How far the container's capture-time tags disagree, and which two.
+
+    Returns ``(seconds, earliest_tag, latest_tag)`` or None when fewer than two
+    tags are present. A file whose own tags disagree by months is a file whose
+    timestamp has been rewritten, and the disagreement is the evidence: it is
+    worth reporting even once the right tag has been chosen, because it says
+    the material needs checking rather than trusting.
+    """
+    found: list[tuple[str, datetime]] = []
+    for tag in CAPTURE_TAGS:
+        raw = exif_get(row, tag)
+        if raw is None:
+            continue
+        dt = (parse_exif_datetime(raw) if (DATE_RE.search(str(raw))
+              and DATE_RE.search(str(raw)).group("tz"))
+              else parse_exif_datetime(raw, assume_tz=assume_tz))
+        if dt is not None:
+            found.append((tag, dt))
+    if len(found) < 2:
+        return None
+    lo = min(found, key=lambda kv: kv[1])
+    hi = max(found, key=lambda kv: kv[1])
+    return (hi[1] - lo[1]).total_seconds(), lo[0], hi[0]
 
 
 def parse_gps(row: dict[str, Any]) -> tuple[float | None, float | None, float | None]:

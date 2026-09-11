@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from nepal.probe.manifest import (classify, telegram_subkind, exif_get, parse_exif_datetime,
-                                  parse_gps, parse_duration, NEPAL_TZ, walk_media)
+                                  parse_gps, parse_duration, NEPAL_TZ, walk_media,
+                                  asset_datetime, capture_time_spread, CAPTURE_TAGS)
 
 
 @pytest.mark.parametrize("path,source,kind,curve", [
@@ -210,3 +211,78 @@ def test_asset_datetime_defaults_to_utc_with_no_hints():
 
 def test_asset_datetime_missing():
     assert asset_datetime({"File:FileName": "x.jpg"}) is None
+
+
+# -- a rewritten timestamp ---------------------------------------------
+#
+# Tags copied from a real IMG_3196.MOV in the corpus. Keys:CreationDate holds
+# the true capture time with its offset; every QuickTime and Track stamp was
+# rewritten to the minute the file was exported, eighteen months later.
+EXPORTED_MOV = {
+    "SourceFile": "/data/media_from_phones/kulikov/IMG_3196.MOV",
+    "Keys:CreationDate": "2024:05:11 15:45:12+05:30",
+    "Keys:GPSCoordinates": "28.5934 77.2491 214.447",
+    "QuickTime:CreateDate": "2025:11:22 23:24:56",
+    "QuickTime:ModifyDate": "2025:11:22 23:24:56",
+    "QuickTime:Duration": 2.06666666666667,
+    "Track1:MediaCreateDate": "2025:11:22 23:24:56",
+    "Track1:TrackCreateDate": "2025:11:22 23:24:56",
+    "Composite:GPSLatitude": 28.5934,
+    "Composite:GPSLongitude": 77.2491,
+    "Composite:GPSAltitude": 214.447,
+    "System:FileModifyDate": "2026:09:08 20:07:38+03:00",
+}
+
+
+def test_apple_creation_date_beats_a_rewritten_quicktime_stamp():
+    """An export, AirDrop or iCloud download rewrites QuickTime:CreateDate but
+    leaves Keys:CreationDate alone. Reading CreateDate first put 276 clips
+    eighteen months after the trek, outside every act."""
+    got = asset_datetime(EXPORTED_MOV)
+    assert got == datetime(2024, 5, 11, 15, 45, 12,
+                           tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    # and in UTC it lands on the real trek day, not in 2025
+    assert got.astimezone(timezone.utc).date() == datetime(2024, 5, 11).date()
+
+
+def test_creation_date_carries_its_own_offset_so_no_assumption_is_made():
+    """+05:30 is India, not Nepal's +05:45 -- these clips are the Delhi layover
+    on the way home. A per-file offset is evidence; a default is a guess."""
+    got = asset_datetime(EXPORTED_MOV, assume_tz=NEPAL_TZ)
+    assert got.utcoffset() == timedelta(hours=5, minutes=30)
+
+
+def test_creation_date_is_the_highest_authority_tag():
+    assert CAPTURE_TAGS[0] == "CreationDate"
+
+
+def test_a_photo_with_no_keys_group_still_uses_datetimeoriginal():
+    """Only QuickTime containers carry Keys:CreationDate, so adding it must not
+    disturb how a JPEG or HEIC is read."""
+    row = {"ExifIFD:DateTimeOriginal": "2024:05:04 07:12:33",
+           "ExifIFD:OffsetTimeOriginal": "+05:45"}
+    assert asset_datetime(row) == datetime(2024, 5, 4, 7, 12, 33, tzinfo=NEPAL_TZ)
+
+
+def test_capture_time_spread_measures_the_disagreement():
+    spread = capture_time_spread(EXPORTED_MOV)
+    assert spread is not None
+    seconds, earliest, latest = spread
+    assert earliest == "CreationDate"
+    assert latest in ("CreateDate", "MediaCreateDate")
+    assert seconds / 86400.0 == pytest.approx(560, abs=2)
+
+
+def test_capture_time_spread_is_none_when_there_is_nothing_to_compare():
+    assert capture_time_spread({"ExifIFD:DateTimeOriginal": "2024:05:04 07:12:33"}) is None
+    assert capture_time_spread({}) is None
+
+
+def test_capture_time_spread_is_tiny_on_a_healthy_file():
+    """A file straight off the phone agrees with itself, so a spread threshold
+    does not fire on ordinary material."""
+    row = {"Keys:CreationDate": "2024:05:04 07:12:33+05:45",
+           "QuickTime:CreateDate": "2024:05:04 01:27:33",
+           "Track1:MediaCreateDate": "2024:05:04 01:27:33"}
+    seconds, _, _ = capture_time_spread(row)
+    assert seconds == 0.0
