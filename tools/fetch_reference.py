@@ -105,15 +105,81 @@ def fetch_geonames(country: str, dest: Path) -> bool:
     return True
 
 
-def bbox_from_db(db_path: Path) -> tuple[float, float, float, float] | None:
+BBox = tuple[float, float, float, float]
+
+
+def bbox_from_db(db_path: Path) -> tuple[BBox, str] | None:
+    """Track extent from the database.
+
+    Tries gps_points first (present after S02.1), then the assets table, whose
+    lat/lon come straight from photo EXIF and are therefore populated by S01.
+    Depending only on gps_points created a deadlock: the tiles are needed to
+    compute altitude in S02, but the track that says which tiles to fetch is
+    only written by S02.
+    """
     if not db_path.exists():
         return None
     import sqlite3
-    conn = sqlite3.connect(str(db_path))
-    row = conn.execute("SELECT MIN(lat), MIN(lon), MAX(lat), MAX(lon) FROM gps_points "
-                       "WHERE lat IS NOT NULL AND lon IS NOT NULL").fetchone()
-    conn.close()
-    return tuple(row) if row and row[0] is not None else None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        for table, label in (("gps_points", "GPS track"), ("assets", "photo EXIF")):
+            try:
+                row = conn.execute(
+                    f"SELECT MIN(lat), MIN(lon), MAX(lat), MAX(lon) FROM {table} "
+                    "WHERE lat IS NOT NULL AND lon IS NOT NULL").fetchone()
+            except sqlite3.Error:
+                continue
+            if row and row[0] is not None:
+                return (float(row[0]), float(row[1]), float(row[2]), float(row[3])), label
+    finally:
+        conn.close()
+    return None
+
+
+def bbox_from_exif(data_root: Path) -> tuple[BBox, str] | None:
+    """Track extent read straight off the phone photos.
+
+    Makes this tool independent of pipeline order entirely: it works before
+    anything has been run, on nothing but the delivered tree.
+    """
+    import shutil
+    import subprocess
+    if not shutil.which("exiftool") or not data_root.exists():
+        return None
+    target = data_root / "media_from_phones"
+    if not target.exists():
+        target = data_root
+    print(f"  reading GPS from {target} ...", end="", flush=True)
+    try:
+        proc = subprocess.run(
+            ["exiftool", "-q", "-r", "-n", "-if", "$GPSLatitude",
+             "-p", "$GPSLatitude,$GPSLongitude", str(target)],
+            capture_output=True, text=True, timeout=900)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        print(f" failed: {exc}")
+        return None
+
+    lats, lons = [], []
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(",")
+        if len(parts) != 2:
+            continue
+        try:
+            la, lo = float(parts[0]), float(parts[1])
+        except ValueError:
+            continue
+        if la == 0 and lo == 0:          # the null-island signature of a bad fix
+            continue
+        lats.append(la)
+        lons.append(lo)
+    if not lats:
+        print(" no fixes found")
+        return None
+    print(f" {len(lats)} fixes")
+    return (min(lats), min(lons), max(lats), max(lons)), f"{len(lats)} phone photos"
 
 
 def main() -> int:
@@ -138,12 +204,20 @@ def main() -> int:
 
     rc = 0
     if not args.skip_srtm:
-        bbox = tuple(args.bbox) if args.bbox else bbox_from_db(cfg.db_path)
-        if bbox is None:
-            print("no GPS track in the database and no --bbox given; "
-                  "run `nepal s01` and `nepal s02` first, or pass --bbox")
+        found = None
+        if args.bbox:
+            found = (tuple(args.bbox), "--bbox")
+        else:
+            found = bbox_from_db(cfg.db_path) or bbox_from_exif(cfg.data_root)
+        if found is None:
+            print("could not determine the trek extent. Tried: gps_points and assets "
+                  f"in {cfg.db_path}, then phone photo EXIF under {cfg.data_root}.\n"
+                  "Pass --bbox MIN_LAT MIN_LON MAX_LAT MAX_LON, or check that "
+                  "project.data_root in the config is correct (`nepal doctor`).")
             rc = 1
         else:
+            bbox, via = found
+            print(f"  extent from {via}")
             lo_la, lo_lo, hi_la, hi_lo = bbox
             tiles = tiles_for_bbox(lo_la - args.pad, lo_lo - args.pad,
                                    hi_la + args.pad, hi_lo + args.pad)

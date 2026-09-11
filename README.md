@@ -77,12 +77,18 @@ and is git-ignored; recreate it any time with `tools/fetch_reference.py`.
 Then:
 
 ```bash
-python tools/fetch_reference.py   # SRTM elevation tiles + GeoNames gazetteer (once)
 nepal s01                         # manifest, chapters, FOV, clock offsets
+python tools/fetch_reference.py   # SRTM tiles + GeoNames gazetteer (once)
 nepal s02                         # track, altitude, places, telegram, music
 nepal report                      # the chronological table -- the checkpoint
 nepal decisions                   # auto-solved values, with confidence
 ```
+
+Which SRTM tiles to fetch depends on where the trek was, so the fetcher works
+that out for itself — from the merged GPS track if S02 has run, otherwise from
+the photo EXIF that S01 records, otherwise by reading the phone photos
+directly. It therefore runs at any point, including before anything else; the
+order above just avoids a second pass.
 
 Both stages are resumable: each sub-step records completion, so a re-run redoes
 only what is missing. `--force` recomputes.
