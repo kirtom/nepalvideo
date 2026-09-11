@@ -60,6 +60,55 @@ class ReprojectPlan:
         return self.outputs[0][1]
 
 
+def build_proxy_only_graph(fov_deg: float, *,
+                           proxy_size: tuple[int, int] = (1024, 512)) -> tuple[str, list[str]]:
+    """Phase A: the equirectangular proxy alone, with no split.
+
+    The four yaw views were measured at 79% of this stage's runtime, and nothing
+    consumes them as *video* until S07 conforms the ~180 selected shots. Face
+    detection and the VLM framing decision both want sampled frames, which
+    ``yaw_still_command`` extracts straight from the source -- faster, and
+    cleaner pixels than sampling a 1 Mbps re-encode.
+
+    Deliberately emits no ``split``: a split whose outputs are not all consumed
+    makes ffmpeg refuse the whole graph.
+    """
+    pw, ph = proxy_size
+    return (f"[0:v]v360=input=dfisheye:output=e:ih_fov={fov_deg:g}:iv_fov={fov_deg:g},"
+            f"scale={pw}:{ph}[eqout]"), ["eqout"]
+
+
+def yaw_still_command(source: Path, t_s: float, yaw: float, dest: Path, *,
+                      fov_deg: float, view_size: tuple[int, int] = (960, 540),
+                      view_h_fov: float = 100.0, view_v_fov: float = 70.0,
+                      quality: int = 2) -> list[str]:
+    """Phase B: one rectilinear still at one yaw, read from the original.
+
+    Sampling the source rather than a proxy avoids a generation of H.264 loss
+    before face embedding and CLIP, which is the difference between a usable
+    face cluster and a marginal one on distant subjects.
+    """
+    vw, vh = view_size
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-ss", f"{t_s:.3f}", "-i", str(source), "-frames:v", "1",
+            "-vf", (f"v360=input=dfisheye:output=rectilinear:"
+                    f"ih_fov={fov_deg:g}:iv_fov={fov_deg:g}:yaw={normalise_yaw(yaw):g}:"
+                    f"h_fov={view_h_fov:g}:v_fov={view_v_fov:g},scale={vw}:{vh}"),
+            "-q:v", str(quality), "-y", str(dest)]
+
+
+def flat_still_command(source: Path, t_s: float, dest: Path, *,
+                       view_size: tuple[int, int] = (960, 540),
+                       quality: int = 2) -> list[str]:
+    """Phase B for flat footage: no reprojection, just a scaled still."""
+    vw, vh = view_size
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-ss", f"{t_s:.3f}", "-i", str(source), "-frames:v", "1",
+            "-vf", f"scale={vw}:{vh}", "-q:v", str(quality), "-y", str(dest)]
+
+
 def build_360_graph(fov_deg: float, *, proxy_size: tuple[int, int] = (1024, 512),
                     view_size: tuple[int, int] = (960, 540),
                     yaws: Sequence[int] = DEFAULT_YAWS,
@@ -107,12 +156,27 @@ def plan(source: Path, recording_id: str, work: Path, *, is_360: bool,
          view_size: tuple[int, int] = (960, 540),
          yaws: Sequence[int] = DEFAULT_YAWS,
          view_h_fov: float = 100.0, view_v_fov: float = 70.0,
-         proxy_bitrate: str = "2M", view_bitrate: str = "1M") -> ReprojectPlan:
+         proxy_bitrate: str = "2M", view_bitrate: str = "1M",
+         yaw_videos: bool = False) -> ReprojectPlan:
+    """Plan one recording's pass.
+
+    ``yaw_videos=False`` (the default) is phase A: proxy plus audio only, which
+    is 4.3x faster over a whole corpus. Set it True to reproduce the
+    specification's single-pass design, which writes all four yaw views as
+    video for every recording.
+    """
     proxies = work / "proxies"
     views = work / "views"
     audio = work / "audio"
     for d in (proxies, views, audio):
         d.mkdir(parents=True, exist_ok=True)
+
+    if is_360 and not yaw_videos:
+        fc, labels = build_proxy_only_graph(fov_deg, proxy_size=proxy_size)
+        outputs = [("eqout", proxies / f"{recording_id}_eq.mp4", proxy_bitrate)]
+        return ReprojectPlan(filter_complex=fc, outputs=outputs,
+                             audio_path=audio / f"{recording_id}.wav",
+                             is_360=True, source=source, yaws=())
 
     if is_360:
         fc, labels = build_360_graph(fov_deg, proxy_size=proxy_size, view_size=view_size,

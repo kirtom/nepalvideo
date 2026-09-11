@@ -189,6 +189,8 @@ def main() -> int:
     ap.add_argument("--bbox", nargs=4, type=float, metavar=("MIN_LAT", "MIN_LON",
                                                             "MAX_LAT", "MAX_LON"))
     ap.add_argument("--country", default="NP", help="GeoNames country code (default NP)")
+    ap.add_argument("-n", "--dry-run", action="store_true",
+                    help="report which tiles are needed and their size, download nothing")
     ap.add_argument("--skip-srtm", action="store_true")
     ap.add_argument("--skip-geonames", action="store_true")
     ap.add_argument("--pad", type=float, default=0.1,
@@ -223,7 +225,18 @@ def main() -> int:
                                    hi_la + args.pad, hi_lo + args.pad)
             print(f"SRTM tiles for bbox {lo_la:.3f},{lo_lo:.3f} .. "
                   f"{hi_la:.3f},{hi_lo:.3f} (pad {args.pad}): {len(tiles)}")
-            res = fetch_srtm(tiles, srtm_dir)
+            present = [t for t in tiles if (srtm_dir / f"{t}.hgt").exists()]
+            missing = [t for t in tiles if t not in present]
+            for t in tiles:
+                mark = "have" if t in present else "need"
+                print(f"    [{mark}] {t}")
+            print(f"  {len(missing)} to download, about {len(missing) * 7} MB over the wire, "
+                  f"{len(missing) * 26} MB on disk")
+            if args.dry_run:
+                print("  (dry run -- nothing downloaded)")
+                res = {"downloaded": [], "already_present": present, "failed": []}
+            else:
+                res = fetch_srtm(tiles, srtm_dir)
             print(f"  -> {len(res['downloaded'])} downloaded, "
                   f"{len(res['already_present'])} already present, "
                   f"{len(res['failed'])} failed")
@@ -232,10 +245,15 @@ def main() -> int:
 
     if not args.skip_geonames:
         print(f"GeoNames {args.country} -> {geo_path.parent}")
-        if not fetch_geonames(args.country, geo_path):
+        if args.dry_run:
+            txt = geo_path.parent / f"{args.country}.txt"
+            print(f"  [{'have' if txt.exists() else 'need'}] {args.country}.txt"
+                  f"  (about 5 MB zipped)")
+        elif not fetch_geonames(args.country, geo_path):
             rc = 1
 
-    print("\nAltitude and place names will populate on the next `nepal s02 --force`.")
+    if not args.dry_run:
+        print("\nAltitude and place names will populate on the next `nepal s02 --force`.")
     return rc
 
 
