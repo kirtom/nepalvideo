@@ -39,6 +39,9 @@ class DayStat:
     start_utc: datetime
     end_utc: datetime
     asset_count: int = 0
+    # How many of that day's assets sit inside the trek region. Where this is
+    # known it decides the trek window far better than asset volume does.
+    on_route_count: int = 0
 
 
 @dataclass
@@ -121,6 +124,34 @@ def trek_window(days: Sequence[DayStat], *, max_gap_days: int = 3,
     ordered = sorted(days, key=lambda d: d.day_index)
     if not ordered:
         return [], []
+
+    # Geography first, where it is known. Density alone pulled in the days
+    # either side of the trek: four days of one packing photo each chained into
+    # the window because they sat within max_gap_days of it, so Act 2 -- which
+    # the brief describes as arrival and low trail -- began five days before
+    # anyone had left home. A day with no assets on the route is not a trek day,
+    # whatever its neighbours look like.
+    on_route = [d for d in ordered if d.on_route_count > 0]
+    if len(on_route) >= min_days:
+        runs = [[on_route[0]]]
+        for prev, cur in zip(on_route, on_route[1:]):
+            if cur.day_index - prev.day_index <= max_gap_days:
+                runs[-1].append(cur)
+            else:
+                runs.append([cur])
+        best = max(runs, key=lambda r: (sum(d.on_route_count for d in r), len(r)))
+        # bridge any interior days that carry no position of their own
+        lo, hi = best[0].day_index, best[-1].day_index
+        window = [d for d in ordered if lo <= d.day_index <= hi]
+        excluded = [d for d in ordered if d not in window]
+        if excluded:
+            log.info("S02 trek window: days %d-%d (%s .. %s), %d asset(s) of which "
+                     "%d are on the route; %d day(s) outside it supply Act 1 and "
+                     "Act 5 but do not define structure",
+                     window[0].day_index, window[-1].day_index, window[0].date,
+                     window[-1].date, sum(d.asset_count for d in window),
+                     sum(d.on_route_count for d in window), len(excluded))
+        return window, excluded
 
     runs: list[list[DayStat]] = [[ordered[0]]]
     for prev, cur in zip(ordered, ordered[1:]):

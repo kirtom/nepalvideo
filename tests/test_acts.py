@@ -252,3 +252,65 @@ def test_approach_and_climb_split_at_the_gradient_change():
     b = by_act(segment_acts(real_corpus()))
     assert b[2].end_utc < b[3].end_utc
     assert (b[3].end_utc - b[3].start_utc) >= timedelta(days=3)
+
+
+# -- geographic trek window --------------------------------------------
+
+def dayg(i, alt, n, on_route=0, base=BASE):
+    s = base + timedelta(days=i - 1)
+    return DayStat(i, s.date().isoformat(), alt, None if alt is None else alt - 100,
+                   s, s + timedelta(hours=12), asset_count=n, on_route_count=on_route)
+
+
+def real_corpus_with_geography():
+    """The delivered shape: home photos over eleven weeks, four packing days,
+    the fourteen-day trek, a tail, and one day eighteen months out."""
+    planning = [dayg(i, None, 1) for i in (1, 2, 9, 10, 17, 18, 19, 25, 26, 36, 39,
+                                           40, 42, 43, 46, 47, 48, 50, 51, 52, 57,
+                                           59, 60, 62, 63)]
+    packing = [dayg(72, None, 0), dayg(74, None, 1), dayg(75, None, 1), dayg(76, None, 11)]
+    trek = [dayg(77, 1406, 33, 33), dayg(78, 1381, 51, 51), dayg(79, 2045, 55, 55),
+            dayg(80, 2630, 55, 55), dayg(81, 3505, 67, 67), dayg(82, 4066, 103, 103),
+            dayg(83, 4561, 74, 74), dayg(84, 4477, 70, 70), dayg(85, 5146, 135, 135),
+            dayg(86, 3546, 89, 89), dayg(87, 2656, 19, 19), dayg(88, 1322, 59, 59),
+            dayg(89, 1413, 63, 63), dayg(90, 1353, 32, 32)]
+    tail = [dayg(i, None, n) for i, n in ((91, 2), (92, 7), (93, 3), (94, 1),
+                                          (95, 1), (97, 1), (164, 1), (165, 2))]
+    return planning + packing + trek + tail + [dayg(651, 5147, 276, 276)]
+
+
+def test_geographic_window_excludes_days_spent_at_home():
+    """Density alone pulled in the days either side: four days of one packing
+    photo each chained in because they sat within max_gap_days, so Act 2 --
+    arrival and low trail -- began five days before anyone had left home."""
+    window, excluded = trek_window(real_corpus_with_geography())
+    idx = [d.day_index for d in window]
+    assert idx[0] == 77, f"window starts at day {idx[0]}, expected the arrival day"
+    assert idx[-1] == 90
+    for d in (72, 74, 75, 76):
+        assert d not in idx, f"day {d} was spent at home"
+
+
+def test_geographic_window_still_excludes_the_stray_day():
+    window, _ = trek_window(real_corpus_with_geography())
+    assert 651 not in [d.day_index for d in window]
+
+
+def test_act_two_starts_on_arrival():
+    b = by_act(segment_acts(real_corpus_with_geography()))
+    assert b[2].start_utc.date() == (BASE + timedelta(days=76)).date()
+
+
+def test_falls_back_to_density_without_position_data():
+    """Some corpora have no GPS at all; the density rule still has to work."""
+    days = [dayn(i, None, 1) for i in range(1, 30)] + \
+           [dayn(i, 4000, 90) for i in range(60, 70)]
+    window, _ = trek_window(days)
+    assert [d.day_index for d in window] == list(range(60, 70))
+
+
+def test_geographic_window_needs_enough_on_route_days():
+    """A single on-route day is not a trek; fall back to density."""
+    days = [dayn(i, None, 5) for i in range(1, 12)] + [dayg(50, 4000, 1, 1)]
+    window, _ = trek_window(days)
+    assert len(window) > 1

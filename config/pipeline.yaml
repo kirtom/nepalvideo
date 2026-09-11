@@ -148,9 +148,14 @@ assemble:
 
 render:
   draft: {width: 960, height: 540, crf: 23}
-  music_lufs: -14.0
-  duck_lufs: -28.0
-  duck_lufs_speech: -22.0
+  music_lufs: -14.0            # the music bed
+  duck_lufs: -28.0             # location audio under the bed
+  duck_lufs_speech: -22.0      # music under speech
+  # A sung track masks spoken narration far more than an instrumental at the
+  # same loudness, because it occupies the same range. Rather than excluding
+  # vocal tracks, duck them a little further where they overlap speech.
+  vocal_score_threshold: 0.6
+  duck_extra_db_vocal: 4.0
 
 music:
   license_mode: personal       # personal | cleared
@@ -166,5 +171,11 @@ music:
   exclude_russian: true
   exclude_artists: []          # extra artists to drop, by name
   keep_artists: []             # overrides, kept even if detected as Russian
-  # Optional: drop tracks below this Spotify instrumentalness. Off by default.
+  # Optional: drop tracks below this Spotify instrumentalness (playlist source
+  # only -- an mp3 carries no such field). Off by default.
   min_instrumentalness: null
+  # Optional: drop audio tracks whose measured vocal presence exceeds this
+  # (0..1). Vocals compete with the Russian narration in the round video
+  # messages. Off by default so scores are reported before anything is dropped;
+  # 0.6 separates sung vocals from instrumental on the measured scale.
+  max_vocal_score: null

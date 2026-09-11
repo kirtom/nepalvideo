@@ -336,6 +336,8 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
             return {"source": "audio", "error": "no audio files"}
         licences = _licence_manifest(music_dir)
         exclude_ru = bool(cfg.get("music.exclude_russian", False))
+        max_vocal = cfg.get("music.max_vocal_score", None)
+        max_vocal = float(max_vocal) if max_vocal is not None else None
         extra = cfg.get("music.exclude_artists", []) or []
         keep = cfg.get("music.keep_artists", []) or []
         excluded: list[dict[str, Any]] = []
@@ -360,13 +362,37 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
                                      "file": f.name, "reason": reason})
                     log.info("S02.7 excluded %s - %s (%s)", t.artist, t.title, reason)
                     continue
+            if max_vocal is not None and t.vocal_score > max_vocal:
+                excluded.append({"title": t.title, "artist": t.artist, "file": f.name,
+                                 "reason": f"vocal score {t.vocal_score:.2f} above "
+                                           f"max_vocal_score {max_vocal:.2f}"})
+                log.info("S02.7 excluded %s - %s (vocals %.2f)",
+                         t.artist, t.title, t.vocal_score)
+                continue
             tracks.append(t)
-            log.info("S02.7 [%d/%d] %s - %s: %.0f bpm, %d beats, dyn %.3f, key %s",
+            log.info("S02.7 [%d/%d] %s - %s: %.0f bpm, %d beats, dyn %.3f, "
+                     "key %s, vocals %.2f%s",
                      i, len(audio), t.artist or "?", t.title or f.stem,
-                     t.tempo_bpm, len(t.beats), t.dyn_range, t.key_est)
+                     t.tempo_bpm, len(t.beats), t.dyn_range, t.key_est,
+                     t.vocal_score, "  <- vocal-heavy" if t.vocal_score >= 0.6 else "")
         report["n_audio_files"] = len(audio)
         report["n_excluded"] = len(excluded)
         report["excluded"] = excluded
+        if tracks:
+            vocal_heavy = [t for t in tracks if t.vocal_score >= 0.6]
+            report["n_vocal_heavy"] = len(vocal_heavy)
+            report["vocal_scores"] = {
+                (t.artist or "?") + " - " + (t.title or t.track_id):
+                    round(t.vocal_score, 3) for t in tracks}
+            if vocal_heavy:
+                log.info(
+                    "S02.7 %d of %d tracks score >=0.60 for vocals. They will be "
+                    "ducked further under narration (render.duck_extra_db_vocal) "
+                    "rather than excluded, since the commentary is sparse. Set "
+                    "music.max_vocal_score only if you want them dropped outright: %s",
+                    len(vocal_heavy), len(tracks),
+                    ", ".join(f"{t.title or t.track_id} ({t.vocal_score:.2f})"
+                              for t in vocal_heavy[:6]))
 
     elif source == "playlist":
         if csv_path is None or not csv_path.exists():
@@ -411,7 +437,8 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
         "duration_s": t.duration_s, "tempo_bpm": t.tempo_bpm, "key_est": t.key_est,
         "energy_mean": t.energy_mean, "energy_p95": t.energy_p95,
         "energy_p10": t.energy_p10, "centroid": t.centroid,
-        "onset_rate": t.onset_rate, "assigned_act": None,
+        "onset_rate": t.onset_rate, "vocal_score": t.vocal_score,
+        "assigned_act": None,
     } for t in tracks])
     db.upsert(conn, "music_sections", ["section_id"],
               [{"section_id": s["section_id"], "track_id": s["track_id"],
@@ -502,7 +529,8 @@ def segment_acts(cfg: Config, conn) -> dict[str, Any]:
 def day_stats(conn) -> list[acts_mod.DayStat]:
     """One row per trek day, in Nepal local time."""
     rows = [dict(r) for r in conn.execute(
-        "SELECT created_at_utc, alt_dem_m FROM assets WHERE created_at_utc IS NOT NULL")]
+        "SELECT created_at_utc, alt_dem_m, place_name FROM assets "
+        "WHERE created_at_utc IS NOT NULL")]
     track = [dict(r) for r in conn.execute(
         "SELECT ts_utc, alt_dem_m FROM gps_points WHERE alt_dem_m IS NOT NULL")]
     if not rows:
@@ -515,6 +543,7 @@ def day_stats(conn) -> list[acts_mod.DayStat]:
 
     by_day: dict[int, list[float]] = {}
     bounds: dict[int, list[datetime]] = {}
+    on_route: dict[int, int] = {}
     for r in rows:
         ts = _dt(r["created_at_utc"])
         if not ts:
@@ -523,6 +552,10 @@ def day_stats(conn) -> list[acts_mod.DayStat]:
         bounds.setdefault(d, []).append(ts)
         if r["alt_dem_m"] is not None:
             by_day.setdefault(d, []).append(float(r["alt_dem_m"]))
+        # An asset with a DEM altitude or a gazetteer place name is inside the
+        # reference data's coverage, which is the trek region.
+        if r["alt_dem_m"] is not None or r["place_name"]:
+            on_route[d] = on_route.get(d, 0) + 1
     for r in track:
         ts = _dt(r["ts_utc"])
         if ts:
@@ -540,7 +573,8 @@ def day_stats(conn) -> list[acts_mod.DayStat]:
             start_utc=ts_list[0], end_utc=ts_list[-1],
             # asset volume is how the trek window is found: a trek is a dense
             # burst of capture, planning photos are sparse and scattered
-            asset_count=len(bounds[d])))
+            asset_count=len(bounds[d]),
+            on_route_count=on_route.get(d, 0)))
     return out
 
 
@@ -649,18 +683,48 @@ def print_chronology(cfg: Config) -> int:
         print(f"{unplaced} media asset(s) have no position -- outside the GPS envelope "
               f"or across a gap longer than "
               f"{float(cfg.get('spine.max_interp_gap_s'))/3600:.0f} h")
-    no_alt = conn.execute(
-        "SELECT COUNT(*) n FROM assets WHERE lat IS NOT NULL "
-        "AND alt_dem_m IS NULL").fetchone()["n"]
-    if no_alt:
-        print(f"{no_alt} placed asset(s) have no altitude -- SRTM tiles missing "
-              f"(run tools/fetch_reference.py)")
-    no_place = conn.execute(
-        "SELECT COUNT(*) n FROM assets WHERE lat IS NOT NULL "
-        "AND place_name IS NULL").fetchone()["n"]
-    if no_place:
-        print(f"{no_place} placed asset(s) have no place name -- GeoNames gazetteer "
-              f"missing (run tools/fetch_reference.py)")
+    # Distinguish missing reference data (actionable) from assets that are simply
+    # not in the trek region -- planning photos taken at home have no Nepal
+    # altitude or place name and never should, so reporting them as a missing
+    # tile sends the operator to fetch data that would change nothing.
+    trek_box = conn.execute(
+        "SELECT MIN(lat) la0, MIN(lon) lo0, MAX(lat) la1, MAX(lon) lo1 "
+        "FROM assets WHERE alt_dem_m IS NOT NULL").fetchone()
+
+    def _split(column: str) -> tuple[int, int]:
+        if not trek_box or trek_box["la0"] is None:
+            n = conn.execute(f"SELECT COUNT(*) n FROM assets WHERE lat IS NOT NULL "
+                             f"AND {column} IS NULL").fetchone()["n"]
+            return n, 0
+        pad = 1.0
+        inside = conn.execute(
+            f"SELECT COUNT(*) n FROM assets WHERE lat IS NOT NULL AND {column} IS NULL "
+            f"AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
+            (trek_box["la0"] - pad, trek_box["la1"] + pad,
+             trek_box["lo0"] - pad, trek_box["lo1"] + pad)).fetchone()["n"]
+        total = conn.execute(
+            f"SELECT COUNT(*) n FROM assets WHERE lat IS NOT NULL "
+            f"AND {column} IS NULL").fetchone()["n"]
+        return inside, total - inside
+
+    alt_inside, alt_outside = _split("alt_dem_m")
+    if alt_inside:
+        print(f"{alt_inside} asset(s) in the trek region have no altitude -- "
+              f"SRTM tile missing, run `nepal fetch-reference`")
+    if alt_outside:
+        print(f"{alt_outside} asset(s) have no altitude because they are outside the "
+              f"trek region (planning photos taken elsewhere) -- expected")
+
+    place_inside, place_outside = _split("place_name")
+    if place_inside:
+        gaz = cfg.geonames_path
+        print(f"{place_inside} asset(s) in the trek region have no place name -- "
+              + (f"gazetteer missing at {gaz}, run `nepal fetch-reference`"
+                 if not gaz.exists() else
+                 "no named place within 5 km of those coordinates"))
+    if place_outside:
+        print(f"{place_outside} asset(s) have no place name because they are outside "
+              f"the gazetteer's country -- expected")
 
     if bounds:
         print("\nacts:")

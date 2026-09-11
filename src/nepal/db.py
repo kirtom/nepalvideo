@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS music_tracks (
   energy_p10  REAL,
   centroid    REAL,
   onset_rate  REAL,
+  vocal_score REAL,          -- ADDITION: measured vocal presence, 0..1
   assigned_act INTEGER
 );
 
@@ -183,9 +184,21 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+# Columns added after the first release. SQLite cannot add a column
+# conditionally in DDL, so they are applied as idempotent migrations -- a
+# database created by an earlier run must not have to be rebuilt.
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("music_tracks", "vocal_score", "REAL"),
+)
+
+
 def init(db_path: str | Path) -> sqlite3.Connection:
     conn = connect(db_path)
     conn.executescript(SCHEMA)
+    for table, column, coltype in MIGRATIONS:
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
     conn.commit()
     return conn
 

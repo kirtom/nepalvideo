@@ -460,3 +460,80 @@ def test_read_tags_on_a_non_audio_file(tmp_path):
     f = tmp_path / "notaudio.mp3"
     f.write_bytes(b"this is not an mp3")
     assert read_tags(f) == (None, None)
+
+
+# -- vocal detection ---------------------------------------------------
+
+from nepal.spine.music import vocal_likelihood
+
+
+def _synth(expr, dur=12, sr=22050):
+    """Render an ffmpeg expression to samples, for testing the detector."""
+    import subprocess, tempfile, pathlib as _pl
+    librosa = pytest.importorskip("librosa")
+    out = _pl.Path(tempfile.mkdtemp()) / "s.wav"
+    esc = expr.replace(",", "\\,")
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                        "-f", "lavfi", "-i", f"aevalsrc={esc}:d={dur}:s={sr}",
+                        "-y", str(out)], capture_output=True)
+    if r.returncode != 0:
+        pytest.skip("ffmpeg unavailable")
+    y, got_sr = librosa.load(str(out), mono=True)
+    return y, got_sr
+
+
+@pytest.mark.slow
+def test_syllabic_modulation_reads_as_vocal():
+    """Voice modulates amplitude at 3-8 Hz in the formant band -- the standard
+    speech/music discriminator."""
+    y, sr = _synth("0.5*sin(2*PI*700*t)*(0.5+0.5*sin(2*PI*5*t))"
+                   "+0.3*sin(2*PI*1400*t)*(0.5+0.5*sin(2*PI*5.5*t))")
+    assert vocal_likelihood(y, sr, tempo_bpm=90) > 0.7
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("expr,label", [
+    ("0.5*sin(2*PI*220*t)+0.3*sin(2*PI*330*t)", "bass pad"),
+    ("0.5*sin(2*PI*1200*t)+0.3*sin(2*PI*1800*t)", "bright pad"),
+    ("0.5*sin(2*PI*300*t)*(0.3+0.7*pow(sin(2*PI*t/20),2))", "slow swell"),
+])
+def test_sustained_material_reads_as_instrumental(expr, label):
+    """Guards the first formulation's failure: a ratio between modulation bands
+    is answered by noise when a track has no modulation at all, and scored a
+    steady two-tone pad at 0.744 -- indistinguishable from a sung vocal.
+    Modulation depth asks the physical question instead."""
+    y, sr = _synth(expr)
+    assert vocal_likelihood(y, sr) < 0.3, label
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("expr,tempo,label", [
+    ("0.5*sin(2*PI*400*t)*exp(-6*mod(t,0.5))", 120, "2 Hz pluck"),
+    ("0.5*sin(2*PI*600*t)*exp(-4*mod(t,1.0))", 60, "1 Hz pluck"),
+])
+def test_rhythmic_articulation_is_not_mistaken_for_voice(expr, tempo, label):
+    """Guards the second failure: a plucked figure modulates at harmonics of its
+    note rate, which land inside the syllabic band and scored a full 1.0.
+    Syllables are irregular, articulation is phase-locked to the beat, so energy
+    on beat harmonics is discounted using the tempo already measured."""
+    y, sr = _synth(expr)
+    assert vocal_likelihood(y, sr, tempo_bpm=tempo) < 0.6, label
+
+
+@pytest.mark.slow
+def test_voice_outscores_rhythmic_instrumental_by_a_usable_margin():
+    voice, sr1 = _synth("0.5*sin(2*PI*700*t)*(0.5+0.5*sin(2*PI*5.3*t))")
+    pluck, sr2 = _synth("0.5*sin(2*PI*400*t)*exp(-6*mod(t,0.5))")
+    v = vocal_likelihood(voice, sr1, tempo_bpm=120)
+    p = vocal_likelihood(pluck, sr2, tempo_bpm=120)
+    assert v - p > 0.3, f"voice {v:.2f} vs pluck {p:.2f}"
+
+
+def test_vocal_likelihood_on_empty_input():
+    import numpy as _np
+    assert vocal_likelihood(_np.array([]), 22050) == 0.0
+
+
+def test_vocal_likelihood_on_silence():
+    import numpy as _np
+    assert vocal_likelihood(_np.zeros(22050), 22050) == 0.0
