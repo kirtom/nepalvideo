@@ -14,6 +14,11 @@ dependencies = [
   "numpy>=1.24",
   "scipy>=1.10",          # Hungarian assignment, KD-tree, signal
   "pillow>=10.0",         # frame IO for the FOV solver
+  # iPhones shoot HEIC by default and Pillow cannot decode it alone. Core, not
+  # an extra: without it S03.0 loses roughly half the photographs -- 339 of 706
+  # on this corpus -- and a pipeline that silently drops half its stills by
+  # default is badly defaulted, not minimally installed.
+  "pillow-heif>=0.15",
   "pyyaml>=6.0",
   "python-dateutil>=2.8",
 ]

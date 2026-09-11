@@ -317,7 +317,8 @@ def _doctor(cfg) -> int:
         print(f"  [{'ok' if present else '--'}] {tool:<10} {why}")
     print("python packages:")
     for mod, extra in [("numpy", "core"), ("scipy", "core"), ("PIL", "core"),
-                       ("yaml", "core"), ("librosa", "music"), ("soundfile", "music"),
+                       ("yaml", "core"), ("pillow_heif", "core -- .heic photos"),
+                       ("librosa", "music"), ("soundfile", "music"),
                        ("faster_whisper", "asr"), ("cv2", "vision"),
                        ("open_clip", "semantic"), ("boto3", "cloud")]:
         try:

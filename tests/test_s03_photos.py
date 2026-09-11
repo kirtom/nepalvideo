@@ -33,7 +33,7 @@ BOUNDS = [
 ]
 
 
-def write_jpeg(path, kind="detailed", size=(320, 240)):
+def write_jpeg(path, kind="detailed", size=(320, 240), fmt=None):
     from PIL import Image
     path.parent.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(abs(hash(path.name)) % 2**32)
@@ -43,7 +43,7 @@ def write_jpeg(path, kind="detailed", size=(320, 240)):
         arr = np.full((size[1], size[0], 3), 253, dtype=np.uint8)
     else:                                   # flat grey: no detail at all
         arr = np.full((size[1], size[0], 3), 128, dtype=np.uint8)
-    Image.fromarray(arr).save(path, quality=95)
+    Image.fromarray(arr).save(path, format=fmt, quality=95)
     return path
 
 
@@ -71,9 +71,9 @@ def project(tmp_path):
     conn.close()
 
 
-def add_photo(conn, data, name, when, *, kind="detailed", curve="phone"):
+def add_photo(conn, data, name, when, *, kind="detailed", curve="phone", fmt=None):
     rel = f"media_from_phones/keller/{name}"
-    write_jpeg(data / rel, kind)
+    write_jpeg(data / rel, kind, fmt=fmt)
     conn.execute(
         "INSERT INTO assets(asset_id, s3_key, source, kind, quality_curve, "
         "created_at_utc, lat, lon, alt_dem_m, place_name, width, height) "
@@ -217,3 +217,62 @@ def test_migration_refuses_to_discard_existing_shots(tmp_path):
     raw.close()
     with pytest.raises(RuntimeError, match="would discard"):
         db.init(p)
+
+
+# -- HEIC: half the corpus, and Pillow cannot decode it alone -----------
+
+def test_heic_photographs_are_decoded(project):
+    """iPhones shoot HEIC by default. Without a decoder S03.0 dropped 339 of
+    706 photographs -- and reported them as an unexplained 'unreadable'."""
+    pytest.importorskip("pillow_heif")
+    from nepal.process import stills
+    assert stills.heif_available(), "pillow-heif is installed but not registered"
+
+    cfg, conn, data = project
+    add_photo(conn, data, "shot.heic", TREK + timedelta(days=4), fmt="HEIF")
+
+    rep = build_photo_shots(cfg, conn)
+    assert rep["n_shots"] == 1, rep["rejected"]
+    assert rep["rejected"] == {}
+    assert conn.execute("SELECT media_kind FROM shots").fetchone()[0] == "photo"
+
+
+def test_a_heic_without_a_decoder_names_the_remedy(project, monkeypatch):
+    """The count alone sent me looking for corrupt files. The extension and the
+    pip command turn it into a one-line fix."""
+    from nepal.process import stills
+    monkeypatch.setattr(stills, "_HEIF", False)
+    cfg, conn, data = project
+    # a file that is not decodable whatever the plugin state
+    rel = "media_from_phones/keller/broken.heic"
+    (data / rel).parent.mkdir(parents=True, exist_ok=True)
+    (data / rel).write_bytes(b"not an image")
+    conn.execute(
+        "INSERT INTO assets(asset_id, s3_key, source, kind, quality_curve, "
+        "created_at_utc) VALUES ('b',?, 'phone_keller','photo','phone',?)",
+        (f"raw/{rel}", (TREK + timedelta(days=4)).isoformat()))
+    conn.commit()
+
+    rep = build_photo_shots(cfg, conn)
+    assert rep["n_shots"] == 0
+    assert rep["n_needs_heif"] == 1
+    key = next(iter(rep["rejected"]))
+    assert ".heic" in key and "pillow-heif" in key
+
+
+def test_other_unreadable_files_name_their_format(project):
+    """Not every failure is HEIC, so the bucket says which format failed."""
+    cfg, conn, data = project
+    rel = "media_from_phones/keller/junk.png"
+    (data / rel).parent.mkdir(parents=True, exist_ok=True)
+    (data / rel).write_bytes(b"not an image")
+    conn.execute(
+        "INSERT INTO assets(asset_id, s3_key, source, kind, quality_curve, "
+        "created_at_utc) VALUES ('j',?, 'phone_keller','photo','phone',?)",
+        (f"raw/{rel}", (TREK + timedelta(days=4)).isoformat()))
+    conn.commit()
+
+    rep = build_photo_shots(cfg, conn)
+    key = next(iter(rep["rejected"]))
+    assert ".png" in key and "pillow-heif" not in key
+    assert rep["n_needs_heif"] == 0

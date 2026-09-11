@@ -70,6 +70,7 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
             unplaced += 1
             continue
         src = root / Path(r["s3_key"]).relative_to("raw")
+        ext = src.suffix.lower()
         if not src.exists():
             rejected["missing file"] = rejected.get("missing file", 0) + 1
             continue
@@ -82,8 +83,15 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
                 arr = np.asarray(im)
                 w, h = im.size
         except (OSError, ValueError) as exc:
+            # Name the format. "unreadable" as a single bucket hid that 339 of
+            # 706 photographs were HEIC and simply had no decoder installed --
+            # a fixable one-line problem reported as an unexplained loss.
             log.debug("could not read %s: %s", src.name, exc)
-            rejected["unreadable"] = rejected.get("unreadable", 0) + 1
+            if ext in stills.HEIF_EXT and not stills.heif_available():
+                key = f"{ext} needs a decoder (pip install pillow-heif)"
+            else:
+                key = f"unreadable {ext or 'file'} ({type(exc).__name__})"
+            rejected[key] = rejected.get(key, 0) + 1
             continue
 
         sharp = stills.sharpness(arr)
@@ -127,8 +135,17 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
         log.info("S03.0 %d photo(s) fall outside every act and were skipped", unplaced)
     for reason, n in sorted(rejected.items(), key=lambda kv: -kv[1]):
         log.info("S03.0 %d photo(s) rejected: %s", n, reason)
+    missing_heif = sum(n for k, n in rejected.items() if "pillow-heif" in k)
+    if missing_heif:
+        log.warning(
+            "S03.0 %d HEIC photograph(s) could not be decoded -- that is %.0f%% "
+            "of the dated photographs, and they are iPhone stills, not junk. "
+            "Install the decoder and re-run: pip install pillow-heif",
+            missing_heif, missing_heif / max(len(rows), 1) * 100)
     return {"n_photos": len(rows), "n_shots": len(out), "per_act": by_act,
-            "n_unplaced": unplaced, "rejected": rejected}
+            "n_unplaced": unplaced, "rejected": rejected,
+            "heif_decoder": stills.heif_available(),
+            "n_needs_heif": missing_heif}
 
 
 def run(cfg: Config, *, force: bool = False) -> dict[str, Any]:

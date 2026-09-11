@@ -25,6 +25,27 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
+# .heic is in PHOTO_EXT because iPhones shoot it by default, but Pillow cannot
+# decode HEIF on its own -- and a photo the pipeline classifies but cannot open
+# is worse than one it never saw, because it is counted as material and then
+# silently lost. On this corpus that was 339 of 706 photographs, very nearly
+# half. pillow-heif registers the opener when it is installed; heif_available()
+# reports the truth so the operator is told what to install rather than left
+# with a count of unreadable files.
+try:                                    # pragma: no cover - import-time probe
+    import pillow_heif as _pillow_heif
+    _pillow_heif.register_heif_opener()
+    _HEIF = True
+except Exception:                       # pragma: no cover - absent or broken
+    _HEIF = False
+
+HEIF_EXT = {".heic", ".heif"}
+
+
+def heif_available() -> bool:
+    """Whether .heic photographs can be decoded in this environment."""
+    return _HEIF
+
 
 def sharpness(img: np.ndarray) -> float:
     """Laplacian variance -- the same measure the FOV frame picker uses."""
