@@ -658,6 +658,19 @@ def apply_offsets(conn, offsets: dict[str, float]) -> int:
     return n
 
 
+def stored_offsets(conn) -> dict[str, float]:
+    """The clock offsets S01.5 already solved, read back from ``decisions``."""
+    out: dict[str, float] = {}
+    for r in conn.execute("SELECT key, value FROM decisions "
+                          "WHERE key LIKE 'clock_offset_%_s'"):
+        label = str(r["key"])[len("clock_offset_"):-len("_s")]
+        try:
+            out[label] = float(r["value"])
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 # ---------------------------------------------------------------- driver
 
 def run(cfg: Config, *, force: bool = False, skip_fov: bool = False,
@@ -677,6 +690,23 @@ def run(cfg: Config, *, force: bool = False, skip_fov: bool = False,
         db.mark_unit(conn, STAGE, "chapters", detail=json.dumps(report["chapters"]))
     else:
         report["chapters"] = {"skipped": "already done"}
+
+    # Rebuilding the manifest rewrites created_at and clears created_at_utc,
+    # because the corrected time depends on offsets the manifest step does not
+    # know. If the clock step is going to run it fills them in; if it is being
+    # skipped they would stay NULL and every asset would drop out of the film.
+    # Re-solving the clocks to avoid that is wasted work -- the offsets are
+    # recorded decisions, so replay them instead. This is the path a fix to the
+    # manifest alone should take: minutes rather than an hour of GCC-PHAT.
+    clock_will_run = not skip_clock and (force or "clock" not in done)
+    if "skipped" not in report["manifest"] and not clock_will_run:
+        offsets = stored_offsets(conn)
+        report["applied_utc_to_assets"] = apply_offsets(conn, offsets)
+        log.info("S01 the manifest changed but the clocks did not: re-derived "
+                 "created_at_utc for %d asset(s) from the stored offsets (%s)",
+                 report["applied_utc_to_assets"],
+                 ", ".join(f"{k}={v:+.0f}s" for k, v in sorted(offsets.items()))
+                 or "none recorded")
 
     report["gps_check"] = check_camera_gps(cfg, conn)
     db.mark_unit(conn, STAGE, "gps_check")
