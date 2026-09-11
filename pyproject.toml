@@ -20,7 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # S02.7 music analysis
-music = ["librosa>=0.10", "soundfile>=0.12"]
+music = ["librosa>=0.10", "soundfile>=0.12", "mutagen>=1.45"]
 # S02.6 / S03.5 speech
 asr = ["faster-whisper>=1.0"]
 # S03 vision metrics

@@ -335,17 +335,38 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
             log.error("S02.7 music.source=audio but music/ holds no playable audio")
             return {"source": "audio", "error": "no audio files"}
         licences = _licence_manifest(music_dir)
-        for f in audio:
+        exclude_ru = bool(cfg.get("music.exclude_russian", False))
+        extra = cfg.get("music.exclude_artists", []) or []
+        keep = cfg.get("music.keep_artists", []) or []
+        excluded: list[dict[str, Any]] = []
+        for i, f in enumerate(audio, 1):
             try:
-                tracks.append(music_mod.analyse_track(
+                t = music_mod.analyse_track(
                     f, n_sections=int(cfg.get("spine.music_segments")),
-                    licence=music_mod.detect_licence(f, licences)))
+                    licence=music_mod.detect_licence(f, licences))
             except ImportError:
                 log.warning("S02.7 librosa not installed (pip install '.[music]')")
                 return {"source": "audio", "skipped": "librosa not installed"}
             except Exception as exc:                      # noqa: BLE001
                 log.warning("S02.7 could not analyse %s: %s", f.name, exc)
+                continue
+            # The same exclusion applies whether metadata came from a playlist
+            # or from the file's own tags.
+            if exclude_ru:
+                drop, reason = playlist_mod.is_russian(
+                    t.title or f.stem, t.artist, extra_artists=extra, keep_artists=keep)
+                if drop:
+                    excluded.append({"title": t.title, "artist": t.artist,
+                                     "file": f.name, "reason": reason})
+                    log.info("S02.7 excluded %s - %s (%s)", t.artist, t.title, reason)
+                    continue
+            tracks.append(t)
+            log.info("S02.7 [%d/%d] %s - %s: %.0f bpm, %d beats, dyn %.3f, key %s",
+                     i, len(audio), t.artist or "?", t.title or f.stem,
+                     t.tempo_bpm, len(t.beats), t.dyn_range, t.key_est)
         report["n_audio_files"] = len(audio)
+        report["n_excluded"] = len(excluded)
+        report["excluded"] = excluded
 
     elif source == "playlist":
         if csv_path is None or not csv_path.exists():
@@ -414,7 +435,8 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
     mmap = music_mod.build_music_map(
         tracks, assignment, cfg.act_targets(),
         total_s=float(cfg.get("film.total_duration_s")),
-        silence_s=float(cfg.get("assemble.silence_window_s")))
+        silence_s=float(cfg.get("assemble.silence_window_s")),
+        feature_mask=playlist_mod.feature_mask_for(source))
     problems = music_mod.check_music_map(
         mmap, target_s=float(cfg.get("film.total_duration_s")),
         tolerance_s=float(cfg.get("film.duration_tolerance_s")))

@@ -227,7 +227,9 @@ def test_music_map_structure_and_acceptance():
     tracks = library()
     a = assign_acts(tracks)
     m = build_music_map(tracks, a, ACT_SPECS, total_s=1200, silence_s=3.0)
-    assert check_music_map(m, target_s=1200) == []
+    # min_headroom=1.0 isolates structure from library size: this five-track
+    # fixture is deliberately small, and library adequacy has its own tests.
+    assert check_music_map(m, target_s=1200, min_headroom=1.0) == []
     assert len(m["acts"]) == 5
     assert m["acts"][0]["t_start"] == 0.0
     # acts are contiguous
@@ -250,7 +252,7 @@ def test_every_act_gets_a_swell_even_without_a_rising_section():
                        "end_s": 60.0, "energy": 0.5, "is_swell": 0}]
     m = build_music_map(tracks, assign_acts(tracks), ACT_SPECS, total_s=1200)
     assert all(a["swells"] for a in m["acts"])
-    assert check_music_map(m, target_s=1200) == []
+    assert check_music_map(m, target_s=1200, min_headroom=1.0) == []
 
 
 def test_beat_grid_is_offset_onto_the_film_timeline():
@@ -279,3 +281,182 @@ def test_detect_licence_from_directory():
 def test_detect_licence_from_manifest():
     got = detect_licence(pathlib.Path("music/Says.mp3"), {"Says.mp3": "cleared"})
     assert got == "cleared"
+
+
+# -- multi-track acts --------------------------------------------------
+
+from nepal.spine.music import fill_act, rank_for_act, read_tags
+
+
+def song(tid, artist, dur=210.0, energy=0.3, dyn=0.15, centroid=1500.0,
+         onset=2.0, tempo=100.0):
+    t = Track(track_id=tid, s3_key="", title=tid, artist=artist, duration_s=dur,
+              tempo_bpm=tempo, key_est="Amin", energy_mean=energy,
+              energy_p95=energy + dyn / 2, energy_p10=energy - dyn / 2,
+              centroid=centroid, onset_rate=onset)
+    t.sections = [{"section_id": f"{tid}_s{i}", "track_id": tid,
+                   "start_s": i * dur / 4, "end_s": (i + 1) * dur / 4,
+                   "energy": energy * (1 + i * 0.2), "is_swell": 1 if i == 2 else 0}
+                  for i in range(4)]
+    t.beats = [i * 60.0 / tempo for i in range(int(dur * tempo / 60))]
+    t.downbeats = t.beats[::4]
+    return t
+
+
+def spread(n):
+    """n tracks of 3:30 spanning the act targets."""
+    out = []
+    for i in range(n):
+        f = i / max(n - 1, 1)
+        out.append(song(f"t{i:02d}", f"artist{i % 7}", 210,
+                        0.05 + 0.8 * f, 0.03 + 0.25 * f, 600 + 2600 * f,
+                        0.5 + 4 * f, 58 + 82 * f))
+    return out
+
+
+def test_fill_act_lays_multiple_tracks_end_to_end():
+    """One track per act does not cover a 20-minute film: Act 3 is allocated
+    407 s and a typical song is 210 s."""
+    pool = spread(8)
+    segs = fill_act(3, pool[5], pool, 407.0)
+    assert len(segs) >= 2
+    assert segs[0]["track_id"] == pool[5].track_id, "the assigned track opens the act"
+    assert segs[0]["t_in"] == 0.0
+    assert segs[-1]["t_end"] == pytest.approx(407.0)
+
+
+def test_fill_act_segments_are_contiguous_and_ordered():
+    pool = spread(8)
+    segs = fill_act(3, pool[5], pool, 407.0)
+    for prev, nxt in zip(segs, segs[1:]):
+        assert prev["t_end"] == pytest.approx(nxt["t_in"])
+
+
+def test_fill_act_needs_only_one_track_for_a_short_act():
+    pool = spread(8)
+    segs = fill_act(4, pool[7], pool, 113.0)
+    assert len(segs) == 1
+    assert segs[0]["t_end"] == pytest.approx(113.0)
+
+
+def test_fill_act_prefers_tracks_not_used_elsewhere():
+    pool = spread(8)
+    used = {t.track_id for t in pool[1:6]}
+    segs = fill_act(3, pool[0], pool, 407.0, already_used=used)
+    fillers = [s["track_id"] for s in segs[1:]]
+    assert any(f not in used for f in fillers), "should reach for an unused track"
+
+
+def test_fill_act_reuses_when_the_library_runs_out():
+    """A repeated track beats an act with no music."""
+    pool = [song("only", "a", dur=100.0)]
+    segs = fill_act(3, pool[0], pool, 407.0)
+    assert segs
+    assert segs[-1]["t_end"] == pytest.approx(407.0)
+
+
+def test_fill_act_with_no_tracks():
+    assert fill_act(3, None, [], 407.0) == []
+
+
+def test_rank_for_act_puts_the_quiet_track_first_for_act_one():
+    pool = spread(8)
+    ranked = rank_for_act(pool, 1)
+    assert ranked[0].energy_mean < ranked[-1].energy_mean
+
+
+def test_rank_for_act_puts_the_loud_track_first_for_act_four():
+    pool = spread(8)
+    ranked = rank_for_act(pool, 4)
+    assert ranked[0].energy_mean > ranked[-1].energy_mean
+
+
+# -- beat grid coverage ------------------------------------------------
+
+def test_beat_grid_covers_the_whole_act_with_enough_tracks():
+    """S06 snaps every cut to the grid, so an act whose grid stops early cannot
+    be cut on the beat past that point."""
+    pool = spread(12)
+    m = build_music_map(pool, assign_acts(pool), ACT_SPECS, total_s=1200)
+    for act in m["acts"]:
+        span = act["t_end"] - act["t_start"]
+        assert act["beat_grid_covers_s"] >= span * 0.9, \
+            f"act {act['act']}: grid covers {act['beat_grid_covers_s']:.0f}s of {span:.0f}s"
+
+
+def test_a_library_shorter_than_the_film_is_flagged():
+    """The clean top-level question. Coverage cannot detect a thin library
+    because fill_act reuses tracks rather than leaving an act silent, and
+    per-act repeat counts stay low until the library is tiny. Total minutes
+    against the film's length is unambiguous."""
+    pool = [song(f"short{i}", chr(97 + i), dur=60.0, energy=0.05 + 0.2 * i)
+            for i in range(5)]                       # 5 min of music, 20 min film
+    m = build_music_map(pool, assign_acts(pool), ACT_SPECS, total_s=1200)
+    probs = check_music_map(m, target_s=1200)
+    assert any("must repeat" in p for p in probs), probs
+    assert any("more minutes" in p for p in probs), "say how much is missing"
+
+
+def test_a_library_with_little_headroom_is_flagged_separately():
+    """Enough music, but no choice -- acts get whatever is nearest."""
+    pool = [song(f"t{i}", chr(97 + i), dur=210.0, energy=0.05 + 0.2 * i)
+            for i in range(7)]                       # 24.5 min for a 20 min film
+    m = build_music_map(pool, assign_acts(pool), ACT_SPECS, total_s=1200)
+    probs = check_music_map(m, target_s=1200, min_headroom=2.0)
+    assert any("little to choose from" in p for p in probs), probs
+    assert not any("must repeat" in p for p in probs)
+
+
+def test_library_duration_is_reported():
+    pool = spread(12)
+    m = build_music_map(pool, assign_acts(pool), ACT_SPECS, total_s=1200)
+    assert m["library_duration_s"] == pytest.approx(12 * 210, abs=1)
+
+
+def test_a_healthy_library_passes_both_checks():
+    pool = spread(12)
+    m = build_music_map(pool, assign_acts(pool), ACT_SPECS, total_s=1200)
+    assert check_music_map(m, target_s=1200) == []
+
+
+def test_repetition_counts_are_reported_per_act():
+    pool = spread(12)
+    m = build_music_map(pool, assign_acts(pool), ACT_SPECS, total_s=1200)
+    for act in m["acts"]:
+        assert act["n_distinct_tracks"] >= 1
+        assert act["max_track_repeats"] >= 1
+
+
+def test_segments_carry_artist_and_title_for_the_gate_payload():
+    pool = spread(8)
+    m = build_music_map(pool, assign_acts(pool), ACT_SPECS, total_s=1200)
+    seg = m["acts"][0]["segments"][0]
+    assert "artist" in seg and "title" in seg
+    assert seg["src_in"] == 0.0 and seg["src_out"] > 0
+
+
+def test_track_id_still_names_the_opening_track():
+    """Kept for readability and backward compatibility with the earlier shape."""
+    pool = spread(8)
+    m = build_music_map(pool, assign_acts(pool), ACT_SPECS, total_s=1200)
+    for act in m["acts"]:
+        assert act["track_id"] == act["segments"][0]["track_id"]
+
+
+def test_map_reports_library_utilisation():
+    pool = spread(27)
+    m = build_music_map(pool, assign_acts(pool), ACT_SPECS, total_s=1200)
+    assert m["n_tracks_available"] == 27
+    assert 5 <= m["n_tracks_used"] <= 27
+
+
+# -- ID3 tags ----------------------------------------------------------
+
+def test_read_tags_on_a_missing_file(tmp_path):
+    assert read_tags(tmp_path / "absent.mp3") == (None, None)
+
+
+def test_read_tags_on_a_non_audio_file(tmp_path):
+    f = tmp_path / "notaudio.mp3"
+    f.write_bytes(b"this is not an mp3")
+    assert read_tags(f) == (None, None)

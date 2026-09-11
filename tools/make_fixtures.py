@@ -153,13 +153,38 @@ def photo(dest: Path, seed: int, when: datetime, lat: float, lon: float, alt: fl
     run(args)
 
 
-def music_track(dest: Path, seconds: float, freq: int, tempo: float) -> None:
+def music_track(dest: Path, seconds: float, freq: int, tempo: float, *,
+                swell_period: float = 20.0, click_gain: float = 0.35,
+                artist: str = "Fixture Artist", title: str | None = None) -> None:
+    """Synthetic music with real rhythm and real dynamics.
+
+    Pure tones are useless for testing S02.7: librosa finds no beats in a
+    continuous sine, so tempo comes back 0, the beat grid is empty and dynamic
+    range is ~0.0002. Every feature the act assignment depends on reads as
+    degenerate, and the audio path looks like it works when nothing has been
+    exercised.
+
+    So each track gets percussive noise bursts at the requested tempo, which
+    beat tracking can lock onto, and a slow amplitude swell, which gives
+    energy_p95 - energy_p10 something to measure.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
+    beat_period = 60.0 / max(tempo, 1.0)
+    expr = (
+        f"0.45*sin(2*PI*{freq}*t)"
+        f"*(0.25+0.75*pow(sin(2*PI*t/{swell_period}),2))"
+        f"+0.25*sin(2*PI*{freq * 2}*t)*pow(sin(2*PI*t/{swell_period}),2)"
+        f"+{click_gain}*random(0)*exp(-9*mod(t,{beat_period:.4f}))"
+    )
+    # Commas inside the expression (from pow() and mod()) are filter separators
+    # to ffmpeg's graph parser and must be escaped, or it reads the tail of the
+    # expression as a second filter and fails on "No option name near".
+    escaped = expr.replace("\\", "\\\\").replace(",", "\\,")
     run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-         "-f", "lavfi", "-i", f"sine=frequency={freq}:duration={seconds}",
-         "-f", "lavfi", "-i",
-         f"sine=frequency={freq*2}:duration={seconds}",
-         "-filter_complex", "[0][1]amix=inputs=2", "-c:a", "libmp3lame", "-b:a", "128k",
+         "-f", "lavfi", "-i", f"aevalsrc={escaped}:d={seconds}:s=44100",
+         "-c:a", "libmp3lame", "-b:a", "192k",
+         "-metadata", f"artist={artist}",
+         "-metadata", f"title={title or dest.stem}",
          "-y", str(dest)])
 
 
@@ -248,13 +273,22 @@ def build(root: Path, *, quick: bool = False) -> dict:
 
     # Distinct parameters per track: identical audio would be byte-identical and
     # the content-hash asset_id would legitimately collapse the two.
-    dur_m = 30 if quick else 90
-    music_track(root / "music" / "01_sparse_piano.mp3", dur_m, 220, 60)
-    music_track(root / "music" / "02_strings.mp3", dur_m + 1, 330, 90)
-    music_track(root / "music" / "03_swell.mp3", dur_m + 2, 440, 120)
-    music_track(root / "music" / "04_peak.mp3", dur_m + 3, 660, 140)
-    music_track(root / "music" / "05_return.mp3", dur_m + 4, 221, 61)
-    _write_playlist_csv(root / "music" / "rinse_and_repeat.csv")
+    # Tracks span the act targets: quiet/dark/slow through loud/bright/fast,
+    # with Act 1 and Act 5 sharing an artist so the callback bonus can fire.
+    dur_m = 40 if quick else 100
+    music_track(root / "music" / "01_sparse_piano.mp3", dur_m, 180, 58,
+                click_gain=0.10, swell_period=26, artist="Quiet Piano", title="Says")
+    music_track(root / "music" / "02_strings.mp3", dur_m + 1, 320, 88,
+                click_gain=0.22, swell_period=20, artist="Warm Strings", title="Near Light")
+    music_track(root / "music" / "03_swell.mp3", dur_m + 2, 430, 96,
+                click_gain=0.30, swell_period=11, artist="Post Rock", title="Longest Year")
+    music_track(root / "music" / "04_peak.mp3", dur_m + 3, 880, 138,
+                click_gain=0.55, swell_period=9, artist="Loud Crescendo", title="The Mountain")
+    music_track(root / "music" / "05_return.mp3", dur_m + 4, 186, 60,
+                click_gain=0.12, swell_period=24, artist="Quiet Piano", title="Ambre")
+    # A Russian-language track, so the exclusion path is exercised on real audio
+    music_track(root / "music" / "06_russian.mp3", dur_m, 300, 120,
+                click_gain=0.4, artist="Молчат Дома", title="Судно")
 
     truth = {
         "true_fov": TRUE_FOV,

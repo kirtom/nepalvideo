@@ -155,9 +155,10 @@ render:
 music:
   license_mode: personal       # personal | cleared
   # Source of track features: audio files in music/, or a playlist export.
-  # A playlist carries Spotify audio features but no dynamic range, so that
-  # dimension is masked out of the act distance rather than approximated.
-  source: playlist             # audio | playlist | auto
+  # Audio is strictly better: it yields real beat grids and swells (which S06
+  # needs to snap cuts) and real dynamic range, which Act 3's target leans on
+  # and which no playlist export provides.
+  source: audio                # audio | playlist | auto
   playlist_csv: null           # path; null means "the only .csv under music/"
   # Russian-language vocals compete with the Russian narration in the round
   # video messages, so they are excluded. Cyrillic detection is exact; the

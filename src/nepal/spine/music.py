@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import re
+import collections
 import statistics
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -40,6 +41,15 @@ LEVEL = {"low": -1.0, "low-mid": -0.5, "mid": 0.0, "mid-high": 0.5,
          "high": 1.0, "highest": 1.5, "any": 0.0}
 
 FEATURES = ("energy_mean", "dyn_range", "centroid", "onset_rate", "tempo_bpm")
+
+# Plain-language description of each act's target, for reports the operator reads.
+ACT_CHARACTER = {
+    1: "sparse and quiet -- solo piano, domestic, wistful",
+    2: "mid-energy and warm -- strings arriving over piano",
+    3: "building, with wide dynamic range -- slow post-rock swell or cold orchestral",
+    4: "the loudest and brightest thing you have -- it peaks then cuts to silence",
+    5: "quiet again, ideally the same artist or key as Act 1 -- the callback",
+}
 
 ACT_TARGETS: dict[int, dict[str, str]] = {
     1: {"energy_mean": "low",      "dyn_range": "low",  "centroid": "low",  "onset_rate": "low",  "tempo_bpm": "low"},
@@ -78,6 +88,37 @@ class Track:
     @property
     def dyn_range(self) -> float:
         return self.energy_p95 - self.energy_p10
+
+
+def read_tags(path: str | Path) -> tuple[str | None, str | None]:
+    """(artist, title) from the file's own metadata, or (None, None).
+
+    Tags beat filenames wherever they exist. The Act 5 callback bonus matches on
+    artist, so "03 - some_export_name.mp3" silently costs the film its callback
+    while an ID3 frame gets it right. mutagen is optional; without it, or on a
+    file carrying no tags, the filename parse still applies.
+    """
+    try:
+        import mutagen
+    except ImportError:
+        return None, None
+    try:
+        f = mutagen.File(str(path), easy=True)
+    except Exception:                                  # noqa: BLE001 - malformed tags
+        return None, None
+    if not f:
+        return None, None
+
+    def first(*keys: str) -> str | None:
+        for k in keys:
+            v = f.get(k)
+            if v:
+                text = str(v[0] if isinstance(v, list) else v).strip()
+                if text:
+                    return text
+        return None
+
+    return first("artist", "albumartist", "performer"), first("title")
 
 
 def parse_artist_title(filename: str) -> tuple[str | None, str]:
@@ -303,14 +344,97 @@ def allocate_act_durations(act_specs: Sequence[dict[str, Any]],
     return {a: round(cur[a], 3) for a in acts}
 
 
+def rank_for_act(tracks: Sequence[Track], act: int,
+                 feature_mask: Sequence[float] | None = None) -> list[Track]:
+    """Tracks ordered by how well they fit one act's target."""
+    if not tracks:
+        return []
+    mask = _resolve_mask(feature_mask)
+    z = znorm(_matrix(tracks))
+    tgt, w = target_vector(act), ACT_WEIGHTS[act] * mask
+    scored = [(float(np.linalg.norm((z[i] - tgt) * w)), t) for i, t in enumerate(tracks)]
+    return [t for _, t in sorted(scored, key=lambda kv: kv[0])]
+
+
+def fill_act(act: int, primary: Track | None, pool: Sequence[Track], duration_s: float,
+             *, already_used: set[str] | None = None,
+             feature_mask: Sequence[float] | None = None,
+             min_segment_s: float = 20.0) -> list[dict[str, Any]]:
+    """Lay tracks end to end until the act's runtime is covered.
+
+    One track per act does not cover a 20-minute film. Allocated durations are
+    167/287/407/113/227 s, and a typical song is around 210 s, so Act 3 runs
+    197 s -- nearly half its length -- past the end of its track. Since S06
+    snaps every cut to the beat grid, an act with no grid in its second half
+    cannot be cut on the beat there at all.
+
+    The primary track (from the Hungarian assignment) opens the act; the
+    remainder is filled with the next best-fitting tracks for the same act
+    target, preferring ones not used elsewhere so the film does not repeat
+    itself. Reuse is allowed when the library runs out, because a repeated
+    track is better than an act with no music.
+    """
+    used = set(already_used or ())
+    segments: list[dict[str, Any]] = []
+    cursor = 0.0
+
+    ordered: list[Track] = []
+    if primary is not None:
+        ordered.append(primary)
+    for t in rank_for_act([t for t in pool if t is not primary], act, feature_mask):
+        ordered.append(t)
+
+    fresh = [t for t in ordered if t.track_id not in used or t is primary]
+    recycled = [t for t in ordered if t not in fresh]
+
+    for candidate in fresh + recycled + ordered:      # ordered again = unrestricted reuse
+        if cursor >= duration_s - 1e-6:
+            break
+        remaining = duration_s - cursor
+        if remaining < min_segment_s and segments:
+            # stretch the last segment rather than leaving a stub
+            segments[-1]["t_end"] = round(duration_s, 3)
+            segments[-1]["src_out"] = round(
+                segments[-1]["src_in"] + (duration_s - segments[-1]["t_in"]), 3)
+            cursor = duration_s
+            break
+        take = min(candidate.duration_s or remaining, remaining)
+        if take <= 0:
+            continue
+        segments.append({
+            "track_id": candidate.track_id,
+            "title": candidate.title,
+            "artist": candidate.artist,
+            "t_in": round(cursor, 3),
+            "t_end": round(cursor + take, 3),
+            "src_in": 0.0,
+            "src_out": round(take, 3),
+        })
+        used.add(candidate.track_id)
+        cursor += take
+
+    if segments and cursor < duration_s - 1e-6:
+        # nothing left to add: extend the final segment and let the report say so
+        segments[-1]["t_end"] = round(duration_s, 3)
+        segments[-1]["src_out"] = round(
+            segments[-1]["src_in"] + (duration_s - segments[-1]["t_in"]), 3)
+    return segments
+
+
 def build_music_map(tracks: Sequence[Track], assignment: Assignment,
                     act_specs: Sequence[dict[str, Any]], *, total_s: float,
-                    silence_s: float = 3.0) -> dict[str, Any]:
+                    silence_s: float = 3.0,
+                    feature_mask: Sequence[float] | None = None) -> dict[str, Any]:
     """Emit ``work/music/music_map.json`` (spec S02.8).
 
+    Each act carries a sequence of track segments rather than a single track,
+    because acts are longer than songs. Beat grids and swells are merged across
+    the segments and expressed on the film timeline, so S06 has a continuous
+    grid to snap cuts to for the whole act.
+
     ``silence_window`` is the mandatory hard cut to silence after the Act 4
-    peak -- the single most powerful move in the film, per the brief -- so it
-    is placed at the end of Act 4 rather than left to the assembler.
+    peak -- the single most powerful move in the film, per the brief -- so it is
+    placed at the end of Act 4 rather than left to the assembler.
     """
     by_id = {t.track_id: t for t in tracks}
     durations = allocate_act_durations(act_specs, total_s)
@@ -318,39 +442,63 @@ def build_music_map(tracks: Sequence[Track], assignment: Assignment,
     acts_out: list[dict[str, Any]] = []
     t_cursor = 0.0
     silence: dict[str, float] | None = None
+    used: set[str] = set()
 
     for spec in sorted(act_specs, key=lambda s: int(s["act"])):
         act = int(spec["act"])
         dur = durations[act]
-        track = by_id.get(assignment.by_act.get(act, ""))
+        primary = by_id.get(assignment.by_act.get(act, ""))
         t_start, t_end = t_cursor, t_cursor + dur
+
+        segments = fill_act(act, primary, tracks, dur, already_used=used,
+                            feature_mask=feature_mask)
+        for seg in segments:
+            used.add(seg["track_id"])
 
         swells: list[float] = []
         beat_grid: list[float] = []
         downbeats: list[float] = []
-        if track:
-            swells = [round(t_start + float(s["start_s"]), 3)
-                      for s in track.sections
-                      if s.get("is_swell") and float(s["start_s"]) <= dur]
-            beat_grid = [round(t_start + b, 3) for b in track.beats if b <= dur]
-            downbeats = [round(t_start + b, 3) for b in track.downbeats if b <= dur]
-            if not swells and track.sections:
-                # every act needs at least one swell timestamp (acceptance
-                # criterion); fall back to the loudest section inside the act
-                inside = [s for s in track.sections if float(s["start_s"]) <= dur]
-                if inside:
-                    peak = max(inside, key=lambda s: float(s.get("energy", 0.0)))
-                    swells = [round(t_start + float(peak["start_s"]), 3)]
+        for seg in segments:
+            t = by_id.get(seg["track_id"])
+            if not t:
+                continue
+            seg_len = seg["t_end"] - seg["t_in"]
+            base = t_start + seg["t_in"] - seg["src_in"]
+            swells += [round(base + float(x["start_s"]), 3) for x in t.sections
+                       if x.get("is_swell")
+                       and seg["src_in"] <= float(x["start_s"]) < seg["src_in"] + seg_len]
+            beat_grid += [round(base + b, 3) for b in t.beats
+                          if seg["src_in"] <= b < seg["src_in"] + seg_len]
+            downbeats += [round(base + b, 3) for b in t.downbeats
+                          if seg["src_in"] <= b < seg["src_in"] + seg_len]
 
+        if not swells and segments:
+            # every act needs at least one swell timestamp (acceptance criterion);
+            # fall back to the loudest section of the opening track
+            t = by_id.get(segments[0]["track_id"])
+            inside = [x for x in (t.sections if t else []) if float(x["start_s"]) <= dur]
+            if inside:
+                peak = max(inside, key=lambda x: float(x.get("energy", 0.0)))
+                swells = [round(t_start + float(peak["start_s"]), 3)]
+
+        covered = segments[-1]["t_end"] if segments else 0.0
+        grid_end = max(beat_grid) - t_start if beat_grid else 0.0
+        plays = collections.Counter(seg["track_id"] for seg in segments)
+        max_repeats = max(plays.values()) if plays else 0
         acts_out.append({
             "act": act,
             "name": spec.get("name"),
-            "track_id": track.track_id if track else None,
+            "track_id": segments[0]["track_id"] if segments else None,
+            "segments": segments,
             "t_start": round(t_start, 3),
             "t_end": round(t_end, 3),
-            "swells": swells,
-            "beat_grid": beat_grid,
-            "downbeats": downbeats,
+            "music_covered_s": round(covered, 3),
+            "beat_grid_covers_s": round(grid_end, 3),
+            "n_distinct_tracks": len(plays),
+            "max_track_repeats": max_repeats,
+            "swells": sorted(swells),
+            "beat_grid": sorted(beat_grid),
+            "downbeats": sorted(downbeats),
         })
         if act == 4:
             silence = {"t_start": round(t_end, 3), "t_end": round(t_end + silence_s, 3)}
@@ -363,23 +511,68 @@ def build_music_map(tracks: Sequence[Track], assignment: Assignment,
         "assignment_cost": assignment.cost if assignment.cost != math.inf else None,
         "callback_bonus": assignment.callback_bonus,
         "assignment_note": assignment.note,
+        "n_tracks_available": len(tracks),
+        "n_tracks_used": len(used),
+        "library_duration_s": round(sum(t.duration_s or 0.0 for t in tracks), 1),
     }
 
 
 def check_music_map(mmap: dict[str, Any], *, target_s: float,
-                    tolerance_s: float = 30.0) -> list[str]:
-    """Section S02.8 acceptance: act durations sum to within +/-30 s of target,
-    and every act has at least one swell timestamp."""
+                    tolerance_s: float = 30.0,
+                    max_repeats_per_act: int = 2,
+                    min_headroom: float = 2.0) -> list[str]:
+    """Section S02.8 acceptance, plus two checks the spec does not state.
+
+    The spec's criteria are that act durations sum to within +/-30 s of target
+    and that every act carries a swell. Two more are needed in practice: that
+    the beat grid actually spans each act, since S06 snaps cuts to it, and that
+    no single track is laid down so many times that the audience hears a loop.
+    """
     problems: list[str] = []
     total = float(mmap.get("total_duration_s", 0.0))
     if abs(total - target_s) > tolerance_s:
         problems.append(f"act durations sum to {total:.0f}s, "
                         f"outside {target_s:.0f}+/-{tolerance_s:.0f}s")
+
+    # The clean top-level question: is there enough music for the film at all?
+    # Below 1x the film's length, repetition is arithmetically unavoidable.
+    # Below the headroom factor there is music enough but little choice, so the
+    # act assignment is forced rather than selective.
+    library = float(mmap.get("library_duration_s", 0.0))
+    if library and total:
+        if library < total:
+            problems.append(
+                f"the library holds {library/60:.0f} min of music for a "
+                f"{total/60:.0f} min film -- tracks must repeat. Add at least "
+                f"{(total - library)/60:.0f} more minutes.")
+        elif library < total * min_headroom:
+            problems.append(
+                f"the library holds {library/60:.0f} min for a {total/60:.0f} min "
+                f"film ({library/total:.1f}x). Below {min_headroom:.1f}x the act "
+                f"assignment has little to choose from, so acts get whatever is "
+                f"nearest rather than what fits.")
     for a in mmap.get("acts", []):
         if not a.get("swells"):
             problems.append(f"act {a['act']} has no swell timestamp")
         if not a.get("track_id"):
             problems.append(f"act {a['act']} has no track assigned")
+        # S06 snaps every cut to the beat grid, so an act whose grid stops early
+        # cannot be cut on the beat past that point. With track reuse this
+        # rarely fires, which is why repetition is checked as well.
+        act_len = float(a.get("t_end", 0)) - float(a.get("t_start", 0))
+        grid = float(a.get("beat_grid_covers_s", 0))
+        if act_len > 0 and grid < act_len * 0.9:
+            problems.append(
+                f"act {a['act']}: beat grid covers {grid:.0f}s of {act_len:.0f}s "
+                f"({grid/act_len*100:.0f}%) -- cuts past that cannot be beat-snapped")
+        # A track laid down several times within one act is a loop the audience
+        # will hear, whatever the library's total length.
+        repeats = int(a.get("max_track_repeats", 0))
+        if repeats > max_repeats_per_act:
+            problems.append(
+                f"act {a['act']}: one track is laid down {repeats} times to fill "
+                f"{act_len:.0f}s, which will be heard as a loop. Act {a['act']} wants "
+                + ACT_CHARACTER.get(int(a["act"]), "material"))
     if not mmap.get("silence_window"):
         problems.append("no silence_window after the Act 4 peak")
     return problems
@@ -402,7 +595,11 @@ def analyse_track(path: str | Path, *, n_sections: int = 8,
     onset = librosa.onset.onset_strength(y=y, sr=sr)
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
 
-    artist, title = parse_artist_title(p.name)
+    # Tags first, filename as the fallback.
+    tag_artist, tag_title = read_tags(p)
+    name_artist, name_title = parse_artist_title(p.name)
+    artist = tag_artist or name_artist
+    title = tag_title or name_title
     track = Track(
         track_id=p.stem, s3_key=f"raw/music/{p.name}", title=title, artist=artist,
         duration_s=round(duration, 3),

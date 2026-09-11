@@ -28,7 +28,7 @@ wrapping. Nothing here requires an AWS account yet.
 ```bash
 apt-get install -y ffmpeg libimage-exiftool-perl     # or: brew install ffmpeg exiftool
 pip install -e .                 # Milestone 1 core — no torch, no CUDA
-pip install -e '.[music]'        # S02.7 music analysis
+pip install -e '.[music]'        # S02.7 music analysis (librosa, mutagen) -- REQUIRED
 pip install -e '.[asr]'          # S02.6 / S03.5 transcription
 ```
 
