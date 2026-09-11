@@ -113,7 +113,6 @@ CREATE TABLE IF NOT EXISTS music_tracks (
   energy_p10  REAL,
   centroid    REAL,
   onset_rate  REAL,
-  vocal_score REAL,          -- ADDITION: measured vocal presence, 0..1
   assigned_act INTEGER
 );
 
@@ -186,10 +185,9 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
 # Columns added after the first release. SQLite cannot add a column
 # conditionally in DDL, so they are applied as idempotent migrations -- a
-# database created by an earlier run must not have to be rebuilt.
-MIGRATIONS: tuple[tuple[str, str, str], ...] = (
-    ("music_tracks", "vocal_score", "REAL"),
-)
+# database created by an earlier run must not have to be rebuilt. A database
+# that already carries a column no longer in SCHEMA keeps it, harmlessly.
+MIGRATIONS: tuple[tuple[str, str, str], ...] = ()
 
 
 def init(db_path: str | Path) -> sqlite3.Connection:

@@ -4,13 +4,15 @@ The spec's S07 mix: the music bed sits at -14 LUFS, the original location audio
 is ducked to -28 LUFS beneath it, and where a shot carries speech the music
 ducks to -22 LUFS instead so the voice comes through.
 
-One refinement on top of that. Ducking a *sung* track under spoken narration is
-not the same job as ducking an instrumental: a vocal occupies the same
-frequency range as the narration, so at equal loudness it masks the voice far
-more. The fix is not to throw vocal tracks away -- the narration here is sparse,
-and a good track beats a merely instrumental one -- it is to duck them a little
-further when they overlap speech. S02.7 already measures vocal presence per
-track, so the mix can use it.
+An earlier version varied the duck depth by how vocal the music was, on the
+reasoning that a sung track masks spoken narration more than an instrumental at
+the same loudness. That reasoning is sound; the measurement was not. Estimating
+vocal presence from an mp3 by syllabic modulation cannot separate voice from
+real piano and strings, because note articulation and vibrato modulate at the
+same 3-8 Hz -- an actual Desplat orchestral cue measured 0.42 against 0.75 for a
+synthetic vocal and 0.001 for a pure-tone pad. Ducking an instrumental several
+dB too far is worse than not varying the depth at all, so the depth is fixed,
+as the spec has it.
 """
 from __future__ import annotations
 
@@ -26,31 +28,13 @@ class MixLevels:
 
 
 def duck_music_lufs(*, base_music_lufs: float, speech_duck_lufs: float,
-                    has_speech: bool, vocal_score: float = 0.0,
-                    vocal_threshold: float = 0.6,
-                    vocal_extra_db: float = 4.0) -> float:
-    """Where the music bed should sit.
-
-    Without speech it stays at its bed level. Under speech it drops to
-    ``speech_duck_lufs``, and a further ``vocal_extra_db`` when the track is
-    itself vocal-heavy, scaled by how far past the threshold it is so the
-    correction comes in gradually rather than as a step.
-    """
-    if not has_speech:
-        return base_music_lufs
-    target = speech_duck_lufs
-    if vocal_score > vocal_threshold:
-        headroom = max(0.0, min(1.0, (vocal_score - vocal_threshold)
-                                / max(1e-6, 1.0 - vocal_threshold)))
-        target -= vocal_extra_db * headroom
-    return target
+                    has_speech: bool) -> float:
+    """Where the music bed should sit: its own level, or ducked under speech."""
+    return speech_duck_lufs if has_speech else base_music_lufs
 
 
-def levels_for_shot(*, has_speech: bool, vocal_score: float,
-                    music_lufs: float = -14.0, duck_lufs: float = -28.0,
-                    duck_lufs_speech: float = -22.0,
-                    vocal_threshold: float = 0.6,
-                    vocal_extra_db: float = 4.0,
+def levels_for_shot(*, has_speech: bool, music_lufs: float = -14.0,
+                    duck_lufs: float = -28.0, duck_lufs_speech: float = -22.0,
                     in_silence_window: bool = False) -> MixLevels:
     """Both levels for one shot.
 
@@ -64,14 +48,9 @@ def levels_for_shot(*, has_speech: bool, vocal_score: float,
 
     music = duck_music_lufs(base_music_lufs=music_lufs,
                             speech_duck_lufs=duck_lufs_speech,
-                            has_speech=has_speech, vocal_score=vocal_score,
-                            vocal_threshold=vocal_threshold,
-                            vocal_extra_db=vocal_extra_db)
+                            has_speech=has_speech)
     if has_speech:
-        reason = "speech present: music ducked"
-        if vocal_score > vocal_threshold:
-            reason += f", a further {music_lufs - music - (music_lufs - duck_lufs_speech):.1f} dB for a vocal track"
-        return MixLevels(music_lufs=music, location_lufs=0.0, reason=reason)
-
+        return MixLevels(music_lufs=music, location_lufs=0.0,
+                         reason="speech present: music ducked, location audio full")
     return MixLevels(music_lufs=music, location_lufs=duck_lufs,
                      reason="no speech: location audio under the bed")

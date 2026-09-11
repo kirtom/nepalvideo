@@ -336,8 +336,6 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
             return {"source": "audio", "error": "no audio files"}
         licences = _licence_manifest(music_dir)
         exclude_ru = bool(cfg.get("music.exclude_russian", False))
-        max_vocal = cfg.get("music.max_vocal_score", None)
-        max_vocal = float(max_vocal) if max_vocal is not None else None
         extra = cfg.get("music.exclude_artists", []) or []
         keep = cfg.get("music.keep_artists", []) or []
         excluded: list[dict[str, Any]] = []
@@ -362,37 +360,13 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
                                      "file": f.name, "reason": reason})
                     log.info("S02.7 excluded %s - %s (%s)", t.artist, t.title, reason)
                     continue
-            if max_vocal is not None and t.vocal_score > max_vocal:
-                excluded.append({"title": t.title, "artist": t.artist, "file": f.name,
-                                 "reason": f"vocal score {t.vocal_score:.2f} above "
-                                           f"max_vocal_score {max_vocal:.2f}"})
-                log.info("S02.7 excluded %s - %s (vocals %.2f)",
-                         t.artist, t.title, t.vocal_score)
-                continue
             tracks.append(t)
-            log.info("S02.7 [%d/%d] %s - %s: %.0f bpm, %d beats, dyn %.3f, "
-                     "key %s, vocals %.2f%s",
+            log.info("S02.7 [%d/%d] %s - %s: %.0f bpm, %d beats, dyn %.3f, key %s",
                      i, len(audio), t.artist or "?", t.title or f.stem,
-                     t.tempo_bpm, len(t.beats), t.dyn_range, t.key_est,
-                     t.vocal_score, "  <- vocal-heavy" if t.vocal_score >= 0.6 else "")
+                     t.tempo_bpm, len(t.beats), t.dyn_range, t.key_est)
         report["n_audio_files"] = len(audio)
         report["n_excluded"] = len(excluded)
         report["excluded"] = excluded
-        if tracks:
-            vocal_heavy = [t for t in tracks if t.vocal_score >= 0.6]
-            report["n_vocal_heavy"] = len(vocal_heavy)
-            report["vocal_scores"] = {
-                (t.artist or "?") + " - " + (t.title or t.track_id):
-                    round(t.vocal_score, 3) for t in tracks}
-            if vocal_heavy:
-                log.info(
-                    "S02.7 %d of %d tracks score >=0.60 for vocals. They will be "
-                    "ducked further under narration (render.duck_extra_db_vocal) "
-                    "rather than excluded, since the commentary is sparse. Set "
-                    "music.max_vocal_score only if you want them dropped outright: %s",
-                    len(vocal_heavy), len(tracks),
-                    ", ".join(f"{t.title or t.track_id} ({t.vocal_score:.2f})"
-                              for t in vocal_heavy[:6]))
 
     elif source == "playlist":
         if csv_path is None or not csv_path.exists():
@@ -437,8 +411,7 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
         "duration_s": t.duration_s, "tempo_bpm": t.tempo_bpm, "key_est": t.key_est,
         "energy_mean": t.energy_mean, "energy_p95": t.energy_p95,
         "energy_p10": t.energy_p10, "centroid": t.centroid,
-        "onset_rate": t.onset_rate, "vocal_score": t.vocal_score,
-        "assigned_act": None,
+        "onset_rate": t.onset_rate, "assigned_act": None,
     } for t in tracks])
     db.upsert(conn, "music_sections", ["section_id"],
               [{"section_id": s["section_id"], "track_id": s["track_id"],
