@@ -539,3 +539,117 @@ def test_read_tags_on_a_non_audio_file(tmp_path):
     f = tmp_path / "notaudio.mp3"
     f.write_bytes(b"this is not an mp3")
     assert read_tags(f) == (None, None)
+
+
+# -- variety: the fill must not spend the assignment ---------------------
+
+def long_library():
+    """Tracks long enough that one could swallow a whole act."""
+    return [mk(f"t{i}", 0.2 + i * 0.01, 0.4, 0.05, 2000.0, 2.0, 100 + i)
+            for i in range(8)]
+
+
+def test_fill_does_not_spend_another_acts_primary():
+    """Act 2's filler took Giorgio by Moroder, which was Act 3's primary, so
+    Act 3 opened on a track the audience had just heard."""
+    lib = long_library()
+    primary, reserved_for_act3 = lib[0], lib[1]
+    segs = fill_act(2, primary, lib, 900.0, reserved={reserved_for_act3.track_id})
+    assert segs[0]["track_id"] == primary.track_id
+    assert reserved_for_act3.track_id not in {s["track_id"] for s in segs[1:]}
+
+
+def test_an_acts_own_primary_is_never_held_back_from_it():
+    lib = long_library()
+    primary = lib[0]
+    # the whole library is reserved, including this act's primary
+    segs = fill_act(3, primary, lib, 200.0,
+                    reserved={t.track_id for t in lib})
+    assert segs[0]["track_id"] == primary.track_id
+
+
+def test_reserved_tracks_are_a_last_resort_not_a_prohibition():
+    """A library too small to fill the act must still fill it."""
+    lib = long_library()[:2]
+    segs = fill_act(1, lib[0], lib, 2000.0, reserved={lib[1].track_id})
+    assert segs, "an act with no music is worse than a reused track"
+    assert sum(s["t_end"] - s["t_in"] for s in segs) == pytest.approx(2000.0, abs=1.0)
+
+
+def test_max_segment_s_breaks_a_long_track_off_its_act():
+    lib = long_library()
+    segs = fill_act(3, lib[0], lib, 900.0, max_segment_s=150.0)
+    assert len(segs) >= 3
+    # every segment but the last respects the cap
+    for seg in segs[:-1]:
+        assert seg["t_end"] - seg["t_in"] <= 150.0 + 1e-6
+
+
+def test_an_act_shorter_than_the_cap_stays_one_piece():
+    """Act 4 is a single unbroken swell into the silence."""
+    lib = long_library()
+    segs = fill_act(4, lib[0], lib, 113.0, max_segment_s=150.0)
+    assert len(segs) == 1
+    assert segs[0]["t_end"] == pytest.approx(113.0)
+
+
+def test_a_remainder_below_the_minimum_extends_rather_than_stubs():
+    lib = long_library()
+    segs = fill_act(2, lib[0], lib, 160.0, max_segment_s=150.0, min_segment_s=20.0)
+    assert all(s["t_end"] - s["t_in"] >= 20.0 for s in segs)
+    assert segs[-1]["t_end"] == pytest.approx(160.0)
+
+
+def test_the_cap_and_the_reservation_together_widen_the_soundtrack():
+    """Neither alone is enough: the cap splits the acts but the fill then takes
+    the reserved primaries back, and the reservation alone leaves a long track
+    still swallowing its whole act.
+
+    The library has to be larger than the film needs, or variety is not a
+    choice: 20 songs for 20 minutes, one of them nine minutes long and assigned
+    to Act 3 -- which is how the real corpus is shaped.
+    """
+    lib = []
+    for i in range(20):
+        t = mk(f"v{i}", 0.2 + i * 0.005, 0.4, 0.05, 2000.0, 2.0, 100 + i)
+        t.duration_s = 540.0 if i == 2 else 210.0
+        lib.append(t)
+    by_id = {t.track_id: t for t in lib}
+    primaries = {1: "v0", 2: "v1", 3: "v2", 4: "v3", 5: "v4"}
+    reserved = set(primaries.values())
+    durations = allocate_act_durations(SHIPPED_SPECS, 1200)
+
+    def distinct(cap, res):
+        used = set()
+        for act in (1, 2, 3, 4, 5):
+            for seg in fill_act(act, by_id[primaries[act]], lib, durations[act],
+                                already_used=set(used), max_segment_s=cap,
+                                reserved=res):
+                used.add(seg["track_id"])
+        return len(used)
+
+    plain = distinct(None, None)
+    assert distinct(150.0, reserved) > plain
+    # and every act still opens on the track it was assigned
+    used = set()
+    for act in (1, 2, 3, 4, 5):
+        segs = fill_act(act, by_id[primaries[act]], lib, durations[act],
+                        already_used=set(used), max_segment_s=150.0,
+                        reserved=reserved)
+        assert segs[0]["track_id"] == primaries[act]
+        for seg in segs:
+            used.add(seg["track_id"])
+
+
+def test_build_music_map_reserves_the_primaries_by_itself():
+    tracks = library()
+    a = assign_acts(tracks)
+    m = build_music_map(tracks, a, ACT_SPECS, total_s=1200, silence_s=3.0,
+                        max_segment_s=150.0)
+    # no act opens on a track another act was assigned
+    primaries = {tid for tid in a.by_act.values() if tid}
+    for act in m["acts"]:
+        own = act["track_id"]
+        for seg in act["segments"][1:]:
+            assert seg["track_id"] not in (primaries - {own}) or \
+                len(tracks) < len(m["acts"]) + 1

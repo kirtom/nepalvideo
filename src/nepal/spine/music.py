@@ -405,7 +405,9 @@ def rank_for_act(tracks: Sequence[Track], act: int,
 def fill_act(act: int, primary: Track | None, pool: Sequence[Track], duration_s: float,
              *, already_used: set[str] | None = None,
              feature_mask: Sequence[float] | None = None,
-             min_segment_s: float = 20.0) -> list[dict[str, Any]]:
+             min_segment_s: float = 20.0,
+             max_segment_s: float | None = None,
+             reserved: set[str] | None = None) -> list[dict[str, Any]]:
     """Lay tracks end to end until the act's runtime is covered.
 
     One track per act does not cover a 20-minute film. Allocated durations are
@@ -419,10 +421,30 @@ def fill_act(act: int, primary: Track | None, pool: Sequence[Track], duration_s:
     target, preferring ones not used elsewhere so the film does not repeat
     itself. Reuse is allowed when the library runs out, because a repeated
     track is better than an act with no music.
+
+    ``max_segment_s`` caps how long one piece plays without changing. Without
+    it a long track simply swallows its act: a 9-minute one covered the whole
+    6.8-minute Climb, so the dramatic centre of the film sat on a single cue
+    while 19 other tracks went unused. The cap is not a hard split -- an act
+    shorter than the cap stays in one piece, which is what Act 4 needs, since
+    the brief calls for one unbroken swell into the silence -- and a remainder
+    below ``min_segment_s`` extends the previous segment rather than leaving a
+    stub, so no act ends on a few seconds of something new.
+
+    ``reserved`` holds the primaries the Hungarian assignment chose for the
+    *other* acts, and they are held back from the fill. Without that, filling
+    ran ahead of the assignment and spent it: Act 2's filler took Giorgio by
+    Moroder, which was Act 3's primary, and Act 3's fillers took Heartbeats and
+    Home, the primaries of Acts 5 and 4. Three of five acts then opened on
+    something the audience had just heard, and the film used six tracks out of
+    twenty-six. They stay available as a last resort, because a repeated track
+    still beats an act with no music.
     """
     used = set(already_used or ())
     segments: list[dict[str, Any]] = []
     cursor = 0.0
+
+    held = set(reserved or ()) - ({primary.track_id} if primary else set())
 
     ordered: list[Track] = []
     if primary is not None:
@@ -430,10 +452,12 @@ def fill_act(act: int, primary: Track | None, pool: Sequence[Track], duration_s:
     for t in rank_for_act([t for t in pool if t is not primary], act, feature_mask):
         ordered.append(t)
 
-    fresh = [t for t in ordered if t.track_id not in used or t is primary]
-    recycled = [t for t in ordered if t not in fresh]
+    free = [t for t in ordered if t.track_id not in held or t is primary]
+    fresh = [t for t in free if t.track_id not in used or t is primary]
+    recycled = [t for t in free if t not in fresh]
 
-    for candidate in fresh + recycled + ordered:      # ordered again = unrestricted reuse
+    # fresh -> already heard -> another act's primary -> anything at all
+    for candidate in fresh + recycled + ordered:
         if cursor >= duration_s - 1e-6:
             break
         remaining = duration_s - cursor
@@ -445,6 +469,8 @@ def fill_act(act: int, primary: Track | None, pool: Sequence[Track], duration_s:
             cursor = duration_s
             break
         take = min(candidate.duration_s or remaining, remaining)
+        if max_segment_s:
+            take = min(take, max(max_segment_s, min_segment_s))
         if take <= 0:
             continue
         segments.append({
@@ -470,7 +496,8 @@ def fill_act(act: int, primary: Track | None, pool: Sequence[Track], duration_s:
 def build_music_map(tracks: Sequence[Track], assignment: Assignment,
                     act_specs: Sequence[dict[str, Any]], *, total_s: float,
                     silence_s: float = 3.0,
-                    feature_mask: Sequence[float] | None = None) -> dict[str, Any]:
+                    feature_mask: Sequence[float] | None = None,
+                    max_segment_s: float | None = None) -> dict[str, Any]:
     """Emit ``work/music/music_map.json`` (spec S02.8).
 
     Each act carries a sequence of track segments rather than a single track,
@@ -484,6 +511,8 @@ def build_music_map(tracks: Sequence[Track], assignment: Assignment,
     """
     by_id = {t.track_id: t for t in tracks}
     durations = allocate_act_durations(act_specs, total_s)
+    # What the assignment promised each act, so filling cannot spend it.
+    reserved = {tid for tid in assignment.by_act.values() if tid}
 
     acts_out: list[dict[str, Any]] = []
     t_cursor = 0.0
@@ -497,7 +526,9 @@ def build_music_map(tracks: Sequence[Track], assignment: Assignment,
         t_start, t_end = t_cursor, t_cursor + dur
 
         segments = fill_act(act, primary, tracks, dur, already_used=used,
-                            feature_mask=feature_mask)
+                            feature_mask=feature_mask,
+                            max_segment_s=max_segment_s,
+                            reserved=reserved)
         for seg in segments:
             used.add(seg["track_id"])
 

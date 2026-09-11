@@ -93,13 +93,25 @@ class FovResult:
 
 def solve_from_scores(per_frame: Sequence[dict[int, float]], *,
                       min_confidence: float = 0.05,
-                      fallback_deg: float = 193.0) -> FovResult:
+                      fallback_deg: float = 193.0,
+                      neighbour_steps: int = 1) -> FovResult:
     """Reduce per-frame per-FOV discontinuity scores to one FOV.
 
     ``per_frame`` is one dict {fov: discontinuity} per sampled frame. The
     median across frames is taken per FOV (step 4 of the spec), then argmin.
-    Confidence is 1 - best/second_best: 0 when two candidates tie, approaching
-    1 when the winner is far clearer than the runner-up.
+
+    Confidence is 1 - best/reference, but the reference is deliberately *not*
+    the runner-up. Candidates are 2 deg apart, so 192, 194 and 196 reproject to
+    almost the same image and their seam scores are almost the same number: a
+    near-tie between neighbours is the resolution limit of the sweep, not
+    ambiguity about the answer. Scoring it as ambiguity made the measure report
+    ~0 for every input, clean parabola or flat noise alike -- on real material
+    it returned 0.012 with a perfectly ordinary minimum at 194.
+
+    The reference is therefore the best candidate at least ``neighbour_steps``
+    positions away from the winner, which asks the question that matters: is
+    there a localized minimum here, or is the curve flat? A parabola whose
+    tails are 20% worse scores 0.17; noise within 1% scores 0.01.
     """
     if not per_frame:
         return FovResult(fallback_deg, 0.0, "fallback:no-frames", {}, 0, True)
@@ -118,16 +130,41 @@ def solve_from_scores(per_frame: Sequence[dict[int, float]], *,
     if len(ranked) < 2:
         return FovResult(float(best_fov), 0.0, "seam-min:single-candidate",
                          medians, len(per_frame), False)
-    _, second = ranked[1]
-    confidence = 1.0 - (best / (second + EPS))
+
+    order = sorted(medians)                      # candidates by FOV, ascending
+    at = order.index(best_fov)
+    far = [medians[f] for i, f in enumerate(order) if abs(i - at) > neighbour_steps]
+    reference = min(far) if far else ranked[1][1]
+    confidence = 1.0 - (best / (reference + EPS))
 
     if confidence < min_confidence:
-        # No clear winner. Spec: fall back and surface at Gate 1 with thumbnails.
+        # No localized minimum. Spec: fall back and surface at Gate 1 with
+        # thumbnails -- `nepal fov-check` renders them.
         return FovResult(fallback_deg, round(confidence, 4),
                          f"fallback:low-confidence(argmin={best_fov})",
                          medians, len(per_frame), True)
     return FovResult(float(best_fov), round(confidence, 4), "seam-min",
                      medians, len(per_frame), False)
+
+
+def score_curve(medians: dict[int, float], width: int = 42) -> list[str]:
+    """The score curve as text, so its shape is readable without an image.
+
+    A clean U with one bottom is a good solve; a flat or double-bottomed line
+    is the operator's cue to trust the thumbnails over the number.
+    """
+    if not medians:
+        return []
+    lo, hi = min(medians.values()), max(medians.values())
+    span = (hi - lo) or 1.0
+    best = min(medians, key=lambda f: medians[f])
+    out = []
+    for f in sorted(medians):
+        v = medians[f]
+        bar = "#" * max(1, int(round((v - lo) / span * width)))
+        out.append(f"  {f:>3} deg  {v:8.5f}  {bar}"
+                   f"{'   <-- lowest seam discontinuity' if f == best else ''}")
+    return out
 
 
 # -- orchestration (needs ffmpeg) --------------------------------------

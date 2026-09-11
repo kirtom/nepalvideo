@@ -5,7 +5,8 @@ import numpy as np
 import pytest
 
 from nepal.probe.fov import (seam_discontinuity, texture_score, solve_from_scores,
-                             sample_timestamps, pick_textured_frames, candidate_fovs)
+                             sample_timestamps, pick_textured_frames, candidate_fovs,
+                             score_curve)
 
 rng = np.random.default_rng(7)
 
@@ -111,7 +112,11 @@ def test_argmin_is_chosen():
     frames = [{188: 3.0, 190: 2.0, 192: 1.0, 194: 2.5} for _ in range(5)]
     r = solve_from_scores(frames)
     assert r.fov_deg == 192
-    assert r.confidence == pytest.approx(1 - 1.0 / 2.0, abs=1e-3)
+    # The reference is the best candidate outside the winner's neighbours, not
+    # the runner-up: 190 and 194 are 2 deg away and reproject to nearly the same
+    # image, so how close they score says nothing about whether 192 is right.
+    # Here that leaves 188 at 3.0, and 1 - 1/3 = 0.667.
+    assert r.confidence == pytest.approx(1 - 1.0 / 3.0, abs=1e-3)
     assert not r.used_fallback
 
 
@@ -164,3 +169,67 @@ def test_pick_spreads_across_files_before_taking_seconds():
 
 def test_candidate_fovs_matches_spec_range():
     assert candidate_fovs(188, 208, 2) == [188, 190, 192, 194, 196, 198, 200, 202, 204, 206]
+
+
+# -- confidence measures the shape of the curve, not the nearest rival ----
+
+def parabola(minimum: int = 194, curvature: float = 0.010) -> dict[int, float]:
+    return {f: 1.0 + curvature * (f - minimum) ** 2 for f in range(188, 208, 2)}
+
+
+def test_a_clean_minimum_is_confident_even_though_its_neighbours_are_close():
+    """Candidates are 2 deg apart, so 192/194/196 reproject to almost the same
+    image and score almost the same number. Treating that near-tie as ambiguity
+    made the measure report ~0 for every input: real material gave 0.012 with
+    a perfectly ordinary minimum at 194."""
+    r = solve_from_scores([parabola()])
+    assert r.fov_deg == 194.0
+    assert r.method == "seam-min"
+    assert not r.used_fallback
+    assert r.confidence > 0.05
+
+
+def test_a_flat_noisy_curve_still_falls_back():
+    import random
+    random.seed(7)
+    flat = [{f: 1.0 + random.uniform(-0.004, 0.004) for f in range(188, 208, 2)}]
+    r = solve_from_scores(flat)
+    assert r.used_fallback
+    assert r.method.startswith("fallback:low-confidence")
+    assert r.confidence < 0.05
+
+
+def test_confidence_rises_with_how_pronounced_the_minimum_is():
+    shallow = solve_from_scores([parabola(curvature=0.0005)]).confidence
+    sharp = solve_from_scores([parabola(curvature=0.05)]).confidence
+    assert sharp > shallow
+
+
+def test_the_neighbour_window_is_what_gets_excluded():
+    """With neighbour_steps=0 the reference is the adjacent candidate again,
+    which is the old behaviour and reports near-zero on a clean parabola."""
+    curve = [parabola()]
+    assert solve_from_scores(curve, neighbour_steps=0).confidence < \
+        solve_from_scores(curve, neighbour_steps=1).confidence
+
+
+def test_the_argmin_is_reported_even_when_confidence_is_too_low():
+    """The operator needs the number the sweep actually preferred, since the
+    returned value is the fallback rather than the measurement."""
+    import random
+    random.seed(3)
+    flat = [{f: 1.0 + random.uniform(-0.002, 0.002) for f in range(188, 208, 2)}]
+    r = solve_from_scores(flat, fallback_deg=193.0)
+    assert r.fov_deg == 193.0
+    assert "argmin=" in r.method
+
+
+def test_score_curve_marks_the_lowest_and_covers_every_candidate():
+    lines = score_curve(parabola())
+    assert len(lines) == 10
+    assert sum("lowest seam discontinuity" in ln for ln in lines) == 1
+    assert "194" in next(ln for ln in lines if "lowest" in ln)
+
+
+def test_score_curve_of_nothing_is_nothing():
+    assert score_curve({}) == []

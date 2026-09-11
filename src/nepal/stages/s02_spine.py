@@ -458,7 +458,8 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
         tracks, assignment, cfg.act_targets(),
         total_s=total_s,
         silence_s=float(cfg.get("assemble.silence_window_s")),
-        feature_mask=playlist_mod.feature_mask_for(source))
+        feature_mask=playlist_mod.feature_mask_for(source),
+        max_segment_s=float(cfg.get("music.max_segment_s")))
     problems = music_mod.check_music_map(
         mmap, target_s=total_s,
         tolerance_s=float(cfg.get("film.duration_tolerance_s")))
@@ -793,11 +794,22 @@ def print_chronology(cfg: Config) -> int:
     mm = cfg.work_root / "music" / "music_map.json"
     if mm.exists():
         m = json.loads(mm.read_text())
-        print(f"\nmusic map: {m['total_duration_s']:.0f}s total")
+        # Every segment, not just the act's opening track. Printing only the
+        # primary made a film built from nine pieces look like a film built
+        # from five, which is not a detail when the question is whether the
+        # soundtrack has enough variety.
+        used = {seg["track_id"] for a in m["acts"] for seg in a.get("segments", [])}
+        print(f"\nmusic map: {m['total_duration_s']:.0f}s total, "
+              f"{len(used)} of {m.get('n_tracks_available', '?')} track(s) used")
         for a in m["acts"]:
             print(f"  act {a['act']} {a['name'] or '':<14} "
                   f"{a['t_start']:>7.1f}..{a['t_end']:>7.1f}s  "
-                  f"track={a['track_id'] or '-'}  swells={len(a['swells'])}")
+                  f"swells={len(a['swells'])}")
+            for seg in a.get("segments", []) or []:
+                span = seg["t_end"] - seg["t_in"]
+                label = f"{seg.get('artist') or '?'} - {seg.get('title') or seg['track_id']}"
+                print(f"        {seg['t_in']:>7.1f}..{seg['t_end']:>7.1f}s "
+                      f"({span:>5.1f}s)  {label[:58]}")
         sw = m.get("silence_window") or {}
         if sw:
             print(f"  silence after Act 4: {sw['t_start']:.1f}..{sw['t_end']:.1f}s")

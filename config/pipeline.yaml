@@ -174,6 +174,12 @@ render:
   duck_lufs_speech: -22.0      # music under speech
 
 music:
+  # How long one piece may play before the film moves to another. Without a cap
+  # a long track swallows its act -- a 9-minute one covered the whole 6.8-minute
+  # Climb, leaving the centre of the film on a single cue while 19 other tracks
+  # went unused. An act shorter than this stays in one piece, so Act 4 keeps the
+  # unbroken swell into the silence that the brief asks for.
+  max_segment_s: 150
   license_mode: personal       # personal | cleared
   # Source of track features: audio files in music/, or a playlist export.
   # Audio is strictly better: it yields real beat grids and swells (which S06
