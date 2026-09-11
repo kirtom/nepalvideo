@@ -27,6 +27,10 @@ from nepal.util.hashing import sha256_file
 log = logging.getLogger(__name__)
 STAGE = "S01"
 
+# Satellite time cannot be an hour wrong, so a device stamp further than this
+# from its own GPSDateTime is the stamp that is wrong, not the satellite.
+GPS_OVERRIDE_S = 3600.0
+
 
 # ---------------------------------------------------------------- manifest
 
@@ -57,6 +61,7 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
     have_ffprobe = proc.have("ffprobe")
     rows: list[dict[str, Any]] = []
     clock_evidence: dict[str, list[float]] = {}
+    regstamped: list[dict[str, Any]] = []
     for path in files:
         rel = path.relative_to(root).as_posix()
         cls = manifest.classify(rel)
@@ -68,8 +73,18 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
         # clock can be trusted as the pipeline's reference.
         gps_dt = manifest.parse_exif_datetime(manifest.exif_get(exif, "GPSDateTime"))
         if created is not None and gps_dt is not None:
-            clock_evidence.setdefault(cls["source"], []).append(
-                (created - gps_dt).total_seconds())
+            delta = (created - gps_dt).total_seconds()
+            # A device-wide offset cannot fix an individual asset whose stamp is
+            # simply wrong -- a batch file-transfer date, say. Where satellite
+            # time contradicts the device clock by more than an hour, the
+            # satellite is right: it cannot be off by an hour.
+            if abs(delta) > GPS_OVERRIDE_S:
+                regstamped.append({"path": rel, "device_said": created.isoformat(),
+                                   "gps_said": gps_dt.isoformat(),
+                                   "delta_days": round(delta / 86400.0, 2)})
+                created = gps_dt
+            else:
+                clock_evidence.setdefault(cls["source"], []).append(delta)
         lat, lon, alt = manifest.parse_gps(exif)
         duration = manifest.parse_duration(manifest.exif_get(exif, "Duration"))
         width = height = fps = None
@@ -147,6 +162,15 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
         by_source[r["source"]] = by_source.get(r["source"], 0) + 1
     log.info("S01.1 wrote %d assets (%d files, %d duplicate): %s",
              len(unique_rows), len(rows), len(duplicates), by_source)
+    if regstamped:
+        log.warning("S01.1 %d asset(s) carried a timestamp more than %.0fh from the "
+                    "satellite time in their own GPS data and were re-stamped from it. "
+                    "A whole group on one date is usually a batch file-transfer date "
+                    "rather than a capture date: %s",
+                    len(regstamped), GPS_OVERRIDE_S / 3600,
+                    ", ".join(f"{r['path'].split('/')[-1]} ({r['delta_days']:+.0f}d)"
+                              for r in regstamped[:4]))
+
     gps_agreement: dict[str, dict[str, float]] = {}
     for source, deltas in clock_evidence.items():
         med = float(statistics.median(deltas))
@@ -163,6 +187,8 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
     return {"n_assets": len(unique_rows), "n_files_seen": len(rows),
             "by_source": by_source, "duplicates": duplicates,
             "gps_agreement": gps_agreement,
+            "n_restamped_from_gps": len(regstamped),
+            "restamped_from_gps": regstamped[:50],
             "exiftool": proc.have("exiftool"), "ffprobe": have_ffprobe}
 
 
@@ -420,6 +446,33 @@ def solve_clocks(cfg, conn, *, work: Path | None = None) -> dict[str, clock.Cloc
             results[label] = clock.ClockResult(
                 device=label, offset_s=0.0, confidence=1.0,
                 method=f"reference clock ({ref_why})")
+            continue
+
+        # A device carrying GPS already tells us its clock error directly:
+        # GPSDateTime is satellite time. Where both the reference and this
+        # device have that evidence, the offset between them is the difference
+        # of their measured errors, and no audio solve can beat it.
+        #
+        # Letting audio run anyway was actively harmful on real material.
+        # kulikov's phone agreed with satellite time to 1.0 s over 292 photos,
+        # and keller's to 1.0 s over 338, so the true offset between them is
+        # zero -- but GCC-PHAT returned 6781 s at confidence 0.04 with 23 s of
+        # scatter across five pairs, and that was applied. Nearly two hours of
+        # spurious correction, from the weakest evidence available, overriding
+        # the strongest.
+        ref_gps = db.get_decision_float(conn, f"clock_vs_gps_{reference}_s")
+        dev_gps = db.get_decision_float(conn, f"clock_vs_gps_{device}_s")
+        if ref_gps is not None and dev_gps is not None:
+            gps_offset = ref_gps - dev_gps
+            results[label] = clock.ClockResult(
+                device=label, offset_s=round(gps_offset, 3), confidence=1.0,
+                method=(f"GPS-derived: this device sits {dev_gps:+.1f}s from satellite "
+                        f"time and the reference {ref_gps:+.1f}s, so the offset between "
+                        f"them is {gps_offset:+.1f}s. Satellite time outranks audio "
+                        f"cross-correlation, which is reserved for devices carrying "
+                        f"no GPS."))
+            log.info("S01.5 %s offset=%+.2fs from GPS evidence (no audio solve needed)",
+                     label, gps_offset)
             continue
 
         target_times = _capture_times(conn, device)

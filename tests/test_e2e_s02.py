@@ -329,3 +329,38 @@ def test_chronology_table_renders(spined, capsys):
     assert "day" in out and "act" in out
     assert "planning" in out, "the pre-trek row must be shown -- Act 1 depends on it"
     assert "music map" in out
+
+
+@needs_tools
+def test_stale_music_rows_do_not_survive_a_rerun(spined):
+    """The bug this guards: switching from a playlist to audio files left 25
+    stale playlist rows in the table -- no tempo, no key, a default energy of
+    0.50 -- and they competed in the act assignment, so acts drew from tracks
+    that were no longer in the library."""
+    from nepal import db
+    _, report, cfg = spined
+    if report["music"].get("skipped"):
+        pytest.skip("librosa not installed")
+
+    conn = db.init(cfg.db_path)
+    conn.execute("INSERT INTO music_tracks(track_id, title, energy_mean, tempo_bpm) "
+                 "VALUES ('ghost-from-an-earlier-run', 'Ghost', 0.5, 0.0)")
+    conn.commit()
+    conn.close()
+
+    from nepal.stages import s02_spine
+    again = s02_spine.analyse_music(cfg, db.init(cfg.db_path))
+    assert again.get("n_stale_removed", 0) >= 1
+
+    conn = db.init(cfg.db_path)
+    rows = [r["track_id"] for r in conn.execute("SELECT track_id FROM music_tracks")]
+    orphan_sections = conn.execute(
+        "SELECT COUNT(*) n FROM music_sections WHERE track_id NOT IN "
+        "(SELECT track_id FROM music_tracks)").fetchone()["n"]
+    orphan_beats = conn.execute(
+        "SELECT COUNT(*) n FROM beats WHERE track_id NOT IN "
+        "(SELECT track_id FROM music_tracks)").fetchone()["n"]
+    conn.close()
+    assert "ghost-from-an-earlier-run" not in rows
+    assert orphan_sections == 0, "sections left behind by a removed track"
+    assert orphan_beats == 0, "beats left behind by a removed track"

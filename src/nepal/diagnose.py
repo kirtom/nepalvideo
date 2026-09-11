@@ -97,8 +97,9 @@ def run(cfg, args) -> int:
             "SELECT substr(created_at_utc,1,10) d, MAX(alt_dem_m) a, COUNT(*) n "
             "FROM assets WHERE alt_dem_m >= ? GROUP BY d ORDER BY d", (mx * 0.97,)):
             print(f"    {r['d']}  {r['a']:.0f} m  ({r['n']} assets)")
-        print("  -> Act 4 runs from the FIRST to the LAST of these days. A stray day")
-        print("     here stretches Act 4 across everything between and empties Act 5.")
+        print("  -> Act 4 takes the CONTIGUOUS run around the peak, within the trek")
+        print("     window, so a day listed here that sits outside the window does not")
+        print("     stretch it. A day inside the window but far from the others would.")
 
     hr("message phases")
     for r in conn.execute("SELECT phase, COUNT(*) n, MIN(ts_utc) lo, MAX(ts_utc) hi "

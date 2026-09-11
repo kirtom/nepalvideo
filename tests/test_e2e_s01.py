@@ -121,11 +121,17 @@ def test_camera_corrected_time_lands_inside_the_trek(probed):
 
 
 @needs_tools
-def test_unrelated_audio_pairs_are_rejected(probed):
-    """kulikov has a decoy clip sharing no sound with any camera take."""
+def test_only_confident_audio_pairs_are_accepted(probed):
+    """Checked on the camera, which is the device that still solves by audio
+    now that GPS-carrying phones take their offset from satellite time. Pair
+    rejection itself is covered directly in tests/test_clock.py, including a
+    decoy that shares no sound with anything."""
     _, report, _ = probed
-    k = report["clock"]["kulikov"]
-    assert k["pairs_accepted"] < k["pairs_total"]
+    c = report["clock"]["camera"]
+    assert c["pairs_total"] >= 1, "the camera should have candidate pairs"
+    assert c["pairs_accepted"] >= 1
+    assert c["pairs_accepted"] <= c["pairs_total"]
+    assert not c["needs_manual"]
 
 
 @needs_tools
@@ -194,3 +200,40 @@ def test_rerun_is_idempotent_and_resumable(probed):
     again = s01_probe.run(cfg)
     assert again["manifest"] == {"skipped": "already done"}
     assert again["fov"]["skipped"] == "already done"
+
+
+# -- GPS evidence outranks the audio solve -----------------------------
+
+@needs_tools
+def test_a_gps_carrying_phone_gets_its_offset_from_satellite_time(probed):
+    """The bug this guards, from real material: kulikov's phone agreed with
+    satellite time to 1.0 s over 292 photos and keller's to 1.0 s over 338, so
+    the true offset between them was zero -- but GCC-PHAT returned 6781 s at
+    confidence 0.04 with 23 s of scatter across five pairs, and that was
+    applied. Nearly two hours of spurious correction, from the weakest evidence
+    available, overriding the strongest."""
+    truth, report, _ = probed
+    k = report["clock"]["kulikov"]
+    assert "GPS-derived" in k["method"], f"still solving by audio: {k['method']}"
+    assert k["confidence"] == 1.0
+    assert abs(k["offset_s"] - truth["true_kulikov_offset_s"]) <= 1.0
+
+
+@needs_tools
+def test_the_camera_still_uses_audio_since_it_carries_no_gps(probed):
+    """Audio cross-correlation is not abandoned -- it is the right tool for a
+    device with no satellite evidence, which is exactly the camera."""
+    _, report, _ = probed
+    c = report["clock"]["camera"]
+    assert "gcc-phat" in c["method"] or "coarse" in c["method"]
+    assert "GPS-derived" not in c["method"]
+
+
+@needs_tools
+def test_assets_contradicting_their_own_gps_time_are_restamped(probed):
+    """A device-wide offset cannot fix one asset whose stamp is simply wrong.
+    On real material a group of 276 assets carried a date eighteen months out
+    while their GPS placed them on the trek -- a batch file-transfer date."""
+    _, report, _ = probed
+    assert "n_restamped_from_gps" in report["manifest"]
+    assert report["manifest"]["n_restamped_from_gps"] >= 0

@@ -390,6 +390,24 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
     if not tracks:
         return {**report, "error": "no usable tracks"}
 
+    # Upsert alone leaves rows from a previous run behind, and they compete in
+    # the assignment. Switching from a playlist to audio files left 25 stale
+    # playlist rows in place -- with no tempo, no key and a default energy of
+    # 0.50 -- which is why the acts drew from tracks that were no longer there.
+    keep = {t.track_id for t in tracks}
+    stale = [r["track_id"] for r in conn.execute("SELECT track_id FROM music_tracks")
+             if r["track_id"] not in keep]
+    if stale:
+        log.info("S02.7 removing %d music row(s) left by a previous run: %s",
+                 len(stale), ", ".join(stale[:5]) + (" ..." if len(stale) > 5 else ""))
+        conn.executemany("DELETE FROM music_tracks WHERE track_id=?",
+                         [(t,) for t in stale])
+        conn.executemany("DELETE FROM music_sections WHERE track_id=?",
+                         [(t,) for t in stale])
+        conn.executemany("DELETE FROM beats WHERE track_id=?", [(t,) for t in stale])
+        conn.commit()
+    report["n_stale_removed"] = len(stale)
+
     db.upsert(conn, "music_tracks", ["track_id"], [{
         "track_id": t.track_id, "s3_key": t.s3_key, "title": t.title,
         "duration_s": t.duration_s, "tempo_bpm": t.tempo_bpm, "key_est": t.key_est,
