@@ -140,6 +140,7 @@ def _print_s01(rep: dict) -> None:
 
 
 def _doctor(cfg) -> int:
+    import pathlib
     import shutil
     import sys as _sys
     from nepal.util import proc
@@ -158,7 +159,15 @@ def _doctor(cfg) -> int:
                                    capture_output=True, text=True, timeout=20).stdout.strip()
         except (OSError, subprocess.SubprocessError):
             other = ""
-        if other and other != _sys.executable:
+        # Compare resolved targets: python and python3 are commonly symlinks to
+        # the same binary, and warning about that is a false alarm.
+        def _real(path: str) -> str:
+            try:
+                return str(pathlib.Path(path).resolve())
+            except OSError:
+                return path
+
+        if other and _real(other) != _real(_sys.executable):
             print(f"  NOTE  `python` on your PATH is a DIFFERENT interpreter:\n"
                   f"        {other}\n"
                   f"        Run everything as `nepal ...` rather than "
