@@ -56,6 +56,29 @@ def stale_units(conn, stage: str | None = None) -> list[tuple[str, str]]:
     return sorted(out)
 
 
+# Units that only a full --force re-run redoes; the cheap manifest-only re-run
+# skips exactly these, so naming it for them sends the operator in a circle.
+EXPENSIVE = {"S01": {"fov", "clock"}}
+
+
+def rerun_command(stale: list[tuple[str, str]]) -> str:
+    """The command that actually redoes these units.
+
+    The cheap path is `nepal s01 --force --skip-fov --skip-clock`, which exists
+    because a manifest fix should not cost an hour of GCC-PHAT. But if the FOV
+    or clock solve is itself stale, that command skips the very work being asked
+    for -- so it must not be the advice given.
+    """
+    parts = []
+    s01 = {u for st, u in stale if st == "S01"}
+    if s01:
+        parts.append("nepal s01 --force" if s01 & EXPENSIVE["S01"]
+                     else "nepal s01 --force --skip-fov --skip-clock")
+    if any(st == "S02" for st, _ in stale):
+        parts.append("nepal s02 --force")
+    return " && ".join(parts)
+
+
 def warn_if_stale(log, conn, stage: str, *, force: bool, rerun_hint: str) -> list[str]:
     """Say plainly that a re-run without --force will skip the stale work.
 

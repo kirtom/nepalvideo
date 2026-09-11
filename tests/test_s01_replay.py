@@ -74,3 +74,33 @@ def test_an_asset_with_no_device_stamp_is_left_for_s02(conn):
     add(conn, "stripped", "telegram", None)
     assert apply_offsets(conn, {}) == 0
     assert conn.execute("SELECT created_at_utc FROM assets").fetchone()[0] is None
+
+
+# -- rows for files that no longer exist --------------------------------
+
+def test_orphan_asset_rows_are_removed_and_their_message_link_cleared(conn):
+    """Upsert never removes, so a deleted file is counted in every report
+    forever. messages.media_asset references assets, so the link goes first."""
+    from nepal import db as _db
+    _db.upsert(conn, "assets", ["asset_id"],
+               [{"asset_id": "gone", "s3_key": "raw/gone.jpg", "source": "telegram",
+                 "kind": "photo"},
+                {"asset_id": "kept", "s3_key": "raw/kept.jpg", "source": "telegram",
+                 "kind": "photo"}])
+    conn.execute("INSERT INTO messages(msg_id, ts_utc, media_asset) VALUES "
+                 "('m1','2024-05-06T00:00:00+00:00','gone')")
+    conn.commit()
+
+    keep = {"kept"}
+    orphans = [r["asset_id"] for r in conn.execute("SELECT asset_id FROM assets")
+               if r["asset_id"] not in keep]
+    rows = [(a,) for a in orphans]
+    conn.executemany("UPDATE messages SET media_asset=NULL WHERE media_asset=?", rows)
+    conn.executemany("DELETE FROM assets WHERE asset_id=?", rows)
+    conn.commit()
+
+    assert orphans == ["gone"]
+    assert [r[0] for r in conn.execute("SELECT asset_id FROM assets")] == ["kept"]
+    # the message survives; only its broken link is dropped
+    assert conn.execute("SELECT media_asset FROM messages").fetchone()[0] is None
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []

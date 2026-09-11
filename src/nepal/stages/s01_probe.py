@@ -171,6 +171,24 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
             log.warning("    kept %s  <-- dropped %s", d["kept"], d["dropped"])
 
     db.upsert(conn, "assets", ["asset_id"], unique_rows)
+    # Upsert never removes. A file deleted from the tree, or one whose bytes
+    # changed so its content hash moved, leaves its old row behind to be counted
+    # in every report and assigned to an act it no longer has material for.
+    # messages.media_asset references assets(asset_id), so the link is cleared
+    # first rather than letting a foreign key abort the stage.
+    keep = {r["asset_id"] for r in unique_rows}
+    orphans = [r["asset_id"] for r in conn.execute("SELECT asset_id FROM assets")
+               if r["asset_id"] not in keep]
+    if orphans:
+        log.warning("S01.1 %d asset row(s) in the database no longer exist in %s "
+                    "and were removed -- a deleted file, or one whose bytes changed",
+                    len(orphans), root)
+        rows_o = [(a,) for a in orphans]
+        conn.executemany("UPDATE messages SET media_asset=NULL WHERE media_asset=?",
+                         rows_o)
+        conn.executemany("DELETE FROM assets WHERE asset_id=?", rows_o)
+        conn.commit()
+
     by_source: dict[str, int] = {}
     for r in unique_rows:
         by_source[r["source"]] = by_source.get(r["source"], 0) + 1
@@ -215,6 +233,7 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
                  source, med, spread, len(deltas))
 
     return {"n_assets": len(unique_rows), "n_files_seen": len(rows),
+            "n_orphans_removed": len(orphans),
             "by_source": by_source, "duplicates": duplicates,
             "gps_agreement": gps_agreement,
             "n_restamped_from_gps": len(regstamped),

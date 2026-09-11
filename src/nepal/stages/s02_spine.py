@@ -700,12 +700,15 @@ def print_chronology(cfg: Config) -> int:
                                          "S02.music", "S02.acts") if k in built]
         print("computed (UTC): "
               + ", ".join(f"{k}={v}" for k, v in shown or built.items()))
-        stale = [f"{st}.{u}" for st, u in freshness.stale_units(conn)]
-        if stale:
-            print(f"  STALE: {', '.join(stale)} predate the code now installed. "
-                  f"This table was built by the previous version.")
-            print(f"         nepal s01 --force --skip-fov --skip-clock && "
-                  f"nepal s02 --force")
+        stale_pairs = freshness.stale_units(conn)
+        if stale_pairs:
+            names = ", ".join(f"{st}.{u}" for st, u in stale_pairs)
+            print(f"  STALE: {names} predate the code now installed -- they were "
+                  f"computed by the previous version.")
+            print(f"         {freshness.rerun_command(stale_pairs)}")
+            if any(u in freshness.EXPENSIVE.get(st, ()) for st, u in stale_pairs):
+                print(f"         (the FOV and clock solves are the slow part, and "
+                      f"--skip-fov/--skip-clock would skip exactly these)")
     secs = tot["secs"] or 0
     dur = f"{secs/3600:.1f} h" if secs >= 3600 else f"{secs/60:.1f} min"
     print(f"{tot['n']} assets, {dur} of video, {len(days)} days carrying material")

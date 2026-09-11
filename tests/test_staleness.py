@@ -12,7 +12,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from nepal import db
-from nepal.freshness import code_mtime, stale_units, warn_if_stale
+from nepal.freshness import (code_mtime, stale_units, warn_if_stale,
+                             rerun_command, EXPENSIVE)
 
 
 @pytest.fixture()
@@ -128,3 +129,40 @@ def test_an_unparseable_timestamp_is_skipped_not_crashed(conn):
                  "VALUES ('S01','manifest','done','not a date')")
     conn.commit()
     assert stale_units(conn) == []
+
+
+# -- the command the warning names has to redo the work ------------------
+
+def test_a_stale_manifest_takes_the_cheap_path():
+    assert rerun_command([("S01", "manifest")]) == \
+        "nepal s01 --force --skip-fov --skip-clock"
+
+
+def test_a_stale_clock_solve_must_not_be_told_to_skip_the_clock_solve():
+    """The cheap path skips exactly fov and clock. Naming it for those units
+    sends the operator in a circle: run this, see the same warning, repeat."""
+    cmd = rerun_command([("S01", "clock"), ("S01", "fov")])
+    assert cmd == "nepal s01 --force"
+    assert "--skip-clock" not in cmd and "--skip-fov" not in cmd
+
+
+def test_a_mix_still_covers_the_expensive_unit():
+    cmd = rerun_command([("S01", "manifest"), ("S01", "clock")])
+    assert cmd == "nepal s01 --force"
+
+
+def test_both_stages_are_named_when_both_are_stale():
+    cmd = rerun_command([("S01", "manifest"), ("S02", "acts")])
+    assert cmd == "nepal s01 --force --skip-fov --skip-clock && nepal s02 --force"
+
+
+def test_only_s02_stale_does_not_rerun_s01():
+    assert rerun_command([("S02", "acts")]) == "nepal s02 --force"
+
+
+def test_nothing_stale_names_no_command():
+    assert rerun_command([]) == ""
+
+
+def test_the_expensive_units_are_the_ones_the_skip_flags_skip():
+    assert EXPENSIVE["S01"] == {"fov", "clock"}
