@@ -316,18 +316,64 @@ def _assign_with_reuse(pool: Sequence[Track], acts: Sequence[int],
 
 # -- act durations and the music map -----------------------------------
 
+def choose_total_duration(target_s: float, max_s: float, *,
+                          material_s: float | None = None,
+                          growth_bias: float = 0.35,
+                          selectivity: float = 3.0) -> float:
+    """Decide how long the film should be.
+
+    ``target_s`` is the length the creative brief was written for and
+    ``max_s`` the ceiling it may not pass. The film starts at the target and
+    has to earn anything beyond it, because surplus footage is a weak reason to
+    make a film longer.
+
+    ``material_s`` is how much footage is genuinely worth using -- the summed
+    duration of the shots that survive the quality gate. Until S05 has scored
+    them that is unknown, and the honest answer is the target: the film does
+    not grow on a guess.
+
+    Growth is driven by how many film-lengths of usable material there are.
+    ``selectivity`` says how much footage a minute of film is cut from; at the
+    default of 3 the film must have three times its own length in keepable
+    shots before any surplus is counted at all. Past that the film moves a
+    diminishing fraction of the way to the ceiling::
+
+        fraction = 1 - 1 / (1 + growth_bias * surplus)
+
+    so the ceiling is approached and never casually reached -- at the default
+    bias, twice the material needed buys about 6 of the 25 available minutes,
+    and it takes roughly ten times to reach 39.
+    """
+    target_s, max_s = float(target_s), float(max_s)
+    if max_s <= target_s or material_s is None or material_s <= 0:
+        return target_s
+    usable = float(material_s) / max(selectivity, 1e-9)
+    surplus = usable / target_s - 1.0
+    if surplus <= 0:
+        return target_s
+    fraction = 1.0 - 1.0 / (1.0 + max(growth_bias, 0.0) * surplus)
+    return round(min(max_s, target_s + fraction * (max_s - target_s)), 3)
+
+
 def allocate_act_durations(act_specs: Sequence[dict[str, Any]],
                            total_s: float) -> dict[int, float]:
     """Split the runtime across acts, respecting each act's min/max.
 
-    Starts from the midpoint of each act's range and distributes the shortfall
-    or surplus proportionally to the slack available in the right direction, so
-    no act is pushed outside the band the creative brief set for it.
+    Starts from each act's stated ``target_s`` -- the shape the film has at its
+    target length -- and distributes the shortfall or surplus proportionally to
+    the slack available in the right direction, so no act is pushed outside the
+    band the creative brief set for it. Acts with wide bands therefore absorb
+    most of any extra runtime and narrow ones such as the summit barely move.
+
+    Specs without a ``target_s`` fall back to the midpoint of their band.
     """
     acts = [int(a["act"]) for a in act_specs]
     lo = {int(a["act"]): float(a["min_s"]) for a in act_specs}
     hi = {int(a["act"]): float(a["max_s"]) for a in act_specs}
-    cur = {a: (lo[a] + hi[a]) / 2 for a in acts}
+    cur = {int(a["act"]): min(hi[int(a["act"])], max(lo[int(a["act"])],
+           float(a["target_s"]) if a.get("target_s") is not None
+           else (lo[int(a["act"])] + hi[int(a["act"])]) / 2))
+           for a in act_specs}
 
     for _ in range(64):
         delta = total_s - sum(cur.values())

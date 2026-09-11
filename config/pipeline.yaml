@@ -20,20 +20,41 @@ aws:
   proxy_only: false
 
 film:
-  total_duration_s: 1200
-  short_duration_s: 180
+  # The film aims for the target and may grow toward the ceiling where the
+  # material genuinely supports it. The bias is deliberate: twenty minutes is
+  # the length the creative brief was written for, and a longer cut has to earn
+  # it rather than happen by default.
+  target_duration_s: 1200        # 20 min -- what it aims for
+  max_duration_s: 2700           # 45 min -- hard ceiling
+  short_duration_s: 180          # the 3 min cut
   shot_count_min: 150
   shot_count_max: 200
   duration_tolerance_s: 30
+  # How readily the film grows past the target. 0 pins it at the target
+  # regardless of material; 1 extends to whatever the material supports. Low by
+  # design -- surplus footage is a weak reason to make a film longer.
+  growth_bias: 0.35
+  # How much keepable footage a minute of finished film is cut from. The film
+  # counts nothing as surplus until it has this many times its own length in
+  # shots that survive the quality gate.
+  material_selectivity: 3.0
 
-# Act targets. duration_frac sums to 1.0; absolute targets derived from
-# film.total_duration_s. Ranges are the spec's stated minutes.
+# Act allocation. target_s is where each act sits at the 20-minute target and
+# sums to it; min_s and max_s bound how far it may move as the total changes.
+#
+# The bounds are deliberately asymmetric. Acts 2, 3 and 5 are the journey and
+# absorb almost all of any extra length. Act 4 barely moves: the brief describes
+# it as a peak swell and a hard cut to silence, which is a beat rather than a
+# phase, and at 45 minutes a linear share would make it four minutes long --
+# no longer the single most powerful move in the film but a section of it.
+# Act 1 is capped too; beyond about five minutes, Telegram screenshots drag
+# however good they are.
 acts:
-  - {act: 1, name: Planning,       min_s: 120, max_s: 180}
-  - {act: 2, name: Approach,       min_s: 240, max_s: 300}
-  - {act: 3, name: Climb,          min_s: 360, max_s: 420}
-  - {act: 4, name: Highest point,  min_s:  90, max_s: 120}
-  - {act: 5, name: Descent,        min_s: 180, max_s: 240}
+  - {act: 1, name: Planning,       target_s: 167, min_s:  90, max_s:  300}
+  - {act: 2, name: Approach,       target_s: 287, min_s: 150, max_s:  700}
+  - {act: 3, name: Climb,          target_s: 407, min_s: 240, max_s: 1150}
+  - {act: 4, name: Highest point,  target_s: 113, min_s:  90, max_s:  150}
+  - {act: 5, name: Descent,        target_s: 227, min_s: 120, max_s:  600}
 
 probe:
   # S01.4 fisheye FOV auto-solve

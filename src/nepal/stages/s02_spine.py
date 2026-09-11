@@ -310,6 +310,32 @@ def transcribe_round_videos(cfg: Config, conn) -> dict[str, Any]:
 
 # ----------------------------------------------------------- S02.7 music
 
+def remove_stale_music(conn, keep: set[str]) -> int:
+    """Drop music rows left behind by a previous run, and their children.
+
+    Upsert alone leaves rows from a previous run in place, and they compete in
+    the act assignment. Switching from a playlist to audio files left 25 stale
+    playlist rows behind -- with no tempo, no key and a default energy of 0.50 --
+    which is why the acts drew from tracks that were no longer there.
+
+    Order matters. ``beats`` and ``music_sections`` both reference
+    ``music_tracks(track_id)`` and foreign keys are enforced, so the children
+    have to go before the parent or the delete aborts the whole stage.
+    """
+    stale = [r["track_id"] for r in conn.execute("SELECT track_id FROM music_tracks")
+             if r["track_id"] not in keep]
+    if not stale:
+        return 0
+    log.info("S02.7 removing %d music row(s) left by a previous run: %s",
+             len(stale), ", ".join(stale[:5]) + (" ..." if len(stale) > 5 else ""))
+    rows = [(t,) for t in stale]
+    conn.executemany("DELETE FROM beats WHERE track_id=?", rows)
+    conn.executemany("DELETE FROM music_sections WHERE track_id=?", rows)
+    conn.executemany("DELETE FROM music_tracks WHERE track_id=?", rows)
+    conn.commit()
+    return len(stale)
+
+
 def analyse_music(cfg: Config, conn) -> dict[str, Any]:
     """Track features from audio files, or from a playlist export."""
     music_dir = cfg.data_root / "music"
@@ -390,23 +416,7 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
     if not tracks:
         return {**report, "error": "no usable tracks"}
 
-    # Upsert alone leaves rows from a previous run behind, and they compete in
-    # the assignment. Switching from a playlist to audio files left 25 stale
-    # playlist rows in place -- with no tempo, no key and a default energy of
-    # 0.50 -- which is why the acts drew from tracks that were no longer there.
-    keep = {t.track_id for t in tracks}
-    stale = [r["track_id"] for r in conn.execute("SELECT track_id FROM music_tracks")
-             if r["track_id"] not in keep]
-    if stale:
-        log.info("S02.7 removing %d music row(s) left by a previous run: %s",
-                 len(stale), ", ".join(stale[:5]) + (" ..." if len(stale) > 5 else ""))
-        conn.executemany("DELETE FROM music_tracks WHERE track_id=?",
-                         [(t,) for t in stale])
-        conn.executemany("DELETE FROM music_sections WHERE track_id=?",
-                         [(t,) for t in stale])
-        conn.executemany("DELETE FROM beats WHERE track_id=?", [(t,) for t in stale])
-        conn.commit()
-    report["n_stale_removed"] = len(stale)
+    report["n_stale_removed"] = remove_stale_music(conn, {t.track_id for t in tracks})
 
     db.upsert(conn, "music_tracks", ["track_id"], [{
         "track_id": t.track_id, "s3_key": t.s3_key, "title": t.title,
@@ -434,13 +444,23 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
                      (t.assigned_act, t.track_id))
     conn.commit()
 
+    # The film may run to film.max_duration_s where the material earns it, but
+    # what the material actually holds is not known until S05 has scored the
+    # shots. Here the runtime is the target, and S05 re-runs this allocation --
+    # and with it the music map -- once it can answer the question honestly.
+    total_s = music_mod.choose_total_duration(
+        float(cfg.get("film.target_duration_s")),
+        float(cfg.get("film.max_duration_s")),
+        material_s=None,
+        growth_bias=float(cfg.get("film.growth_bias")),
+        selectivity=float(cfg.get("film.material_selectivity")))
     mmap = music_mod.build_music_map(
         tracks, assignment, cfg.act_targets(),
-        total_s=float(cfg.get("film.total_duration_s")),
+        total_s=total_s,
         silence_s=float(cfg.get("assemble.silence_window_s")),
         feature_mask=playlist_mod.feature_mask_for(source))
     problems = music_mod.check_music_map(
-        mmap, target_s=float(cfg.get("film.total_duration_s")),
+        mmap, target_s=total_s,
         tolerance_s=float(cfg.get("film.duration_tolerance_s")))
     cfg.work("music", "music_map.json").write_text(json.dumps(mmap, indent=2))
 

@@ -7,7 +7,8 @@ import pytest
 
 from nepal.spine.music import (Track, parse_artist_title, estimate_key, mark_swells,
                                znorm, target_vector, callback_affinity, assign_acts,
-                               allocate_act_durations, build_music_map, check_music_map,
+                               allocate_act_durations, choose_total_duration,
+                               build_music_map, check_music_map,
                                detect_licence, ACT_WEIGHTS, PITCH_CLASSES,
                                MAJOR_PROFILE, MINOR_PROFILE)
 
@@ -219,6 +220,84 @@ def test_durations_clamp_when_the_target_is_unreachable():
 def test_short_cut_budget_clamps_to_the_minimum():
     d = allocate_act_durations(ACT_SPECS, 180)
     assert sum(d.values()) == pytest.approx(990, abs=0.5)
+
+
+# The shipped bands: acts 2, 3 and 5 absorb extra runtime, act 4 barely moves.
+SHIPPED_SPECS = [
+    {"act": 1, "name": "Planning",      "target_s": 167, "min_s":  90, "max_s":  300},
+    {"act": 2, "name": "Approach",      "target_s": 287, "min_s": 150, "max_s":  700},
+    {"act": 3, "name": "Climb",         "target_s": 407, "min_s": 240, "max_s": 1150},
+    {"act": 4, "name": "Highest point", "target_s": 113, "min_s":  90, "max_s":  150},
+    {"act": 5, "name": "Descent",       "target_s": 227, "min_s": 120, "max_s":  600},
+]
+
+
+def test_durations_at_the_target_are_the_stated_targets():
+    """At 20 minutes each act gets the length the creative brief gave it, not
+    the midpoint of a band that is asymmetric by design."""
+    d = allocate_act_durations(SHIPPED_SPECS, 1200)
+    for spec in SHIPPED_SPECS:
+        assert d[spec["act"]] == pytest.approx(spec["target_s"], abs=1.0)
+
+
+def test_the_summit_barely_grows_when_the_film_does():
+    """At 45 minutes a linear share would make act 4 four minutes long. It is a
+    peak swell and a hard cut to silence -- a beat, not a phase."""
+    at_target = allocate_act_durations(SHIPPED_SPECS, 1200)
+    at_max = allocate_act_durations(SHIPPED_SPECS, 2700)
+    assert sum(at_max.values()) == pytest.approx(2700, abs=1.0)
+    assert at_max[4] <= 150
+    # the journey acts take the runtime the summit does not
+    assert at_max[3] - at_target[3] > 600
+    assert at_max[4] - at_target[4] < 40
+
+
+@pytest.mark.parametrize("total", [1200, 1500, 2000, 2700])
+def test_shipped_bands_are_respected_across_the_range(total):
+    d = allocate_act_durations(SHIPPED_SPECS, total)
+    assert sum(d.values()) == pytest.approx(total, abs=1.0)
+    for spec in SHIPPED_SPECS:
+        assert spec["min_s"] - 0.01 <= d[spec["act"]] <= spec["max_s"] + 0.01
+
+
+def test_specs_without_a_target_still_start_at_the_midpoint():
+    d = allocate_act_durations(ACT_SPECS, 1200)
+    assert sum(d.values()) == pytest.approx(1200, abs=0.5)
+
+
+# -- how long the film should be ---------------------------------------
+
+def test_unknown_material_means_the_target():
+    """Before S05 has scored the shots the length of the usable material is
+    unknown, and the film must not grow on a guess."""
+    assert choose_total_duration(1200, 2700, material_s=None) == 1200
+    assert choose_total_duration(1200, 2700, material_s=0) == 1200
+
+
+def test_material_that_barely_covers_the_film_buys_nothing():
+    """A film cut 1:1 from its rushes is not a cut. Below the selectivity the
+    material needs, there is no surplus to spend."""
+    assert choose_total_duration(1200, 2700, material_s=1200, selectivity=3.0) == 1200
+    assert choose_total_duration(1200, 2700, material_s=3600, selectivity=3.0) == 1200
+
+
+def test_the_film_grows_with_material_but_stays_under_the_ceiling():
+    lengths = [choose_total_duration(1200, 2700, material_s=3600 * k, selectivity=3.0)
+               for k in (2, 5, 10, 100)]
+    assert lengths == sorted(lengths)                 # monotone in material
+    assert all(1200 < x < 2700 for x in lengths)      # earns growth, never reaches the cap
+    # the bias is toward twenty minutes: twice the material needed buys well
+    # under half the available twenty-five minutes
+    assert lengths[0] < 1200 + 0.5 * (2700 - 1200)
+
+
+def test_growth_bias_zero_pins_the_film_to_the_target():
+    assert choose_total_duration(1200, 2700, material_s=3600 * 100,
+                                 growth_bias=0.0) == 1200
+
+
+def test_a_ceiling_at_the_target_is_honoured():
+    assert choose_total_duration(1200, 1200, material_s=3600 * 100) == 1200
 
 
 # -- music map ---------------------------------------------------------
