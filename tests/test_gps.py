@@ -187,3 +187,58 @@ def test_day_boundary_uses_nepal_local_time():
     assert day_index(early, start) == 3
     # in UTC both of those fall on the same calendar date, which is the trap
     assert late.astimezone(UTC).date() == early.astimezone(UTC).date()
+
+
+# -- the trek envelope -------------------------------------------------
+
+from nepal.spine.gps import trek_envelope
+
+
+def _pt(day, lat, lon):
+    return GpsPoint(datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=day),
+                    lat, lon, None, "phone_keller")
+
+
+def _corpus():
+    home = [_pt(d, 55.75, 37.62) for d in range(42, 115, 7)]         # weekly, at home
+    trek = [_pt(d, 28.5 + (d - 118) * 0.02, 84.6) for d in range(118, 133)]
+    ktm = [_pt(117, 27.72, 85.32), _pt(133, 27.72, 85.32)]
+    return sorted(home + ktm + trek, key=lambda p: p.ts)
+
+
+def test_trek_envelope_excludes_photos_taken_at_home():
+    """The bug this guards: home photos carry GPS too, and they stretched the
+    envelope back eleven weeks. Every planning message then fell inside it, was
+    labelled 'trek', and Act 1 collapsed from ten weeks to forty-one minutes."""
+    pts = _corpus()
+    full = envelope(pts)
+    trek, n_excluded = trek_envelope(pts)
+    assert n_excluded > 0
+    assert trek[0] > full[0], "the trek must start later than the earliest GPS fix"
+    assert (trek[1] - trek[0]) < timedelta(days=25)
+
+
+def test_trek_envelope_keeps_the_trailhead_city():
+    """Kathmandu is about 110 km from Manaslu -- well inside the radius, and the
+    trek genuinely starts and ends there."""
+    trek, _ = trek_envelope(_corpus())
+    assert trek[0].date() == (datetime(2024, 1, 1, tzinfo=UTC)
+                              + timedelta(days=117)).date()
+
+
+def test_trek_envelope_with_no_outliers_matches_the_full_span():
+    pts = [_pt(d, 28.5, 84.6) for d in range(118, 130)]
+    trek, n = trek_envelope(pts)
+    assert n == 0
+    assert trek == envelope(pts)
+
+
+def test_trek_envelope_radius_is_configurable():
+    pts = _corpus()
+    wide, n_wide = trek_envelope(pts, max_radius_km=100_000)
+    assert n_wide == 0
+    assert wide == envelope(pts)
+
+
+def test_trek_envelope_empty():
+    assert trek_envelope([]) == (None, 0)

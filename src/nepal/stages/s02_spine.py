@@ -196,8 +196,14 @@ def parse_telegram(cfg: Config, conn) -> dict[str, Any]:
 
     messages = tg_mod.parse_export(result)
     track = _track(conn)
-    env = gps_mod.envelope(track)
+    # The envelope that decides message phase must describe the trek, not every
+    # place a phone happened to have GPS on.
+    env, n_off_route = gps_mod.trek_envelope(
+        track, max_radius_km=float(cfg.get("spine.trek_radius_km", 200.0)))
     start, end = (env if env else (None, None))
+    if start and end:
+        log.info("S02.5 trek envelope %s .. %s (%d off-route points ignored)",
+                 start.date(), end.date(), n_off_route)
 
     climb_events = _climb_events(track)
     tg_mod.mark_notable(messages, climb_events=climb_events,
@@ -456,7 +462,10 @@ def segment_acts(cfg: Config, conn) -> dict[str, Any]:
     bounds = acts_mod.segment_acts(
         days,
         planning_start=_dt(planning["t"]) if planning and planning["t"] else None,
-        after_end=_dt(after["t"]) if after and after["t"] else None)
+        after_end=_dt(after["t"]) if after and after["t"] else None,
+        max_gap_days=int(cfg.get("spine.act_max_gap_days", 3)),
+        planning_window_days=int(cfg.get("spine.act_planning_window_days", 180)),
+        after_window_days=int(cfg.get("spine.act_after_window_days", 30)))
     payload = [b.as_dict() for b in bounds]
     db.set_decision(conn, "act_boundaries", json.dumps(payload),
                     1.0 if any("changepoint" in b.method for b in bounds) else 0.4,
@@ -506,7 +515,10 @@ def day_stats(conn) -> list[acts_mod.DayStat]:
             date=ts_list[0].astimezone(NEPAL_TZ).date().isoformat(),
             alt_max=max(alts) if alts else None,
             alt_min=min(alts) if alts else None,
-            start_utc=ts_list[0], end_utc=ts_list[-1]))
+            start_utc=ts_list[0], end_utc=ts_list[-1],
+            # asset volume is how the trek window is found: a trek is a dense
+            # burst of capture, planning photos are sparse and scattered
+            asset_count=len(bounds[d])))
     return out
 
 
@@ -533,9 +545,13 @@ def print_chronology(cfg: Config) -> int:
                                                _dt(b["end_utc"]), b.get("method", "")))
 
     first = days[0].start_utc
-    print(f"\n{'day':>4}  {'date':<10} {'act':>3}  {'place':<24} {'alt':>6}  "
+    window, outside = acts_mod.trek_window(
+        days, max_gap_days=int(cfg.get("spine.act_max_gap_days", 3)))
+    in_trek = {d.day_index for d in window}
+
+    print(f"\n{'day':>4} {'':1} {'date':<10} {'act':>3}  {'place':<24} {'alt':>6}  "
           f"{'clips':>5} {'photos':>6} {'msgs':>5}")
-    print("-" * 79)
+    print("-" * 81)
 
     # Act 1 is built from everything BEFORE the trek: planning messages,
     # screenshots, gear photos, round video messages. Omitting it from the
@@ -551,7 +567,7 @@ def print_chronology(cfg: Config) -> int:
     pre_cards = conn.execute("SELECT COUNT(*) n FROM messages WHERE ts_utc < ? "
                              "AND usable_as_card=1", (trek_lo,)).fetchone()["n"]
     if (pre["clips"] or 0) or (pre["photos"] or 0) or pre_msgs:
-        print(f"{'pre':>4}  {'planning':<10} {1:>3}  {'(before the trek)':<24} {'-':>6}  "
+        print(f"{'pre':>4} {'':1} {'planning':<10} {1:>3}  {'(before the trek)':<24} {'-':>6}  "
               f"{pre['clips'] or 0:>5} {pre['photos'] or 0:>6} {pre_msgs:>5}"
               f"   <- {pre_cards} usable as caption cards")
 
@@ -577,17 +593,30 @@ def print_chronology(cfg: Config) -> int:
             "GROUP BY place_name ORDER BY n DESC LIMIT 1", (lo, hi)).fetchone()
         act = acts_mod.act_for(d.start_utc, bounds) if bounds else None
         alt = f"{d.alt_max:.0f}" if d.alt_max is not None else "-"
-        print(f"{d.day_index:>3}  {d.date:<10} {act if act else '-':>3}  "
+        mark = "*" if d.day_index in in_trek else " "
+        print(f"{d.day_index:>4} {mark:1} {d.date:<10} {act if act else '-':>3}  "
               f"{(place['place_name'] if place else '-')[:24]:<24} {alt:>6}  "
               f"{counts['clips'] or 0:>5} {counts['photos'] or 0:>6} {msgs:>5}")
 
     tot = conn.execute(
         "SELECT COUNT(*) n, SUM(CASE WHEN kind IN ('video360','video_flat') THEN "
         "COALESCE(duration_s,0) ELSE 0 END) secs FROM assets").fetchone()
-    print("-" * 79)
+    print("-" * 81)
     secs = tot["secs"] or 0
     dur = f"{secs/3600:.1f} h" if secs >= 3600 else f"{secs/60:.1f} min"
-    print(f"{tot['n']} assets, {dur} of video, {len(days)} trek days")
+    print(f"{tot['n']} assets, {dur} of video, {len(days)} days carrying material")
+    if window:
+        trek_assets = sum(d.asset_count for d in window)
+        print(f"* the trek: days {window[0].day_index}-{window[-1].day_index}, "
+              f"{window[0].date} .. {window[-1].date}, {len(window)} days, "
+              f"{trek_assets} assets. Act boundaries come from these days only.")
+    if outside:
+        far = [d for d in outside if d.day_index > (window[-1].day_index + 60)] if window else []
+        if far:
+            print(f"  {len(far)} day(s) of material sit far outside the trek "
+                  f"({', '.join(d.date for d in far[:4])}"
+                  f"{' ...' if len(far) > 4 else ''}) -- almost always a device clock "
+                  f"error rather than real material from that date")
 
     # Anything the spine could not place is worth naming: an unplaced shot
     # cannot be act-assigned, and silently dropping it shrinks the film.

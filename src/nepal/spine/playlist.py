@@ -110,17 +110,48 @@ class PlaylistReport:
     exclusions: list[ExclusionRule] = field(default_factory=list)
 
 
+# Columns that hold identifiers rather than names. Exportify emits both
+# "Artist URI(s)" and "Artist Name(s)", and a substring match on "artist" is
+# happy to take the URI -- which is how track ids like
+# "spotify-artist-1ghphrq36vkcy3ucvazcfo-go" get made, and why the Act 1/Act 5
+# callback (which matches on artist) silently stops working.
+ID_COLUMN_MARKERS = ("uri", "url", "id", "isrc", "href", "link")
+
+# What a Spotify identifier looks like in a value, as a second line of defence
+# when the header alone is ambiguous.
+SPOTIFY_ID_RE = re.compile(r"^(?:spotify:[a-z]+:)?[0-9A-Za-z]{22}$")
+
+
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9() ]+", " ", str(s).strip().lower()).strip()
+
+
+def _is_identifier_column(header: str) -> bool:
+    tokens = _norm(header).replace("(", " ").replace(")", " ").split()
+    return any(t in ID_COLUMN_MARKERS for t in tokens)
+
+
+def looks_like_identifier(value: Any) -> bool:
+    """Whether a cell holds an id rather than something a person would read."""
+    v = str(value or "").strip()
+    if not v:
+        return False
+    if v.lower().startswith(("spotify:", "http://", "https://")):
+        return True
+    return bool(SPOTIFY_ID_RE.match(v))
 
 
 def detect_columns(header: Sequence[str]) -> dict[str, str]:
     """Map logical field -> actual header name, by longest-alias match."""
     normalised = {_norm(h): h for h in header if h}
     found: dict[str, str] = {}
+    # Name-bearing fields must never resolve to an identifier column.
+    name_fields = {"title", "artist", "album"}
     for field_name, aliases in COLUMN_ALIASES.items():
+        candidates = {k: v for k, v in normalised.items()
+                      if field_name not in name_fields or not _is_identifier_column(v)}
         for alias in sorted(aliases, key=len, reverse=True):
-            for norm_h, original in normalised.items():
+            for norm_h, original in candidates.items():
                 if norm_h == alias:
                     found[field_name] = original
                     break
@@ -130,7 +161,7 @@ def detect_columns(header: Sequence[str]) -> dict[str, str]:
             continue
         # fall back to a substring hit, longest alias first
         for alias in sorted(aliases, key=len, reverse=True):
-            for norm_h, original in normalised.items():
+            for norm_h, original in candidates.items():
                 if alias in norm_h and original not in found.values():
                     found[field_name] = original
                     break
@@ -257,12 +288,16 @@ def parse_playlist(source: str | Path, *, licence: str = "personal",
 
     tracks: list[Track] = []
     seen: set[str] = set()
+    id_columns: set[str] = set()
     for row in reader:
         report.n_rows += 1
         title = (row.get(cols["title"]) or "").strip()
-        if not title:
+        if not title or looks_like_identifier(title):
             continue
         artist = _first_artist(row.get(cols.get("artist", ""), ""))
+        if looks_like_identifier(artist):
+            id_columns.add(cols.get("artist", "?"))
+            artist = None
 
         dur = _num(row.get(cols.get("duration_s", ""), ""))
         dur_ms = _num(row.get(cols.get("duration_ms", ""), ""))
@@ -316,6 +351,14 @@ def parse_playlist(source: str | Path, *, licence: str = "personal",
         t.energy_p95 = t.energy_mean          # placeholders; dyn_range is masked
         t.energy_p10 = t.energy_mean
         tracks.append(t)
+
+    if id_columns:
+        report.notes.append(
+            f"column(s) {sorted(id_columns)} held identifiers rather than names and "
+            f"were discarded. Artist is unknown for those rows, which disables the "
+            f"Act 5 callback bonus -- it matches on artist and key. Check the export "
+            f"for an 'Artist Name(s)' column.")
+        log.warning("S02.7 %s", report.notes[-1])
 
     report.n_tracks = len(tracks)
     if report.n_excluded:

@@ -258,3 +258,74 @@ def test_resolve_mask_rejects_a_fully_masked_vector():
 def test_resolve_mask_rejects_wrong_length():
     with pytest.raises(ValueError):
         _resolve_mask([1, 1])
+
+
+# -- identifier columns ------------------------------------------------
+
+from nepal.spine.playlist import looks_like_identifier, _is_identifier_column
+
+EXPORTIFY_WITH_URIS = ("Track URI,Track Name,Artist URI(s),Artist Name(s),Album Name,"
+                       "Duration (ms),Tempo,Energy,Loudness,Danceability,Acousticness,"
+                       "Instrumentalness,Valence,Key,Mode")
+
+
+def test_artist_name_column_beats_artist_uri_column():
+    """The bug this guards: a substring match on 'artist' happily took
+    'Artist URI(s)', producing track ids like
+    'spotify-artist-1ghphrq36vkcy3ucvazcfo-go' and silently disabling the Act 5
+    callback, which matches on artist."""
+    cols = detect_columns(EXPORTIFY_WITH_URIS.split(","))
+    assert cols["artist"] == "Artist Name(s)"
+    assert cols["title"] == "Track Name"
+
+
+def test_a_uri_only_export_yields_no_artist_rather_than_a_uri():
+    hdr = "Track URI,Track Name,Artist URI(s),Album Name,Tempo,Energy,Key,Mode"
+    cols = detect_columns(hdr.split(","))
+    assert cols.get("artist") is None
+
+
+def test_uri_values_are_discarded_and_reported():
+    hdr = "Track Name,Artist,Tempo,Energy,Key,Mode"
+    text = (hdr + "\nGo,spotify:artist:1GhPHrq36vKCY3UcVAzCFo,120,0.8,9,0\n")
+    tracks, rep = parse_playlist(text)
+    assert tracks[0].artist is None
+    assert "spotify" not in tracks[0].track_id
+    assert any("identifier" in n for n in rep.notes)
+
+
+def test_rows_whose_title_is_an_identifier_are_skipped():
+    hdr = "Track Name,Artist Name(s),Tempo"
+    text = hdr + "\nspotify:track:1GhPHrq36vKCY3UcVAzCFo,Someone,120\nSays,Nils Frahm,62\n"
+    tracks, _ = parse_playlist(text)
+    assert [t.title for t in tracks] == ["Says"]
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("spotify:artist:1GhPHrq36vKCY3UcVAzCFo", True),
+    ("https://open.spotify.com/artist/x", True),
+    ("1GhPHrq36vKCY3UcVAzCFo", True),
+    ("Nils Frahm", False), ("Bi-2", False), ("", False), (None, False),
+])
+def test_looks_like_identifier(value, expected):
+    assert looks_like_identifier(value) is expected
+
+
+@pytest.mark.parametrize("header,expected", [
+    ("Artist URI(s)", True), ("Track URI", True), ("Spotify ID", True),
+    ("ISRC", True), ("Artist Name(s)", False), ("Track Name", False),
+    ("Danceability", False),
+])
+def test_is_identifier_column(header, expected):
+    assert _is_identifier_column(header) is expected
+
+
+def test_real_exportify_header_parses_names_not_uris():
+    text = (EXPORTIFY_WITH_URIS + "\n"
+            "spotify:track:aaa,Says,spotify:artist:bbb,Nils Frahm,Felt,275000,62,"
+            "0.09,-22,0.2,0.95,0.94,0.3,9,0\n")
+    tracks, rep = parse_playlist(text)
+    assert tracks[0].artist == "Nils Frahm"
+    assert tracks[0].title == "Says"
+    assert tracks[0].track_id == "nils-frahm-says"
+    assert not any("identifier" in n for n in rep.notes)

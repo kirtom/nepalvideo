@@ -71,6 +71,18 @@ spine:
   max_interp_gap_s: 14400     # 4 hours
   # S02.4 cluster distinct locations to ~500 m before reverse geocoding
   geocode_cluster_m: 500
+  # Act boundaries. The trek is the densest run of days with material; days
+  # separated by more than max_gap_days start a new run. Act 1 reaches back to
+  # the first planning material and Act 5 forward to the homecoming, both
+  # bounded -- without a bound, one mis-timestamped clip turns Act 5 into a
+  # 566-day act.
+  # Points further than this from the median position are not on the trek, so
+  # they are excluded from the envelope that classifies message phase. Generous
+  # enough to keep the trailhead city: Kathmandu is ~110 km from Manaslu.
+  trek_radius_km: 200
+  act_max_gap_days: 3
+  act_planning_window_days: 180
+  act_after_window_days: 30
   # S02.5 message classification
   notable_window_s: 1200      # 20 min around an altitude-gain local max
   card_max_chars: 180         # "short, self-contained, quotable"

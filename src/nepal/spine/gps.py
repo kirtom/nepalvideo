@@ -206,7 +206,46 @@ def _bracket(points: Sequence[GpsPoint], ts: datetime):
 
 
 def envelope(points: Sequence[GpsPoint]) -> tuple[datetime, datetime] | None:
+    """Full temporal span of the track, outliers included."""
     return (points[0].ts, points[-1].ts) if points else None
+
+
+def trek_envelope(points: Sequence[GpsPoint], *, max_radius_km: float = 200.0
+                  ) -> tuple[tuple[datetime, datetime] | None, int]:
+    """Temporal span of the points that are actually on the trek.
+
+    Section S02.5 classifies a message as planning, trek or after by where it
+    falls against this envelope -- so the envelope had better describe the trek.
+    The full span does not: phone photos taken at home during the planning
+    months carry GPS too, and on real material they stretched the envelope back
+    eleven weeks. Every planning message then landed inside it, was labelled
+    "trek", and Act 1 -- which is built entirely from planning-phase material --
+    collapsed from ten weeks to forty-one minutes.
+
+    The trek is where the route is, so points further than ``max_radius_km``
+    from the median position are excluded before the span is measured. The
+    median cannot be moved by outliers, and the radius is generous enough to
+    keep the trailhead city: Kathmandu sits about 110 km from Manaslu.
+
+    Returns (envelope, n_excluded).
+    """
+    pts = [p for p in points if p.lat is not None and p.lon is not None]
+    if not pts:
+        return None, 0
+    c_lat = statistics.median([p.lat for p in pts])
+    c_lon = statistics.median([p.lon for p in pts])
+    on_route = [p for p in pts
+                if haversine_m(c_lat, c_lon, p.lat, p.lon) / 1000.0 <= max_radius_km]
+    if not on_route:
+        return envelope(pts), 0
+    excluded = len(pts) - len(on_route)
+    if excluded:
+        log.info("S02 trek envelope: %d of %d GPS points are within %.0f km of the "
+                 "route; %d elsewhere (photos from home or in transit) are excluded "
+                 "from the envelope that classifies message phase",
+                 len(on_route), len(pts), max_radius_km, excluded)
+    on_route.sort(key=lambda p: p.ts)
+    return (on_route[0].ts, on_route[-1].ts), excluded
 
 
 def coverage(points: Sequence[GpsPoint], timestamps: Sequence[datetime],

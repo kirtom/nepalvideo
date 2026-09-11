@@ -148,3 +148,107 @@ def test_fit_error_on_a_perfect_line():
 def test_fit_error_degenerate_x():
     err, slope = _fit_error([2, 2, 2], [1, 2, 3])
     assert slope == 0.0 and err > 0
+
+
+# -- the trek window ---------------------------------------------------
+
+from nepal.spine.acts import trek_window
+
+
+def dayn(i, alt, n, base=BASE):
+    s = base + timedelta(days=i - 1)
+    return DayStat(i, s.date().isoformat(), alt, None if alt is None else alt - 100,
+                   s, s + timedelta(hours=12), asset_count=n)
+
+
+def real_corpus():
+    """The shape of the delivered material: sparse planning photos over eleven
+    weeks, a dense fifteen-day trek, a short tail, and one day of footage
+    eighteen months later from a camera whose clock had reset."""
+    planning = [dayn(i, None, 1) for i in (1, 2, 9, 10, 17, 18, 19, 25, 26, 36, 39,
+                                           40, 42, 43, 46, 47, 48, 50, 51, 52, 57,
+                                           59, 60, 62, 63, 72, 74, 75, 76)]
+    trek = [dayn(77, 1406, 33), dayn(78, 1381, 51), dayn(79, 2045, 55),
+            dayn(80, 2630, 55), dayn(81, 3505, 67), dayn(82, 4066, 103),
+            dayn(83, 4561, 74), dayn(84, 4477, 70), dayn(85, 5146, 135),
+            dayn(86, 3546, 89), dayn(87, 2656, 19), dayn(88, 1322, 59),
+            dayn(89, 1413, 63), dayn(90, 1353, 32), dayn(91, None, 2)]
+    tail = [dayn(i, None, n) for i, n in ((92, 7), (93, 3), (94, 1), (95, 1),
+                                          (97, 1), (164, 1), (165, 2))]
+    stray = [dayn(651, 5147, 276)]
+    return planning + trek + tail + stray
+
+
+def test_trek_window_finds_the_dense_burst():
+    window, excluded = trek_window(real_corpus())
+    assert 77 in [d.day_index for d in window]
+    assert 85 in [d.day_index for d in window], "the summit day must be in the trek"
+    assert 651 not in [d.day_index for d in window]
+    assert 1 not in [d.day_index for d in window], "planning photos are not the trek"
+    assert excluded
+
+
+def test_trek_window_prefers_material_over_length():
+    """A long sparse stretch of planning photos must not outrank a short dense
+    trek just by spanning more days."""
+    sparse = [dayn(i, None, 1) for i in range(1, 40)]          # 39 days, 39 assets
+    dense = [dayn(i, 4000, 80) for i in range(60, 68)]          # 8 days, 640 assets
+    window, _ = trek_window(sparse + dense)
+    assert [d.day_index for d in window] == list(range(60, 68))
+
+
+def test_trek_window_on_a_single_run():
+    days = [dayn(i, 3000, 10) for i in range(1, 9)]
+    window, excluded = trek_window(days)
+    assert len(window) == 8 and excluded == []
+
+
+def test_trek_window_empty():
+    assert trek_window([]) == ([], [])
+
+
+# -- the real corpus, end to end ---------------------------------------
+
+def test_summit_lands_on_the_real_high_point_not_the_stray_day():
+    """The bug this guards: the 2025 stray day at 5147 m was HIGHER than the
+    real 5146 m summit, so it became the peak, pushed Act 4 across eighteen
+    months and left Act 5 with zero duration."""
+    b = by_act(segment_acts(real_corpus()))
+    assert b[4].start_utc.date() == (BASE + timedelta(days=84)).date()
+    assert (b[4].end_utc - b[4].start_utc) < timedelta(days=2)
+    assert "5146" in b[4].method, f"summit altitude wrong: {b[4].method}"
+
+
+def test_act_one_spans_the_planning_period():
+    """It collapsed to 41 minutes on real material."""
+    b = by_act(segment_acts(real_corpus()))
+    span = b[1].end_utc - b[1].start_utc
+    assert span > timedelta(days=30), f"Act 1 is only {span}"
+
+
+def test_act_five_is_bounded():
+    """Unbounded, one mis-timestamped clip made Act 5 a 566-day act."""
+    b = by_act(segment_acts(real_corpus(), after_window_days=30))
+    span = b[5].end_utc - b[5].start_utc
+    assert span <= timedelta(days=45), f"Act 5 is {span}"
+    assert b[5].end_utc.year == 2024
+
+
+def test_act_one_is_bounded_too():
+    old = [dayn(1, None, 1, base=BASE - timedelta(days=900))]
+    b = by_act(segment_acts(real_corpus() + old, planning_window_days=180))
+    assert (b[1].end_utc - b[1].start_utc) <= timedelta(days=181)
+
+
+def test_acts_stay_contiguous_on_the_real_corpus():
+    b = segment_acts(real_corpus())
+    for prev, nxt in zip(b, b[1:]):
+        assert prev.end_utc == nxt.start_utc
+        assert prev.start_utc <= prev.end_utc
+
+
+def test_approach_and_climb_split_at_the_gradient_change():
+    """Manaslu: two low days from the airstrip, then the ascent proper."""
+    b = by_act(segment_acts(real_corpus()))
+    assert b[2].end_utc < b[3].end_utc
+    assert (b[3].end_utc - b[3].start_utc) >= timedelta(days=3)
