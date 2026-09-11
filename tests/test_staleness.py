@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from nepal import db
-from nepal.stages.s02_spine import code_mtime, stale_units
+from nepal.freshness import code_mtime, stale_units, warn_if_stale
 
 
 @pytest.fixture()
@@ -37,7 +37,14 @@ def test_a_unit_that_ran_before_the_code_was_written_is_stale(conn):
     code = code_mtime()
     mark(conn, "S01", "manifest", code - timedelta(hours=3))
     mark(conn, "S02", "acts", code - timedelta(hours=3))
-    assert stale_units(conn) == ["S01.manifest", "S02.acts"]
+    assert stale_units(conn) == [("S01", "manifest"), ("S02", "acts")]
+
+
+def test_stale_units_can_be_narrowed_to_one_stage(conn):
+    code = code_mtime()
+    mark(conn, "S01", "manifest", code - timedelta(hours=3))
+    mark(conn, "S02", "acts", code - timedelta(hours=3))
+    assert stale_units(conn, "S02") == [("S02", "acts")]
 
 
 def test_a_unit_that_ran_after_the_code_was_written_is_current(conn):
@@ -50,7 +57,7 @@ def test_only_the_stale_units_are_named(conn):
     code = code_mtime()
     mark(conn, "S01", "manifest", code - timedelta(hours=3))
     mark(conn, "S02", "acts", code + timedelta(minutes=1))
-    assert stale_units(conn) == ["S01.manifest"]
+    assert stale_units(conn) == [("S01", "manifest")]
 
 
 def test_a_failed_unit_is_not_reported_as_merely_stale(conn):
@@ -63,4 +70,61 @@ def test_a_failed_unit_is_not_reported_as_merely_stale(conn):
 
 
 def test_nothing_recorded_means_nothing_stale(conn):
+    assert stale_units(conn) == []
+
+
+# -- the warning a re-run without --force has to carry ------------------
+
+class _Log:
+    def __init__(self): self.messages = []
+    def warning(self, fmt, *args): self.messages.append(fmt % args)
+
+
+def test_a_rerun_without_force_says_it_will_skip_the_stale_work(conn):
+    """`nepal s01` after a fix prints a full report and changes nothing: every
+    unit is already done, so every unit is skipped. Silence there cost three
+    rounds of debugging the wrong layer."""
+    code = code_mtime()
+    mark(conn, "S01", "manifest", code - timedelta(hours=3))
+    mark(conn, "S01", "clock", code - timedelta(hours=3))
+    log = _Log()
+
+    got = warn_if_stale(log, conn, "S01", force=False, rerun_hint="nepal s01 --force")
+
+    assert got == ["clock", "manifest"]
+    assert len(log.messages) == 1
+    text = log.messages[0]
+    assert "SKIPPED" in text and "will not change them" in text
+    assert "nepal s01 --force" in text
+    assert "clock" in text and "manifest" in text
+
+
+def test_force_needs_no_warning_because_nothing_is_skipped(conn):
+    code = code_mtime()
+    mark(conn, "S01", "manifest", code - timedelta(hours=3))
+    log = _Log()
+    assert warn_if_stale(log, conn, "S01", force=True, rerun_hint="x") == []
+    assert log.messages == []
+
+
+def test_current_work_is_not_warned_about(conn):
+    code = code_mtime()
+    mark(conn, "S01", "manifest", code + timedelta(minutes=1))
+    log = _Log()
+    assert warn_if_stale(log, conn, "S01", force=False, rerun_hint="x") == []
+    assert log.messages == []
+
+
+def test_another_stages_stale_work_is_not_this_stages_warning(conn):
+    code = code_mtime()
+    mark(conn, "S02", "acts", code - timedelta(hours=3))
+    log = _Log()
+    assert warn_if_stale(log, conn, "S01", force=False, rerun_hint="x") == []
+    assert log.messages == []
+
+
+def test_an_unparseable_timestamp_is_skipped_not_crashed(conn):
+    conn.execute("INSERT INTO stage_units(stage, unit_id, status, updated_at) "
+                 "VALUES ('S01','manifest','done','not a date')")
+    conn.commit()
     assert stale_units(conn) == []

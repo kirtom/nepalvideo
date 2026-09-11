@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from nepal import db
+from nepal import db, freshness
 from nepal.config import Config
 from nepal.probe import chapters, clock, fov, manifest
 from nepal.util import proc
@@ -678,6 +678,9 @@ def run(cfg: Config, *, force: bool = False, skip_fov: bool = False,
     conn = db.init(cfg.db_path)
     report: dict[str, Any] = {"stage": STAGE, "started_utc": db.utcnow()}
     done = db.done_units(conn, STAGE)
+    report["skipped_stale"] = freshness.warn_if_stale(
+        log, conn, STAGE, force=force,
+        rerun_hint="nepal s01 --force --skip-fov --skip-clock")
 
     if force or "manifest" not in done:
         report["manifest"] = build_manifest(cfg, conn, force=force)

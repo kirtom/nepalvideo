@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-from nepal import db
+from nepal import db, freshness
 from nepal.config import Config
 from nepal.probe import manifest
 from nepal.spine import acts as acts_mod
@@ -575,34 +575,6 @@ def day_stats(conn) -> list[acts_mod.DayStat]:
 
 # ------------------------------------------------------------ chronology
 
-def code_mtime() -> datetime | None:
-    """When the installed package was last written.
-
-    A checkout writes every file it updates, so after `git pull` this is the
-    moment the new code arrived. Comparing it against a stage's completion time
-    answers the question three rounds of debugging turned on: is this table the
-    output of the code now installed, or of the code it replaced?
-    """
-    import nepal
-    root = Path(nepal.__file__).resolve().parent
-    newest = max((f.stat().st_mtime for f in root.rglob("*.py")), default=None)
-    return datetime.fromtimestamp(newest, timezone.utc) if newest else None
-
-
-def stale_units(conn) -> list[str]:
-    """Stage units that finished before the installed code was written."""
-    code = code_mtime()
-    if code is None:
-        return []
-    out = []
-    for r in conn.execute("SELECT stage, unit_id, updated_at FROM stage_units "
-                          "WHERE status='done'"):
-        ran = _dt(r["updated_at"])
-        if ran is not None and ran < code:
-            out.append(f"{r['stage']}.{r['unit_id']}")
-    return sorted(out)
-
-
 def print_unreachable(conn, bounds: Sequence[acts_mod.ActBoundary]) -> dict[str, Any]:
     """Report media that falls in no act, with what it costs the film."""
     rows = conn.execute(
@@ -726,8 +698,9 @@ def print_chronology(cfg: Config) -> int:
     if built:
         shown = [(k, built[k]) for k in ("S01.manifest", "S01.clock", "S02.geotag",
                                          "S02.music", "S02.acts") if k in built]
-        print("computed: " + ", ".join(f"{k}={v}" for k, v in shown or built.items()))
-        stale = stale_units(conn)
+        print("computed (UTC): "
+              + ", ".join(f"{k}={v}" for k, v in shown or built.items()))
+        stale = [f"{st}.{u}" for st, u in freshness.stale_units(conn)]
         if stale:
             print(f"  STALE: {', '.join(stale)} predate the code now installed. "
                   f"This table was built by the previous version.")
@@ -837,6 +810,8 @@ def run(cfg: Config, *, force: bool = False, skip_asr: bool = False) -> dict[str
     conn = db.init(cfg.db_path)
     report: dict[str, Any] = {"stage": STAGE, "started_utc": db.utcnow()}
     done = db.done_units(conn, STAGE)
+    report["skipped_stale"] = freshness.warn_if_stale(
+        log, conn, STAGE, force=force, rerun_hint="nepal s02 --force")
 
     # Order matters. Telegram strips EXIF, so Telegram media takes its capture
     # time from the message that carried it -- which means S02.5 has to run

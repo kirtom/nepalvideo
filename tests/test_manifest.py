@@ -286,3 +286,24 @@ def test_capture_time_spread_is_tiny_on_a_healthy_file():
            "Track1:MediaCreateDate": "2024:05:04 01:27:33"}
     seconds, _, _ = capture_time_spread(row)
     assert seconds == 0.0
+
+
+def test_every_capture_tag_is_actually_requested_from_exiftool():
+    """A tag the scan does not ask for does not exist, however carefully
+    asset_datetime() ranks it.
+
+    This has bitten twice: OffsetTimeOriginal was missing from the request and
+    every Nepal photo landed 5h45m out; CreationDate was missing and 276 clips
+    kept the export date their QuickTime stamp had been rewritten to. Both
+    times the reader was right and the request was short.
+    """
+    from nepal.util.proc import EXIF_TAGS
+    missing = [t for t in CAPTURE_TAGS if f"-{t}" not in EXIF_TAGS]
+    assert missing == [], f"asset_datetime() reads {missing}, exiftool is never asked for them"
+
+
+def test_the_separate_offset_tags_are_requested_too():
+    """asset_datetime() falls back to these for a stamp with no inline zone."""
+    from nepal.util.proc import EXIF_TAGS
+    for tag in ("-OffsetTimeOriginal", "-OffsetTime", "-OffsetTimeDigitized"):
+        assert tag in EXIF_TAGS
