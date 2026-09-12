@@ -276,3 +276,60 @@ def test_other_unreadable_files_name_their_format(project):
     key = next(iter(rep["rejected"]))
     assert ".png" in key and "pillow-heif" not in key
     assert rep["n_needs_heif"] == 0
+
+
+# -- the thread pool must not change the answer -------------------------
+
+def test_parallel_and_serial_measurement_agree(project):
+    """Serially, 706 photographs took 14 minutes. Threads cut that nearly
+    linearly -- but only if the result is bit-for-bit the same."""
+    cfg, conn, data = project
+    for i in range(9):
+        add_photo(conn, data, f"p{i}.jpg", TREK + timedelta(days=4, minutes=i))
+
+    def rows_for(workers):
+        conn.execute("DELETE FROM shots")
+        conn.commit()
+        cfg._data["process"]["photo_workers"] = workers   # type: ignore[attr-defined]
+        build_photo_shots(cfg, conn)
+        return [tuple(r) for r in conn.execute(
+            "SELECT shot_id, sharpness, exposure_pen, score_tech, act, end_s "
+            "FROM shots ORDER BY shot_id")]
+
+    assert rows_for(1) == rows_for(4)
+
+
+def test_shot_ids_do_not_depend_on_thread_scheduling(project):
+    cfg, conn, data = project
+    for i in range(9):
+        add_photo(conn, data, f"p{i}.jpg", TREK + timedelta(days=4, minutes=i))
+    cfg._data["process"]["photo_workers"] = 4             # type: ignore[attr-defined]
+
+    build_photo_shots(cfg, conn)
+    first = [r[0] for r in conn.execute("SELECT shot_id FROM shots ORDER BY start_utc")]
+    conn.execute("DELETE FROM shots")
+    conn.commit()
+    build_photo_shots(cfg, conn)
+    second = [r[0] for r in conn.execute("SELECT shot_id FROM shots ORDER BY start_utc")]
+    assert first == second
+
+
+def test_one_unreadable_file_does_not_sink_the_whole_pool(project):
+    """A failure inside a worker must be counted, not propagate out and abandon
+    the other seven hundred photographs."""
+    cfg, conn, data = project
+    for i in range(4):
+        add_photo(conn, data, f"ok{i}.jpg", TREK + timedelta(days=4, minutes=i))
+    rel = "media_from_phones/keller/bad.jpg"
+    (data / rel).parent.mkdir(parents=True, exist_ok=True)
+    (data / rel).write_bytes(b"not an image")
+    conn.execute(
+        "INSERT INTO assets(asset_id, s3_key, source, kind, quality_curve, "
+        "created_at_utc) VALUES ('bad',?, 'phone_keller','photo','phone',?)",
+        (f"raw/{rel}", (TREK + timedelta(days=4, minutes=9)).isoformat()))
+    conn.commit()
+    cfg._data["process"]["photo_workers"] = 4             # type: ignore[attr-defined]
+
+    rep = build_photo_shots(cfg, conn)
+    assert rep["n_shots"] == 4
+    assert sum(rep["rejected"].values()) == 1

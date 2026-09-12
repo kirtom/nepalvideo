@@ -93,6 +93,9 @@ class Progress:
         self._tty = _is_tty(self.stream)
         self._width = shutil.get_terminal_size((100, 24)).columns
         self._closed = False
+        # step() is called from worker threads where the work is parallel, and
+        # `self.done += n` is not atomic.
+        self._lock = threading.Lock()
 
     # -- drawing ------------------------------------------------------
     def _line(self, note: str = "") -> str:
@@ -117,15 +120,16 @@ class Progress:
 
     # -- use ----------------------------------------------------------
     def step(self, n: int = 1, note: str = "") -> None:
-        self.done += n
-        now = time.monotonic()
-        if self._tty:
-            if now - self._last_draw >= self.min_interval_s:
-                self._last_draw = now
-                self._draw(note)
-        elif now - self._last_log >= self.log_every_s:
-            self._last_log = now
-            self.log.info("%s", self._line(note))
+        with self._lock:
+            self.done += n
+            now = time.monotonic()
+            if self._tty:
+                if now - self._last_draw >= self.min_interval_s:
+                    self._last_draw = now
+                    self._draw(note)
+            elif now - self._last_log >= self.log_every_s:
+                self._last_log = now
+                self.log.info("%s", self._line(note))
 
     def close(self, note: str = "") -> None:
         if self._closed:

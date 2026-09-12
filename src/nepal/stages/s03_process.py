@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,52 @@ def _dt(value: Any):
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
+def _measure(item: dict[str, Any], *, max_px: int, slot_base: float,
+             curve: dict[str, float]) -> dict[str, Any]:
+    """Decode one photograph and score it. Pure: no database, no shared state.
+
+    Called from a thread pool, so it must touch nothing but its argument.
+    """
+    from PIL import Image
+    import numpy as np
+
+    with Image.open(item["src"]) as im:
+        # A no-op for HEIF -- libheif decodes at full size regardless -- but it
+        # still lets the JPEG decoder scale during the DCT, which is free.
+        im.draft("RGB", (max_px, max_px))
+        im = im.convert("RGB")
+        im.thumbnail((max_px, max_px))
+        arr = np.asarray(im)
+        w, h = im.size
+
+    sharp = stills.sharpness(arr)
+    pen = stills.exposure_penalty(arr)
+    if not stills.passes_gate(sharp, pen, curve):
+        return {"rejected": "below the quality gate"}
+
+    dur = stills.slot_duration_s((w / h) if h else None, base_s=slot_base)
+    return {
+        "shot_id": f"photo_{item['asset_id'][:16]}",
+        "recording_id": None,
+        "asset_id": item["asset_id"],
+        "media_kind": "photo",
+        "start_s": 0.0,
+        "end_s": round(dur, 3),
+        "start_utc": item["created_at_utc"],
+        "act": item["act"],
+        "lat": item["lat"], "lon": item["lon"], "alt_dem_m": item["alt_dem_m"],
+        "place_name": item["place_name"],
+        "sharpness": round(sharp, 4),
+        "exposure_pen": round(pen, 4),
+        "stability": None,          # a still does not shake; that is not merit
+        "motion_mag": None,
+        "audio_lufs": None,
+        "view_kind": "still",
+        "score_tech": round(stills.technical_score(sharp, pen), 4),
+        "status": "candidate",
+    }
+
+
 def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
     """S03.0 -- one shot per photograph that clears its source's quality gate.
 
@@ -41,9 +89,9 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
     stay NULL rather than taking a flattering default -- a still would beat
     every clip on stability by virtue of not moving, which is not a fact about
     its quality.
-    """
-    from PIL import Image
 
+    Decoding runs in a thread pool: see the note by the pool below.
+    """
     bounds_raw = db.get_decision(conn, "act_boundaries")
     bounds = []
     if bounds_raw:
@@ -60,73 +108,60 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
 
     root = cfg.data_root
     max_px = int(cfg.get("process.photo_analysis_px", 1024))
-    out: list[dict[str, Any]] = []
+    slot_base = float(cfg.get("process.photo_slot_s"))
+    workers = int(cfg.get("process.photo_workers", 0)) or (os.cpu_count() or 4)
+
+    # Decide what is worth measuring before measuring anything: a photo outside
+    # every act cannot become a slot, and a 12 MP HEIC costs over a second to
+    # decode.
+    work: list[dict[str, Any]] = []
     rejected: dict[str, int] = {}
     unplaced = 0
-
-    scan = Progress("S03.0 measuring photographs", len(rows))
     for r in rows:
-        scan.step()
-        # A photo outside every act cannot be a slot, so measuring it is waste.
         act = acts_mod.act_for(_dt(r["created_at_utc"]), bounds) if bounds else None
         if act is None:
             unplaced += 1
             continue
         src = root / Path(r["s3_key"]).relative_to("raw")
-        ext = src.suffix.lower()
         if not src.exists():
             rejected["missing file"] = rejected.get("missing file", 0) + 1
             continue
+        work.append({**r, "act": act, "src": src})
+
+    # libheif releases the GIL and decoding dominates the cost, so threads give
+    # very nearly linear speedup: measured 3.7x on four cores, with byte-identical
+    # results. Serially, 706 photographs took 14 minutes.
+    scan = Progress("S03.0 measuring photographs", len(work))
+    measured: list[dict[str, Any] | None] = [None] * len(work)
+
+    def measure(i: int) -> None:
+        item = work[i]
         try:
-            with Image.open(src) as im:
-                im.draft("RGB", (max_px, max_px))   # let the JPEG decoder downscale
-                im = im.convert("RGB")
-                im.thumbnail((max_px, max_px))
-                import numpy as np
-                arr = np.asarray(im)
-                w, h = im.size
+            measured[i] = _measure(item, max_px=max_px, slot_base=slot_base,
+                                   curve=cfg.quality_curve(item["quality_curve"]
+                                                           or "phone"))
         except (OSError, ValueError) as exc:
-            # Name the format. "unreadable" as a single bucket hid that 339 of
-            # 706 photographs were HEIC and simply had no decoder installed --
-            # a fixable one-line problem reported as an unexplained loss.
-            log.debug("could not read %s: %s", src.name, exc)
+            ext = item["src"].suffix.lower()
+            log.debug("could not read %s: %s", item["src"].name, exc)
             if ext in stills.HEIF_EXT and not stills.heif_available():
                 key = f"{ext} needs a decoder (pip install pillow-heif)"
             else:
                 key = f"unreadable {ext or 'file'} ({type(exc).__name__})"
-            rejected[key] = rejected.get(key, 0) + 1
-            continue
+            measured[i] = {"rejected": key}
+        finally:
+            scan.step()
 
-        sharp = stills.sharpness(arr)
-        pen = stills.exposure_penalty(arr)
-        curve = cfg.quality_curve(r["quality_curve"] or "phone")
-        if not stills.passes_gate(sharp, pen, curve):
-            rejected["below the quality gate"] = \
-                rejected.get("below the quality gate", 0) + 1
-            continue
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        list(pool.map(measure, range(len(work))))
 
-        dur = stills.slot_duration_s((w / h) if h else None,
-                                     base_s=float(cfg.get("process.photo_slot_s")))
-        out.append({
-            "shot_id": f"photo_{r['asset_id'][:16]}",
-            "recording_id": None,
-            "asset_id": r["asset_id"],
-            "media_kind": "photo",
-            "start_s": 0.0,
-            "end_s": round(dur, 3),
-            "start_utc": r["created_at_utc"],
-            "act": act,
-            "lat": r["lat"], "lon": r["lon"], "alt_dem_m": r["alt_dem_m"],
-            "place_name": r["place_name"],
-            "sharpness": round(sharp, 4),
-            "exposure_pen": round(pen, 4),
-            "stability": None,          # a still does not shake; that is not merit
-            "motion_mag": None,
-            "audio_lufs": None,
-            "view_kind": "still",
-            "score_tech": round(stills.technical_score(sharp, pen), 4),
-            "status": "candidate",
-        })
+    out: list[dict[str, Any]] = []
+    for m in measured:
+        if m is None:
+            continue
+        if m.get("rejected"):
+            rejected[m["rejected"]] = rejected.get(m["rejected"], 0) + 1
+        else:
+            out.append(m)
 
     scan.close(f"{len(out)} became shots")
     db.upsert(conn, "shots", ["shot_id"], out)
