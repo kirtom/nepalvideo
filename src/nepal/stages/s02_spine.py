@@ -20,6 +20,7 @@ from typing import Any, Sequence
 from nepal import db, freshness
 from nepal.config import Config
 from nepal.probe import manifest
+from nepal.util.progress import Progress
 from nepal.spine import acts as acts_mod
 from nepal.spine import dem as dem_mod
 from nepal.spine import geocode as geo_mod
@@ -137,7 +138,9 @@ def geotag_assets(cfg: Config, conn) -> dict[str, Any]:
     interpolated = refused = 0
     coords: list[tuple[float, float]] = []
     index: list[str] = []
+    place_prog = Progress("S02.2 placing assets", len(rows))
     for r in rows:
+        place_prog.step()
         lat, lon = r["lat"], r["lon"]
         if not r["has_gps"] or lat is None or lon is None:
             ts = _dt(r["created_at_utc"])
@@ -149,6 +152,8 @@ def geotag_assets(cfg: Config, conn) -> dict[str, Any]:
             interpolated += 1
         coords.append((lat, lon))
         index.append(r["asset_id"])
+
+    place_prog.close(f"{interpolated} interpolated, {refused} refused")
 
     # cluster once, geocode once per place -- section S02.4
     clusters = geo_mod.cluster_coords(coords, float(cfg.get("spine.geocode_cluster_m")))

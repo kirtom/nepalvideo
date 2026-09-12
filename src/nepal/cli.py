@@ -24,11 +24,15 @@ from pathlib import Path
 
 
 def _setup_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    # A progress line is redrawn in place, so a log record written straight to
+    # stderr lands in the middle of it. This handler wipes the line first and
+    # puts it back afterwards.
+    from nepal.util.progress import ProgressAwareHandler
+    handler = ProgressAwareHandler()
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(name)s | %(message)s", datefmt="%H:%M:%S"))
+    logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO,
+                        handlers=[handler])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-c", "--config", default=None, help="path to pipeline.yaml")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--no-progress", action="store_true",
+                    help="never draw progress lines (also: NEPAL_NO_PROGRESS=1)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p1 = sub.add_parser("s01", help="probe: manifest, chapters, FOV, clock offsets")
@@ -74,6 +80,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("doctor", help="check external binaries and optional packages")
 
     args = ap.parse_args(argv)
+    if getattr(args, "no_progress", False):
+        import os
+        os.environ["NEPAL_NO_PROGRESS"] = "1"
     _setup_logging(args.verbose)
 
     from nepal.config import Config

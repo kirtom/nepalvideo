@@ -19,6 +19,7 @@ from nepal import db, freshness
 from nepal.config import Config
 from nepal.process import stills
 from nepal.spine import acts as acts_mod
+from nepal.util.progress import Progress
 
 log = logging.getLogger(__name__)
 STAGE = "S03"
@@ -63,7 +64,9 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
     rejected: dict[str, int] = {}
     unplaced = 0
 
+    scan = Progress("S03.0 measuring photographs", len(rows))
     for r in rows:
+        scan.step()
         # A photo outside every act cannot be a slot, so measuring it is waste.
         act = acts_mod.act_for(_dt(r["created_at_utc"]), bounds) if bounds else None
         if act is None:
@@ -125,6 +128,7 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
             "status": "candidate",
         })
 
+    scan.close(f"{len(out)} became shots")
     db.upsert(conn, "shots", ["shot_id"], out)
     by_act: dict[int, int] = {}
     for s in out:

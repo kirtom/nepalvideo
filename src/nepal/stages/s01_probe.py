@@ -22,6 +22,7 @@ from nepal import db, freshness
 from nepal.config import Config
 from nepal.probe import chapters, clock, fov, manifest
 from nepal.util import proc
+from nepal.util.progress import Progress, heartbeat
 from nepal.util.hashing import sha256_file
 
 log = logging.getLogger(__name__)
@@ -56,7 +57,9 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
 
     exif_rows: dict[str, dict[str, Any]] = {}
     if proc.have("exiftool"):
-        for row in proc.exiftool_recursive(root):
+        with heartbeat(f"S01.1 exiftool over {len(files)} files"):
+            scanned = proc.exiftool_recursive(root)
+        for row in scanned:
             src = row.get("SourceFile")
             if src:
                 exif_rows[str(Path(src).resolve())] = row
@@ -70,7 +73,9 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
     clock_evidence: dict[str, list[float]] = {}
     regstamped: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
+    walk = Progress("S01.1 reading and hashing", len(files))
     for path in files:
+        walk.step(note=path.name[:28])
         rel = path.relative_to(root).as_posix()
         cls = manifest.classify(rel)
         exif = exif_rows.get(str(path.resolve()), {})
@@ -149,6 +154,8 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
             "quality_curve": cls["quality_curve"],
             "probe_json": probe_json,
         })
+
+    walk.close()
 
     # asset_id is a content hash, so byte-identical files collapse to one row.
     # That is the right behaviour -- processing the same content twice buys
@@ -353,9 +360,11 @@ def solve_fov(cfg: Config, conn, *, work: Path | None = None) -> fov.FovResult:
     local = int(cfg.get("probe.fov.local_band_px"))
 
     per_frame: list[dict[int, float]] = []
+    sweep = Progress("S01.4 FOV sweep", len(picked) * len(fovs))
     for src, t in picked:
         scores: dict[int, float] = {}
         for f in fovs:
+            sweep.step(note=f"{f} deg")
             try:
                 png = fov.render_candidate(src, t, f, work / f"{src.stem}_{t:.1f}_{f}.png")
                 scores[f] = fov.seam_discontinuity(fov.load_image(png), band, local)
@@ -363,6 +372,7 @@ def solve_fov(cfg: Config, conn, *, work: Path | None = None) -> fov.FovResult:
                 log.debug("fov %d failed on %s@%.1f: %s", f, src.name, t, exc)
         if scores:
             per_frame.append(scores)
+    sweep.close()
 
     result = fov.solve_from_scores(
         per_frame,
