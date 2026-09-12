@@ -303,8 +303,56 @@ def reset_detection_cache() -> None:
     _ENCODER_CACHE.clear()
 
 
+def pick_sources(assets: Sequence[dict], data_root: Path
+                 ) -> tuple[list[Path], bool] | None:
+    """Every chapter of one recording, in order, and whether it is 360.
+
+    All of them, not just the first. A recording split across chapters is one
+    continuous take -- 82 of this corpus's 112 recordings are -- and proxying
+    only chapter one would silently drop the rest of the take. They are fed to
+    ffmpeg through the concat demuxer so the pass still sees a single stream and
+    the chapter joins produce no shot boundary, which is what the specification
+    means by "run per recording_id, not per file".
+    """
+    def resolve(a: dict) -> Path:
+        key = str(a["s3_key"])
+        rel = key[4:] if key.startswith("raw/") else key
+        return data_root / rel
+
+    by_container: dict[str, list[dict]] = {}
+    for a in assets:
+        by_container.setdefault((a.get("container") or "").lower(), []).append(a)
+
+    for container in ("lrv", "insv", "mp4", "mov"):
+        group = sorted(by_container.get(container, []),
+                       key=lambda x: (x.get("chapter_index") or 0))
+        paths = [p for p in (resolve(a) for a in group) if p.exists()]
+        if paths:
+            is_360 = any(a.get("kind") == "video360" for a in group)
+            return paths, is_360
+    return None
+
+
+def concat_list(paths: Sequence[Path], dest: Path) -> Path:
+    """An ffconcat list for the concat demuxer.
+
+    Paths are quoted with the demuxer's own escaping -- a single quote inside a
+    filename is written as '\'' -- because a path with an apostrophe in it would
+    otherwise silently truncate the list.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["ffconcat version 1.0"]
+    for p in paths:
+        escaped = str(p.resolve()).replace("'", "'\\''")
+        lines.append(f"file '{escaped}'")
+    dest.write_text("\n".join(lines) + "\n")
+    return dest
+
+
 def pick_source(assets: Sequence[dict], data_root: Path) -> tuple[Path, bool] | None:
     """Choose what to decode for a recording, and whether it is 360.
+
+    The first chapter only -- see ``pick_sources`` for the whole recording.
 
     Prefers a ``.lrv`` proxy where one exists: it is already roughly 1080p of
     the same dual-fisheye content, so using it skips decoding a 5.7 K H.265

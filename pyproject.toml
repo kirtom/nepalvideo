@@ -28,8 +28,8 @@ dependencies = [
 music = ["librosa>=0.10", "soundfile>=0.12", "mutagen>=1.45"]
 # S02.6 / S03.5 speech
 asr = ["faster-whisper>=1.0"]
-# S03 vision metrics
-vision = ["opencv-python-headless>=4.8"]
+# S03 vision metrics and shot detection
+vision = ["opencv-python-headless>=4.8", "scenedetect>=0.6"]
 # S04 embeddings
 semantic = ["open-clip-torch>=2.24", "torch>=2.1"]
 # cloud stages

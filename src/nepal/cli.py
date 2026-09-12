@@ -329,6 +329,7 @@ def _doctor(cfg) -> int:
                        ("yaml", "core"), ("pillow_heif", "core -- .heic photos"),
                        ("librosa", "music"), ("soundfile", "music"),
                        ("faster_whisper", "asr"), ("cv2", "vision"),
+                       ("scenedetect", "vision -- S03.2 shot detection"),
                        ("open_clip", "semantic"), ("boto3", "cloud")]:
         try:
             __import__(mod)

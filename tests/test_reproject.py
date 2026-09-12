@@ -244,3 +244,84 @@ def test_flat_still_skips_reprojection(tmp_path):
     cmd = flat_still_command(tmp_path / "s.mp4", 2.0, tmp_path / "f.jpg")
     assert "v360" not in " ".join(cmd)
     assert "scale=960:540" in " ".join(cmd)
+
+
+# -- every chapter, not just the first ----------------------------------
+
+def test_all_chapters_are_returned_in_order(tmp_path):
+    """82 of this corpus's 112 recordings are chapter-split. Proxying only
+    chapter one would silently drop the rest of the take."""
+    from nepal.process.reproject import pick_sources
+    assets = []
+    for i in (3, 1, 2):
+        rel = f"media_from_camera/VID_00_{i:03d}.insv"
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_bytes(b"x")
+        assets.append({"s3_key": f"raw/{rel}", "container": "insv",
+                       "kind": "video360", "chapter_index": i})
+    paths, is_360 = pick_sources(assets, tmp_path)
+    assert [p.name for p in paths] == ["VID_00_001.insv", "VID_00_002.insv",
+                                       "VID_00_003.insv"]
+    assert is_360
+
+
+def test_a_proxy_container_still_wins_over_the_original(tmp_path):
+    from nepal.process.reproject import pick_sources
+    assets = []
+    for rel, container in (("a.insv", "insv"), ("a.lrv", "lrv")):
+        (tmp_path / rel).write_bytes(b"x")
+        assets.append({"s3_key": f"raw/{rel}", "container": container,
+                       "kind": "video360", "chapter_index": 1})
+    paths, _ = pick_sources(assets, tmp_path)
+    assert [p.name for p in paths] == ["a.lrv"]
+
+
+def test_missing_files_are_skipped_not_returned(tmp_path):
+    from nepal.process.reproject import pick_sources
+    (tmp_path / "there.mp4").write_bytes(b"x")
+    assets = [{"s3_key": "raw/there.mp4", "container": "mp4",
+               "kind": "video_flat", "chapter_index": 1},
+              {"s3_key": "raw/gone.mp4", "container": "mp4",
+               "kind": "video_flat", "chapter_index": 2}]
+    paths, _ = pick_sources(assets, tmp_path)
+    assert [p.name for p in paths] == ["there.mp4"]
+
+
+def test_nothing_readable_returns_none(tmp_path):
+    from nepal.process.reproject import pick_sources
+    assert pick_sources([{"s3_key": "raw/x.mp4", "container": "mp4",
+                          "kind": "video_flat"}], tmp_path) is None
+
+
+def test_the_concat_list_is_an_ffconcat_file(tmp_path):
+    from nepal.process.reproject import concat_list
+    paths = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+    for p in paths:
+        p.write_bytes(b"x")
+    text = concat_list(paths, tmp_path / "l.ffconcat").read_text()
+    assert text.splitlines()[0] == "ffconcat version 1.0"
+    assert text.count("file '") == 2
+    assert "a.mp4" in text and "b.mp4" in text
+
+
+def test_an_apostrophe_in_a_path_is_escaped(tmp_path):
+    """Unescaped, it would close the quote and truncate the list."""
+    from nepal.process.reproject import concat_list
+    d = tmp_path / "kirill's photos"
+    d.mkdir()
+    p = d / "a.mp4"
+    p.write_bytes(b"x")
+    line = [ln for ln in concat_list([p], tmp_path / "l.ffconcat").read_text().splitlines()
+            if ln.startswith("file ")][0]
+    assert line.endswith("'")
+    assert "'\\''" in line
+
+
+def test_the_concat_input_flags_go_before_the_input():
+    """-f concat after -i is ignored, and ffmpeg would read the list as video."""
+    from nepal.process.reproject import plan, build_command
+    p = plan(pathlib.Path("list.ffconcat"), "r1", pathlib.Path("/tmp/w"),
+             is_360=False)
+    cmd = build_command(p, extra_input=["-f", "concat", "-safe", "0"])
+    assert cmd.index("-f") < cmd.index("-i")
+    assert cmd[cmd.index("-i") + 1] == "list.ffconcat"

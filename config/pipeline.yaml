@@ -159,6 +159,15 @@ process:
   # cost, so this scales very nearly linearly -- 3.7x on four cores, with
   # identical measurements. 0 means one per core.
   photo_workers: 0
+  # S03.1 phase A writes the equirect proxy and audio only: 3.46x realtime
+  # against 0.73x for the specification's single pass, because each of the four
+  # rectilinear branches re-resamples the whole frame. S05 needs one yaw per
+  # surviving shot, not four per recording, so those are rendered as stills
+  # later. Set true to reproduce the single-pass design.
+  yaw_videos: false
+  # S03.2 PySceneDetect ContentDetector (spec section S03.2).
+  scene_threshold: 27.0
+  min_shot_s: 1.5
 
 semantic:
   max_caption_shots: 2500     # THE ONLY UNBOUNDED COST — spec section 8.1

@@ -19,9 +19,10 @@ from typing import Any
 
 from nepal import db, freshness
 from nepal.config import Config
-from nepal.process import stills
-from nepal.spine import acts as acts_mod
-from nepal.util.progress import Progress
+from nepal.process import reproject, shots as shots_mod, stills
+from nepal.spine import acts as acts_mod, gps as gps_mod
+from nepal.util import proc
+from nepal.util.progress import Progress, heartbeat
 
 log = logging.getLogger(__name__)
 STAGE = "S03"
@@ -33,6 +34,183 @@ def _dt(value: Any):
         return None
     d = datetime.fromisoformat(str(value))
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def build_proxies(cfg: Config, conn, *, force: bool = False,
+                  yaw_videos: bool | None = None) -> dict[str, Any]:
+    """S03.1 -- one ffmpeg pass per recording: equirect proxy plus 16 kHz audio.
+
+    Resumable per recording, not per stage. This is the longest step in the
+    pipeline -- 4.9 hours of 5.7K footage -- and losing an hour of it to an
+    interruption near the end is the difference between a pipeline you re-run
+    and one you avoid re-running.
+
+    Phase A by default: proxy and audio only, no yaw view videos. Measured at
+    3.46x realtime against 0.73x for the full single-pass graph, because the
+    four rectilinear branches each re-resample the whole frame. S05 needs one
+    yaw per surviving shot, not four per recording, so those are rendered as
+    stills later against far fewer frames.
+    """
+    fov_deg = db.get_decision_float(conn, "fov_deg") or float(
+        cfg.get("probe.fov.fallback_deg"))
+    if yaw_videos is None:
+        yaw_videos = bool(cfg.get("process.yaw_videos", False))
+
+    recs = [dict(r) for r in conn.execute(
+        "SELECT recording_id, source, is_360, duration_s FROM recordings "
+        "ORDER BY start_utc")]
+    if not recs:
+        return {"n_recordings": 0, "error": "no recordings -- run S01 first"}
+
+    assets_by_rec: dict[str, list[dict]] = {}
+    for a in conn.execute(
+            "SELECT recording_id, s3_key, container, kind, chapter_index "
+            "FROM assets WHERE recording_id IS NOT NULL"):
+        assets_by_rec.setdefault(a["recording_id"], []).append(dict(a))
+
+    work = cfg.work_root
+    done = {u for u in db.done_units(conn, STAGE) if u.startswith("proxy:")}
+    hwaccel = reproject.detect_hwaccel()
+    encoder = reproject.detect_encoder()
+    log.info("S03.1 %d recording(s), hwaccel=%s encoder=%s, yaw videos=%s",
+             len(recs), hwaccel or "none", encoder, yaw_videos)
+
+    built = skipped = failed = 0
+    total_s = sum(float(r["duration_s"] or 0) for r in recs)
+    bar = Progress("S03.1 reprojecting", len(recs))
+    for r in recs:
+        rid = r["recording_id"]
+        bar.step(note=rid[-24:])
+        unit = f"proxy:{rid}"
+        picked = reproject.pick_sources(assets_by_rec.get(rid, []), cfg.data_root)
+        if picked is None:
+            log.warning("S03.1 %s: no readable source file", rid)
+            failed += 1
+            continue
+        paths, is_360 = picked
+        # Chapters are one continuous take, so they go in through the concat
+        # demuxer: the pass sees a single stream and the joins produce no shot
+        # boundary in S03.2.
+        extra: list[str] = []
+        if len(paths) > 1:
+            src = reproject.concat_list(paths, work / "concat" / f"{rid}.ffconcat")
+            extra = ["-f", "concat", "-safe", "0"]
+        else:
+            src = paths[0]
+        p = reproject.plan(src, rid, work, is_360=bool(r["is_360"]) and is_360,
+                           fov_deg=fov_deg, yaw_videos=yaw_videos)
+        # Skip only when the unit is recorded AND its outputs are still on disk:
+        # a ledger entry for a file someone has deleted is a lie.
+        if not force and unit in done and p.proxy_path.exists():
+            skipped += 1
+            continue
+        cmd = reproject.build_command(p, hwaccel=hwaccel, encoder=encoder,
+                                      has_audio=True, extra_input=extra)
+        try:
+            proc.run(cmd, check=True)
+        except (proc.ToolFailed, proc.ToolMissing) as exc:
+            # A missing audio stream is the common case, not a real failure.
+            log.debug("S03.1 %s with audio failed (%s); retrying video only", rid, exc)
+            try:
+                proc.run(reproject.build_command(p, hwaccel=hwaccel, encoder=encoder,
+                                                 has_audio=False,
+                                                 extra_input=extra), check=True)
+            except (proc.ToolFailed, proc.ToolMissing) as exc2:
+                log.warning("S03.1 %s failed: %s", rid, exc2)
+                db.mark_unit(conn, STAGE, unit, status="failed", detail=str(exc2)[:500])
+                failed += 1
+                continue
+        db.mark_unit(conn, STAGE, unit, detail=json.dumps(
+            {"proxy": str(p.proxy_path), "audio": str(p.audio_path),
+             "source": str(src), "n_chapters": len(paths), "is_360": p.is_360}))
+        built += 1
+    bar.close(f"{built} built, {skipped} already done, {failed} failed")
+
+    return {"n_recordings": len(recs), "n_built": built, "n_skipped": skipped,
+            "n_failed": failed, "hwaccel": hwaccel, "encoder": encoder,
+            "yaw_videos": yaw_videos, "source_hours": round(total_s / 3600, 2)}
+
+
+def detect_shots(cfg: Config, conn) -> dict[str, Any]:
+    """S03.2 -- scene boundaries on each proxy become shot rows.
+
+    Per recording rather than per file: the proxy already spans the whole take
+    through the concat demuxer, so a chapter join is invisible here and cannot
+    manufacture a cut that the camera never made.
+
+    Each shot inherits its moment from the recording's start plus its own offset,
+    and from that its act and its position on the route -- interpolated from the
+    GPS track rather than copied from one asset, because a shot is a span and the
+    walker moved during it.
+    """
+    from datetime import timedelta
+
+    bounds = _bounds(conn)
+    track = [gps_mod.GpsPoint(_dt(r["ts_utc"]), r["lat"], r["lon"], r["alt_dem_m"])
+             for r in conn.execute("SELECT ts_utc, lat, lon, alt_dem_m FROM gps_points "
+                                   "ORDER BY ts_utc")]
+    max_gap = float(cfg.get("spine.max_interp_gap_s"))
+    threshold = float(cfg.get("process.scene_threshold"))
+    min_len = float(cfg.get("process.min_shot_s"))
+
+    recs = [dict(r) for r in conn.execute(
+        "SELECT recording_id, start_utc, duration_s FROM recordings ORDER BY start_utc")]
+    proxies = cfg.work_root / "proxies"
+    pending = [r for r in recs if (proxies / f"{r['recording_id']}_eq.mp4").exists()]
+    if not pending:
+        return {"n_recordings": len(recs), "n_shots": 0,
+                "error": "no proxies on disk -- run S03.1 first"}
+
+    out: list[dict[str, Any]] = []
+    no_cuts = 0
+    bar = Progress("S03.2 detecting shots", len(pending))
+    for r in pending:
+        rid = r["recording_id"]
+        bar.step(note=rid[-24:])
+        proxy = proxies / f"{rid}_eq.mp4"
+        try:
+            scenes = shots_mod.detect_scenes(proxy, threshold=threshold,
+                                             min_len_s=min_len)
+        except Exception as exc:                       # a bad proxy, not a bug
+            log.warning("S03.2 %s: detection failed (%s)", rid, exc)
+            continue
+        if len(scenes) <= 1:
+            no_cuts += 1
+        rows = shots_mod.shots_for_recording(scenes, rid, min_len_s=min_len)
+        rec_start = _dt(r["start_utc"])
+        for row in rows:
+            ts = rec_start + timedelta(seconds=row["start_s"]) if rec_start else None
+            row["start_utc"] = ts.isoformat() if ts else None
+            row["act"] = acts_mod.act_for(ts, bounds) if (ts and bounds) else None
+            pos = gps_mod.interpolate_at(track, ts, max_gap_s=max_gap) \
+                if (ts and track) else None
+            if pos:
+                row["lat"], row["lon"] = pos
+        out += rows
+    bar.close(f"{len(out)} shots from {len(pending)} recording(s)")
+
+    db.upsert(conn, "shots", ["shot_id"], out)
+    by_act: dict[Any, int] = {}
+    for row in out:
+        by_act[row.get("act")] = by_act.get(row.get("act"), 0) + 1
+    placed = sum(1 for row in out if row.get("lat") is not None)
+    log.info("S03.2 %d shot(s) from %d recording(s); per act %s; %d positioned",
+             len(out), len(pending), {k: by_act[k] for k in sorted(
+                 by_act, key=lambda x: (x is None, x))}, placed)
+    if no_cuts:
+        log.info("S03.2 %d recording(s) had no detected cut and became one shot each",
+                 no_cuts)
+    return {"n_recordings": len(recs), "n_with_proxy": len(pending),
+            "n_shots": len(out), "per_act": {str(k): v for k, v in by_act.items()},
+            "n_positioned": placed, "n_single_shot": no_cuts}
+
+
+def _bounds(conn) -> list:
+    raw = db.get_decision(conn, "act_boundaries")
+    if not raw:
+        return []
+    return [acts_mod.ActBoundary(b["act"], _dt(b["start_utc"]), _dt(b["end_utc"]),
+                                 b.get("method", "")) for b in json.loads(raw)]
 
 
 def _measure(item: dict[str, Any], *, max_px: int, slot_base: float,
@@ -92,12 +270,7 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
 
     Decoding runs in a thread pool: see the note by the pool below.
     """
-    bounds_raw = db.get_decision(conn, "act_boundaries")
-    bounds = []
-    if bounds_raw:
-        bounds = [acts_mod.ActBoundary(b["act"], _dt(b["start_utc"]),
-                                       _dt(b["end_utc"]), b.get("method", ""))
-                  for b in json.loads(bounds_raw)]
+    bounds = _bounds(conn)
 
     rows = [dict(r) for r in conn.execute(
         "SELECT asset_id, s3_key, source, quality_curve, created_at_utc, "
@@ -194,7 +367,10 @@ def run(cfg: Config, *, force: bool = False) -> dict[str, Any]:
     report["skipped_stale"] = freshness.warn_if_stale(
         log, conn, STAGE, force=force, rerun_hint="nepal s03 --force")
 
-    for name, fn in [("photos", lambda: build_photo_shots(cfg, conn))]:
+    steps = [("proxies", lambda: build_proxies(cfg, conn, force=force)),
+             ("shots", lambda: detect_shots(cfg, conn)),
+             ("photos", lambda: build_photo_shots(cfg, conn))]
+    for name, fn in steps:
         if not force and name in done:
             report[name] = {"skipped": "already done"}
             continue
