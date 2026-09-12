@@ -77,10 +77,15 @@ def build_proxy_only_graph(fov_deg: float, *,
     The frame is scaled down before v360 rather than after. Reprojection costs
     per pixel and is the whole cost of this pass, so running it on a 3840x1920
     source to produce 1024x512 does roughly four times the necessary work.
+
+    ``min(iw, ...)`` rather than a fixed size, because half this corpus's 360
+    material is already a 1024x512 .lrv proxy. Enlarging that to 2048x1024 to
+    reproject it and then shrinking it back is four times the work of leaving it
+    alone -- a downscale that upscales is worse than no downscale at all.
     """
     pw, ph = proxy_size
     pre_w, pre_h = int(pw * work_scale), int(ph * work_scale)
-    return (f"[0:v]scale={pre_w}:{pre_h},"
+    return (f"[0:v]scale=w='min(iw,{pre_w})':h='min(ih,{pre_h})',"
             f"v360=input=dfisheye:output=e:ih_fov={fov_deg:g}:iv_fov={fov_deg:g},"
             f"scale={pw}:{ph}[eqout]"), ["eqout"]
 
@@ -173,7 +178,8 @@ def build_lens_pair_graph(fov_deg: float, *,
     """
     pw, ph = proxy_size
     lens = max(64, int(pw * work_scale / 2))          # each circle is square
-    return (f"[0:v]scale={lens}:{lens}[l];[1:v]scale={lens}:{lens}[r];"
+    box = f"scale=w='min(iw,{lens})':h='min(ih,{lens})'"   # shrink only
+    return (f"[0:v]{box}[l];[1:v]{box}[r];"
             f"[l][r]hstack=inputs=2[df];"
             f"[df]v360=input=dfisheye:output=e:"
             f"ih_fov={fov_deg:g}:iv_fov={fov_deg:g},scale={pw}:{ph}[eqout]"), ["eqout"]

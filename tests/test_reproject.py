@@ -375,7 +375,18 @@ def test_the_working_size_is_larger_than_the_output():
     """Downscaling below the output would throw away detail the proxy keeps."""
     from nepal.process.reproject import build_proxy_only_graph
     fc, _ = build_proxy_only_graph(193.0, proxy_size=(1024, 512), work_scale=2.0)
-    assert "scale=2048:1024" in fc and "scale=1024:512" in fc
+    assert "min(iw,2048)" in fc and "min(ih,1024)" in fc
+    assert fc.rstrip().endswith("scale=1024:512[eqout]")
+
+
+def test_the_downscale_never_becomes_an_upscale():
+    """Half this corpus's 360 material is already a 1024x512 .lrv. Enlarging it
+    to reproject it and shrinking it back was 4.3s against 1.6s for the same ten
+    seconds -- a downscale that upscales is worse than none at all."""
+    from nepal.process.reproject import build_proxy_only_graph, build_lens_pair_graph
+    for fc, _ in (build_proxy_only_graph(193.0), build_lens_pair_graph(193.0)):
+        pre = fc[:fc.index("v360")]
+        assert "min(iw," in pre and "min(ih," in pre, pre
 
 
 def test_the_flat_plan_never_mentions_v360(tmp_path):
