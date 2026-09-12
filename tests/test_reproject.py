@@ -4,7 +4,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 import pytest
 
 from nepal.process.reproject import (normalise_yaw, build_360_graph, build_flat_graph,
-                                     plan, build_command, pick_source,
+                                     plan, build_command,
                                      detect_hwaccel, detect_encoder, reset_detection_cache)
 
 
@@ -137,53 +137,6 @@ def _asset(container, name, kind="video360", chapter=1):
     return {"s3_key": f"raw/media_from_camera/{name}", "container": container,
             "kind": kind, "chapter_index": chapter}
 
-
-def test_prefers_the_lrv_proxy_over_the_insv_original(tmp_path):
-    d = tmp_path / "media_from_camera"
-    d.mkdir(parents=True)
-    (d / "a.insv").write_bytes(b"x")
-    (d / "a.lrv").write_bytes(b"x")
-    got = pick_source([_asset("insv", "a.insv"), _asset("lrv", "a.lrv")], tmp_path)
-    assert got[0].name == "a.lrv", "decoding 5.7K H.265 for 540p output is wasted work"
-    assert got[1] is True
-
-
-def test_falls_back_to_the_original_when_no_proxy_exists(tmp_path):
-    d = tmp_path / "media_from_camera"
-    d.mkdir(parents=True)
-    (d / "a.insv").write_bytes(b"x")
-    got = pick_source([_asset("insv", "a.insv")], tmp_path)
-    assert got[0].name == "a.insv"
-
-
-def test_skips_assets_whose_files_are_absent(tmp_path):
-    d = tmp_path / "media_from_camera"
-    d.mkdir(parents=True)
-    (d / "b.insv").write_bytes(b"x")
-    got = pick_source([_asset("lrv", "gone.lrv"), _asset("insv", "b.insv")], tmp_path)
-    assert got[0].name == "b.insv"
-
-
-def test_returns_none_when_nothing_is_readable(tmp_path):
-    assert pick_source([_asset("lrv", "gone.lrv")], tmp_path) is None
-
-
-def test_picks_the_lowest_chapter_first(tmp_path):
-    d = tmp_path / "media_from_camera"
-    d.mkdir(parents=True)
-    for n in ("c_002.lrv", "c_001.lrv"):
-        (d / n).write_bytes(b"x")
-    got = pick_source([_asset("lrv", "c_002.lrv", chapter=2),
-                       _asset("lrv", "c_001.lrv", chapter=1)], tmp_path)
-    assert got[0].name == "c_001.lrv"
-
-
-def test_flat_source_reports_not_360(tmp_path):
-    d = tmp_path / "media_from_camera"
-    d.mkdir(parents=True)
-    (d / "f.mp4").write_bytes(b"x")
-    got = pick_source([_asset("mp4", "f.mp4", kind="video_flat")], tmp_path)
-    assert got[1] is False
 
 
 # -- capability detection ----------------------------------------------
@@ -325,3 +278,108 @@ def test_the_concat_input_flags_go_before_the_input():
     cmd = build_command(p, extra_input=["-f", "concat", "-safe", "0"])
     assert cmd.index("-f") < cmd.index("-i")
     assert cmd[cmd.index("-i") + 1] == "list.ffconcat"
+
+
+# -- three formats, three treatments ------------------------------------
+
+def _shaped(name, container, w, h, shape, chapter=1):
+    return {"s3_key": f"raw/c/{name}", "container": container, "width": w,
+            "height": h, "frame_shape": shape, "chapter_index": chapter,
+            "kind": "video_flat" if shape == "flat" else "video360"}
+
+
+def _on_disk(tmp_path, assets):
+    for a in assets:
+        f = tmp_path / a["s3_key"][4:]
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"x")
+    return assets
+
+
+def test_a_dual_fisheye_source_is_reprojected_as_is(tmp_path):
+    from nepal.process.reproject import pick_sources
+    a = _on_disk(tmp_path, [_shaped("v.insv", "insv", 3840, 1920, "dual_fisheye")])
+    paths, mode = pick_sources(a, tmp_path)
+    assert mode == "dual_fisheye" and len(paths) == 1
+
+
+def test_a_lens_pair_is_recognised_as_two_files(tmp_path):
+    """_00_ and _10_ of the same moment, one circle each."""
+    from nepal.process.reproject import pick_sources
+    a = _on_disk(tmp_path, [
+        _shaped("VID_034346_10_039.insv", "insv", 2880, 2880, "single_fisheye", 39),
+        _shaped("VID_034346_00_039.insv", "insv", 2880, 2880, "single_fisheye", 39)])
+    paths, mode = pick_sources(a, tmp_path)
+    assert mode == "lens_pair"
+    assert [p.name for p in paths] == ["VID_034346_00_039.insv",
+                                       "VID_034346_10_039.insv"]
+
+
+def test_flat_footage_in_a_360_container_skips_reprojection(tmp_path):
+    from nepal.process.reproject import pick_sources
+    a = _on_disk(tmp_path, [_shaped("LRV_01_001.lrv", "lrv", 640, 360, "flat")])
+    assert pick_sources(a, tmp_path)[1] == "flat"
+
+
+def test_the_dual_fisheye_proxy_beats_the_original(tmp_path):
+    """Both hold the same layout and the output is 540p either way."""
+    from nepal.process.reproject import pick_sources
+    a = _on_disk(tmp_path, [_shaped("v.insv", "insv", 3840, 1920, "dual_fisheye"),
+                            _shaped("v.lrv", "lrv", 1024, 512, "dual_fisheye")])
+    paths, mode = pick_sources(a, tmp_path)
+    assert [p.name for p in paths] == ["v.lrv"] and mode == "dual_fisheye"
+
+
+def test_real_360_is_preferred_over_a_flat_sibling(tmp_path):
+    from nepal.process.reproject import pick_sources
+    a = _on_disk(tmp_path, [_shaped("flat.lrv", "lrv", 640, 360, "flat"),
+                            _shaped("dual.lrv", "lrv", 1024, 512, "dual_fisheye")])
+    assert pick_sources(a, tmp_path)[1] == "dual_fisheye"
+
+
+def test_an_odd_number_of_lenses_is_refused_not_guessed(tmp_path):
+    """Stacking the wrong two circles is worse than skipping the recording."""
+    from nepal.process.reproject import pick_sources
+    a = _on_disk(tmp_path, [
+        _shaped(f"VID_0{i}_039.insv", "insv", 2880, 2880, "single_fisheye", 39)
+        for i in range(3)])
+    assert pick_sources(a, tmp_path) is None
+
+
+def test_the_shape_falls_back_to_the_dimensions_when_unrecorded(tmp_path):
+    """A database written before frame_shape existed still works."""
+    from nepal.process.reproject import pick_sources
+    a = _on_disk(tmp_path, [_shaped("v.insv", "insv", 3840, 1920, None)])
+    assert pick_sources(a, tmp_path)[1] == "dual_fisheye"
+
+
+def test_the_lens_pair_graph_stacks_before_reprojecting(tmp_path):
+    """v360 wants both circles in one frame; one alone is half a world."""
+    from nepal.process.reproject import build_lens_pair_graph
+    fc, _ = build_lens_pair_graph(193.0)
+    assert fc.index("hstack") < fc.index("v360")
+    assert "[0:v][1:v]hstack=inputs=2" in fc
+
+
+def test_the_flat_plan_never_mentions_v360(tmp_path):
+    from nepal.process.reproject import plan_for_mode
+    p = plan_for_mode([pathlib.Path("a.mp4")], "r", tmp_path, mode="flat")
+    assert "v360" not in p.filter_complex
+    assert not p.is_360
+
+
+def test_a_lens_pair_gets_two_inputs_in_order(tmp_path):
+    from nepal.process.reproject import plan_for_mode, build_command
+    srcs = [pathlib.Path("a.insv"), pathlib.Path("b.insv")]
+    p = plan_for_mode(srcs, "r", tmp_path, mode="lens_pair")
+    cmd = build_command(p, inputs=srcs)
+    assert cmd.count("-i") == 2
+    assert cmd[cmd.index("-i") + 1] == "a.insv"
+
+
+def test_the_proxy_frame_rate_can_be_capped(tmp_path):
+    """v360 is the whole cost, so halving the frames halves the pass."""
+    from nepal.process.reproject import plan_for_mode, build_command
+    p = plan_for_mode([pathlib.Path("a.mp4")], "r", tmp_path, mode="flat")
+    assert "-r" in build_command(p, fps=15)
+    assert "-r" not in build_command(p, fps=None)

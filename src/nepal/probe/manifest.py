@@ -243,6 +243,59 @@ def capture_time_spread(row: dict[str, Any], *,
     return (hi[1] - lo[1]).total_seconds(), lo[0], hi[0]
 
 
+# What the frame's shape says about how it was shot. An Insta360 card holds
+# three different things under two extensions, and the extension distinguishes
+# none of them:
+#
+#   3840x1920, 1024x512   aspect 2.0   both fisheye circles in one frame
+#   2880x2880             aspect 1.0   ONE circular lens; its partner is the
+#                                      neighbouring _10_ / _00_ file
+#   3840x2160,  640x360   aspect 1.78  flat, single-lens, not 360 at all
+#
+# On this corpus that is 84 minutes of true 360, 21 minutes of lens pairs and
+# 52 minutes of flat 4K. Treating all of it as dual-fisheye reprojects flat
+# footage through v360 -- the wrong output, produced the slowest possible way --
+# and made the FOV solve measure a stitch seam on frames that have no seam.
+DUAL_FISHEYE_ASPECT = (1.85, 2.15)
+SINGLE_FISHEYE_ASPECT = (0.9, 1.15)
+
+
+def frame_shape(width: Any, height: Any) -> str:
+    """'dual_fisheye' | 'single_fisheye' | 'flat' | 'unknown' from the frame."""
+    try:
+        w, h = float(width), float(height)
+    except (TypeError, ValueError):
+        return "unknown"
+    if w <= 0 or h <= 0:
+        return "unknown"
+    aspect = w / h
+    if DUAL_FISHEYE_ASPECT[0] <= aspect <= DUAL_FISHEYE_ASPECT[1]:
+        return "dual_fisheye"
+    if SINGLE_FISHEYE_ASPECT[0] <= aspect <= SINGLE_FISHEYE_ASPECT[1]:
+        return "single_fisheye"
+    return "flat"
+
+
+def refine_kind(kind: str, width: Any, height: Any) -> tuple[str, str | None]:
+    """Correct a path-derived kind against the frame, returning (kind, shape).
+
+    ``classify`` is a pure function of the path and stays that way -- it runs
+    before anything has been probed. This is the second pass, once the frame
+    size is known, and it only ever *demotes*: a .insv that turns out to be
+    16:9 is flat footage in a 360 container, but an .mp4 is never promoted to
+    360 on the strength of its aspect alone, since 2:1 is a legitimate
+    cinematic crop.
+    """
+    if kind != "video360":
+        return kind, None
+    shape = frame_shape(width, height)
+    if shape == "flat":
+        return "video_flat", shape
+    if shape == "unknown":
+        return kind, None
+    return "video360", shape
+
+
 def parse_gps(row: dict[str, Any]) -> tuple[float | None, float | None, float | None]:
     """Numeric lat/lon/alt. Requires exiftool's -n flag upstream."""
     lat = _num(exif_get(row, "GPSLatitude"))

@@ -127,6 +127,10 @@ spine:
 
 process:
   # S03.2 shot detection
+  # Proxy frame rate. Shot detection and metric sampling do not need thirty
+  # frames a second, and v360 is the whole cost of S03.1, so halving the frames
+  # halves the pass. 0 keeps the source rate.
+  proxy_fps: 15
   scene_threshold: 27.0
   min_shot_len_s: 1.5
   # S03.3

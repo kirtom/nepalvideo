@@ -64,8 +64,8 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
 
     assets_by_rec: dict[str, list[dict]] = {}
     for a in conn.execute(
-            "SELECT recording_id, s3_key, container, kind, chapter_index "
-            "FROM assets WHERE recording_id IS NOT NULL"):
+            "SELECT recording_id, s3_key, container, kind, chapter_index, "
+            "width, height, frame_shape FROM assets WHERE recording_id IS NOT NULL"):
         assets_by_rec.setdefault(a["recording_id"], []).append(dict(a))
 
     work = cfg.work_root
@@ -76,6 +76,8 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
              len(recs), hwaccel or "none", encoder, yaw_videos)
 
     built = skipped = failed = 0
+    modes: dict[str, int] = {}
+    proxy_fps = float(cfg.get("process.proxy_fps", 0)) or None
     total_s = sum(float(r["duration_s"] or 0) for r in recs)
     bar = Progress("S03.1 reprojecting", len(recs))
     for r in recs:
@@ -84,28 +86,28 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
         unit = f"proxy:{rid}"
         picked = reproject.pick_sources(assets_by_rec.get(rid, []), cfg.data_root)
         if picked is None:
-            log.warning("S03.1 %s: no readable source file", rid)
+            log.warning("S03.1 %s: no usable source file", rid)
             failed += 1
             continue
-        paths, is_360 = picked
-        # Chapters are one continuous take, so they go in through the concat
-        # demuxer: the pass sees a single stream and the joins produce no shot
-        # boundary in S03.2.
+        paths, mode = picked
+        modes[mode] = modes.get(mode, 0) + 1
+
         extra: list[str] = []
-        if len(paths) > 1:
+        inputs = paths
+        if mode == "lens_pair":
+            pass                       # two -i, stacked by the graph
+        elif len(paths) > 1:
+            # True chapters of one take: concat so the joins produce no cut.
             src = reproject.concat_list(paths, work / "concat" / f"{rid}.ffconcat")
+            inputs = [src]
             extra = ["-f", "concat", "-safe", "0"]
-        else:
-            src = paths[0]
-        p = reproject.plan(src, rid, work, is_360=bool(r["is_360"]) and is_360,
-                           fov_deg=fov_deg, yaw_videos=yaw_videos)
-        # Skip only when the unit is recorded AND its outputs are still on disk:
-        # a ledger entry for a file someone has deleted is a lie.
+        p = reproject.plan_for_mode(paths, rid, work, mode=mode, fov_deg=fov_deg)
         if not force and unit in done and p.proxy_path.exists():
             skipped += 1
             continue
         cmd = reproject.build_command(p, hwaccel=hwaccel, encoder=encoder,
-                                      has_audio=True, extra_input=extra)
+                                      has_audio=True, extra_input=extra,
+                                      inputs=inputs, fps=proxy_fps)
         try:
             proc.run(cmd, check=True)
         except (proc.ToolFailed, proc.ToolMissing) as exc:
@@ -113,8 +115,9 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
             log.debug("S03.1 %s with audio failed (%s); retrying video only", rid, exc)
             try:
                 proc.run(reproject.build_command(p, hwaccel=hwaccel, encoder=encoder,
-                                                 has_audio=False,
-                                                 extra_input=extra), check=True)
+                                                 has_audio=False, extra_input=extra,
+                                                 inputs=inputs, fps=proxy_fps),
+                         check=True)
             except (proc.ToolFailed, proc.ToolMissing) as exc2:
                 log.warning("S03.1 %s failed: %s", rid, exc2)
                 db.mark_unit(conn, STAGE, unit, status="failed", detail=str(exc2)[:500])
@@ -122,12 +125,16 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
                 continue
         db.mark_unit(conn, STAGE, unit, detail=json.dumps(
             {"proxy": str(p.proxy_path), "audio": str(p.audio_path),
-             "source": str(src), "n_chapters": len(paths), "is_360": p.is_360}))
+             "sources": [str(x) for x in inputs], "mode": mode}))
         built += 1
     bar.close(f"{built} built, {skipped} already done, {failed} failed")
+    if modes:
+        log.info("S03.1 by frame shape: %s", ", ".join(
+            f"{k}={v}" for k, v in sorted(modes.items(), key=lambda kv: -kv[1])))
 
     return {"n_recordings": len(recs), "n_built": built, "n_skipped": skipped,
-            "n_failed": failed, "hwaccel": hwaccel, "encoder": encoder,
+            "n_failed": failed, "modes": modes, "proxy_fps": proxy_fps,
+            "hwaccel": hwaccel, "encoder": encoder,
             "yaw_videos": yaw_videos, "source_hours": round(total_s / 3600, 2)}
 
 

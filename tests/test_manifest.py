@@ -6,7 +6,8 @@ import pytest
 
 from nepal.probe.manifest import (classify, telegram_subkind, exif_get, parse_exif_datetime,
                                   parse_gps, parse_duration, NEPAL_TZ, walk_media,
-                                  asset_datetime, capture_time_spread, CAPTURE_TAGS)
+                                  asset_datetime, capture_time_spread, CAPTURE_TAGS,
+                                  refine_kind, frame_shape)
 
 
 @pytest.mark.parametrize("path,source,kind,curve", [
@@ -307,3 +308,43 @@ def test_the_separate_offset_tags_are_requested_too():
     from nepal.util.proc import EXIF_TAGS
     for tag in ("-OffsetTimeOriginal", "-OffsetTime", "-OffsetTimeDigitized"):
         assert tag in EXIF_TAGS
+
+
+# -- what the frame is, not what the extension says ---------------------
+
+def test_frame_shape_reads_the_three_real_layouts():
+    """An Insta360 card holds all three under .insv and .lrv."""
+    from nepal.probe.manifest import frame_shape
+    assert frame_shape(3840, 1920) == "dual_fisheye"    # both circles in frame
+    assert frame_shape(1024, 512) == "dual_fisheye"     # its proxy
+    assert frame_shape(2880, 2880) == "single_fisheye"  # one lens of a pair
+    assert frame_shape(3840, 2160) == "flat"            # ordinary 4K
+    assert frame_shape(640, 360) == "flat"              # its proxy
+
+
+def test_frame_shape_of_the_unprobed_is_unknown_not_a_guess():
+    from nepal.probe.manifest import frame_shape
+    for w, h in ((None, None), (0, 0), (1920, 0), ("x", "y")):
+        assert frame_shape(w, h) == "unknown"
+
+
+def test_a_flat_clip_in_a_360_container_is_demoted():
+    """52 of this corpus's 130 minutes of camera video are flat 4K in .insv or
+    .lrv. Reprojecting them through v360 warps them, slowly."""
+    assert refine_kind("video360", 3840, 2160) == ("video_flat", "flat")
+    assert refine_kind("video360", 640, 360) == ("video_flat", "flat")
+
+
+def test_real_360_keeps_its_kind_and_gains_a_shape():
+    assert refine_kind("video360", 1024, 512) == ("video360", "dual_fisheye")
+    assert refine_kind("video360", 2880, 2880) == ("video360", "single_fisheye")
+
+
+def test_an_mp4_is_never_promoted_to_360_by_its_aspect():
+    """2:1 is a legitimate cinematic crop, not evidence of a fisheye."""
+    assert refine_kind("video_flat", 3840, 1920) == ("video_flat", None)
+    assert refine_kind("photo", 3840, 1920) == ("photo", None)
+
+
+def test_an_unprobed_360_file_keeps_the_benefit_of_the_doubt():
+    assert refine_kind("video360", None, None) == ("video360", None)

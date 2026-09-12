@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS assets (
   alt_dem_m     REAL,
   place_name    TEXT,
   quality_curve TEXT DEFAULT 'camera',  -- camera | phone | telegram
+  -- ADDITION: what the frame is, from its shape rather than its extension --
+  -- dual_fisheye | single_fisheye | flat. An Insta360 card holds all three
+  -- under .insv/.lrv and the extension distinguishes none of them.
+  frame_shape   TEXT,
   probe_json    TEXT
 );
 
@@ -193,7 +197,9 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 # conditionally in DDL, so they are applied as idempotent migrations -- a
 # database created by an earlier run must not have to be rebuilt. A database
 # that already carries a column no longer in SCHEMA keeps it, harmlessly.
-MIGRATIONS: tuple[tuple[str, str, str], ...] = ()
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("assets", "frame_shape", "TEXT"),
+)
 
 
 def _rebuild_shots_for_photo_slots(conn: sqlite3.Connection) -> bool:

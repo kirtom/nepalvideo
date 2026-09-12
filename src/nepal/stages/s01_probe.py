@@ -73,6 +73,8 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
     clock_evidence: dict[str, list[float]] = {}
     regstamped: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
+    shapes: dict[str, int] = {}
+    demoted = 0
     walk = Progress("S01.1 reading and hashing", len(files))
     for path in files:
         walk.step(note=path.name[:28])
@@ -131,11 +133,19 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
             except (proc.ToolFailed, proc.ToolMissing, ValueError) as exc:
                 log.warning("ffprobe failed on %s: %s", rel, exc)
 
+        # Second pass on kind, now that the frame size is known: the path said
+        # .insv, the frame says whether that is 360 at all.
+        kind, shape = manifest.refine_kind(cls["kind"], width, height)
+        if shape:
+            shapes[shape] = shapes.get(shape, 0) + 1
+        if kind != cls["kind"]:
+            demoted += 1
+
         rows.append({
             "asset_id": sha256_file(path),
             "s3_key": f"raw/{rel}",
             "source": cls["source"],
-            "kind": cls["kind"],
+            "kind": kind,
             "container": cls["container"],
             "bytes": path.stat().st_size,
             "width": width,
@@ -152,10 +162,20 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
             "alt_dem_m": None,               # S02.3
             "place_name": None,              # S02.4
             "quality_curve": cls["quality_curve"],
+            "frame_shape": shape,
             "probe_json": probe_json,
         })
 
     walk.close()
+    if shapes:
+        log.info("S01.1 frame shapes: %s", ", ".join(
+            f"{k}={v}" for k, v in sorted(shapes.items(), key=lambda kv: -kv[1])))
+    if demoted:
+        log.warning(
+            "S01.1 %d file(s) in a 360 container hold flat 16:9 video and were "
+            "reclassified -- reprojecting those through v360 gives the wrong "
+            "output, slowly, and makes the FOV solve look for a seam that is "
+            "not there", demoted)
 
     # asset_id is a content hash, so byte-identical files collapse to one row.
     # That is the right behaviour -- processing the same content twice buys
@@ -245,6 +265,8 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
             "gps_agreement": gps_agreement,
             "n_restamped_from_gps": len(regstamped),
             "restamped_from_gps": regstamped[:50],
+            "frame_shapes": shapes,
+            "n_reclassified_flat": demoted,
             "n_stamp_conflicts": len(conflicts),
             "stamp_conflicts": conflicts[:50],
             "exiftool": proc.have("exiftool"), "ffprobe": have_ffprobe}

@@ -145,10 +145,60 @@ def build_360_graph(fov_deg: float, *, proxy_size: tuple[int, int] = (1024, 512)
     return ";".join(parts), out_labels
 
 
+def build_lens_pair_graph(fov_deg: float, *,
+                          proxy_size: tuple[int, int] = (1024, 512)
+                          ) -> tuple[str, list[str]]:
+    """Two circular-lens inputs stacked into the frame v360 expects.
+
+    An Insta360 in dual-stream mode writes one circle per file -- _00_ and _10_
+    of the same moment, 2880x2880 each. v360's dfisheye input wants both circles
+    side by side in one frame, which is exactly what hstack builds. Feeding it
+    one file alone reprojects half a world into a whole one.
+
+    Both inputs must be the same height for hstack, which they are: the camera
+    writes the two lenses identically.
+    """
+    pw, ph = proxy_size
+    return (f"[0:v][1:v]hstack=inputs=2[df];"
+            f"[df]v360=input=dfisheye:output=e:"
+            f"ih_fov={fov_deg:g}:iv_fov={fov_deg:g},scale={pw}:{ph}[eqout]"), ["eqout"]
+
+
 def build_flat_graph(*, proxy_size: tuple[int, int] = (960, 540)) -> tuple[str, list[str]]:
     """Flat or wide-mode footage skips v360 entirely -- a single proxy."""
     w, h = proxy_size
     return f"[0:v]scale={w}:{h}[eqout]", ["eqout"]
+
+
+def plan_for_mode(sources: Sequence[Path], recording_id: str, work: Path, *,
+                  mode: str, fov_deg: float = 193.0,
+                  proxy_size: tuple[int, int] = (1024, 512),
+                  view_size: tuple[int, int] = (960, 540),
+                  proxy_bitrate: str = "2M") -> "ReprojectPlan":
+    """One recording's pass, chosen by what the frame actually is.
+
+    ``flat`` skips v360 completely. That is not only correct -- reprojecting
+    16:9 footage as a fisheye warps it -- but by far the cheapest branch, and on
+    this corpus it is 52 of the 130 minutes of camera video.
+    """
+    proxies = work / "proxies"
+    audio = work / "audio"
+    for d in (proxies, audio):
+        d.mkdir(parents=True, exist_ok=True)
+    out = proxies / f"{recording_id}_eq.mp4"
+
+    if mode == "lens_pair":
+        fc, _ = build_lens_pair_graph(fov_deg, proxy_size=proxy_size)
+    elif mode == "dual_fisheye":
+        fc, _ = build_proxy_only_graph(fov_deg, proxy_size=proxy_size)
+    else:
+        fc, _ = build_flat_graph(proxy_size=view_size)
+
+    return ReprojectPlan(filter_complex=fc,
+                         outputs=[("eqout", out, proxy_bitrate)],
+                         audio_path=audio / f"{recording_id}.wav",
+                         is_360=mode != "flat",
+                         source=sources[0], yaws=())
 
 
 def plan(source: Path, recording_id: str, work: Path, *, is_360: bool,
@@ -196,16 +246,30 @@ def plan(source: Path, recording_id: str, work: Path, *, is_360: bool,
 
 def build_command(p: ReprojectPlan, *, hwaccel: str | None = None,
                   encoder: str = "libx264", has_audio: bool = True,
-                  sample_rate: int = 16000, extra_input: Sequence[str] = ()) -> list[str]:
-    """The full argv. Kept separate from execution so it can be asserted on."""
+                  sample_rate: int = 16000, extra_input: Sequence[str] = (),
+                  inputs: Sequence[Path] | None = None,
+                  fps: float | None = None) -> list[str]:
+    """The full argv. Kept separate from execution so it can be asserted on.
+
+    ``inputs`` carries more than one source for a lens pair, where the graph
+    stacks [0:v] and [1:v]. ``fps`` caps the proxy's frame rate: shot detection
+    and metric sampling do not need thirty frames a second, and halving them
+    halves the v360 work, which is the whole cost of this pass.
+    """
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
     if hwaccel:
         cmd += ["-hwaccel", hwaccel]
-    cmd += list(extra_input)
-    cmd += ["-i", str(p.source), "-filter_complex", p.filter_complex]
+    srcs = list(inputs) if inputs else [p.source]
+    for src in srcs:
+        cmd += list(extra_input)
+        cmd += ["-i", str(src)]
+    cmd += ["-filter_complex", p.filter_complex]
 
     for label, path, bitrate in p.outputs:
-        cmd += ["-map", f"[{label}]", "-c:v", encoder, "-b:v", bitrate, str(path)]
+        cmd += ["-map", f"[{label}]", "-c:v", encoder, "-b:v", bitrate]
+        if fps:
+            cmd += ["-r", f"{fps:g}"]
+        cmd += [str(path)]
 
     if has_audio:
         cmd += ["-map", "0:a:0", "-vn", "-ac", "1", "-ar", str(sample_rate),
@@ -304,32 +368,72 @@ def reset_detection_cache() -> None:
 
 
 def pick_sources(assets: Sequence[dict], data_root: Path
-                 ) -> tuple[list[Path], bool] | None:
-    """Every chapter of one recording, in order, and whether it is 360.
+                 ) -> tuple[list[Path], str] | None:
+    """What to decode for one recording, and how it must be reprojected.
 
-    All of them, not just the first. A recording split across chapters is one
-    continuous take -- 82 of this corpus's 112 recordings are -- and proxying
-    only chapter one would silently drop the rest of the take. They are fed to
-    ffmpeg through the concat demuxer so the pass still sees a single stream and
-    the chapter joins produce no shot boundary, which is what the specification
-    means by "run per recording_id, not per file".
+    Returns ``(paths, mode)`` where mode is:
+
+      ``dual_fisheye``  one stream with both circles in the frame -- v360 as-is
+      ``lens_pair``     two files, one circle each, to be stacked side by side
+                        before v360 sees them
+      ``flat``          ordinary 16:9 video, which must skip v360 entirely
+
+    An Insta360 card holds all three under .insv and .lrv, so the choice is made
+    on the frame shape recorded by S01.1, never the extension. Getting it wrong
+    is not a slow path but a wrong one: v360 on flat footage produces a warped
+    frame, and on a single lens it produces half a world.
+
+    Within a mode the cheapest adequate source wins. A 1024x512 .lrv is the same
+    dual-fisheye layout as its 3840x1920 .insv original and is being scaled to
+    540p regardless, so decoding the original buys nothing.
     """
     def resolve(a: dict) -> Path:
         key = str(a["s3_key"])
         rel = key[4:] if key.startswith("raw/") else key
         return data_root / rel
 
-    by_container: dict[str, list[dict]] = {}
-    for a in assets:
-        by_container.setdefault((a.get("container") or "").lower(), []).append(a)
+    def shape_of(a: dict) -> str:
+        recorded = (a.get("frame_shape") or "").strip()
+        if recorded:
+            return recorded
+        from nepal.probe.manifest import frame_shape
+        return frame_shape(a.get("width"), a.get("height"))
 
-    for container in ("lrv", "insv", "mp4", "mov"):
-        group = sorted(by_container.get(container, []),
-                       key=lambda x: (x.get("chapter_index") or 0))
-        paths = [p for p in (resolve(a) for a in group) if p.exists()]
-        if paths:
-            is_360 = any(a.get("kind") == "video360" for a in group)
-            return paths, is_360
+    live = [a for a in assets if resolve(a).exists()]
+    by_shape: dict[str, list[dict]] = {}
+    for a in live:
+        by_shape.setdefault(shape_of(a), []).append(a)
+
+    def ordered(group: Sequence[dict]) -> list[dict]:
+        return sorted(group, key=lambda x: (x.get("chapter_index") or 0,
+                                            str(x.get("s3_key"))))
+
+    def cheapest(group: Sequence[dict]) -> list[dict]:
+        """Proxy container first; within it, chapter order."""
+        for container in ("lrv", "insv", "mp4", "mov"):
+            same = [a for a in group
+                    if (a.get("container") or "").lower() == container]
+            if same:
+                return ordered(same)
+        return ordered(group)
+
+    if by_shape.get("dual_fisheye"):
+        return [resolve(a) for a in cheapest(by_shape["dual_fisheye"])], "dual_fisheye"
+
+    if by_shape.get("single_fisheye"):
+        # Exactly two lenses of the same moment. More than two means chapters as
+        # well, which this corpus does not have and which would need pairing per
+        # chapter before stacking -- refuse rather than stack the wrong two.
+        pair = ordered(by_shape["single_fisheye"])
+        if len(pair) == 2:
+            return [resolve(a) for a in pair], "lens_pair"
+        log.warning("recording has %d single-lens files, expected 2 -- skipping",
+                    len(pair))
+        return None
+
+    if by_shape.get("flat") or by_shape.get("unknown"):
+        group = by_shape.get("flat") or by_shape["unknown"]
+        return [resolve(a) for a in cheapest(group)], "flat"
     return None
 
 
@@ -349,29 +453,3 @@ def concat_list(paths: Sequence[Path], dest: Path) -> Path:
     return dest
 
 
-def pick_source(assets: Sequence[dict], data_root: Path) -> tuple[Path, bool] | None:
-    """Choose what to decode for a recording, and whether it is 360.
-
-    The first chapter only -- see ``pick_sources`` for the whole recording.
-
-    Prefers a ``.lrv`` proxy where one exists: it is already roughly 1080p of
-    the same dual-fisheye content, so using it skips decoding a 5.7 K H.265
-    stream for output that is being scaled to 540p regardless. Falls back to the
-    ``.insv`` original only when no proxy was delivered.
-    """
-    def resolve(a: dict) -> Path:
-        key = str(a["s3_key"])
-        rel = key[4:] if key.startswith("raw/") else key
-        return data_root / rel
-
-    by_container: dict[str, list[dict]] = {}
-    for a in assets:
-        by_container.setdefault((a.get("container") or "").lower(), []).append(a)
-
-    for container in ("lrv", "insv", "mp4", "mov"):
-        for a in sorted(by_container.get(container, []),
-                        key=lambda x: (x.get("chapter_index") or 0)):
-            path = resolve(a)
-            if path.exists():
-                return path, a.get("kind") == "video360"
-    return None
