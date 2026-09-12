@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -105,11 +107,30 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
         if not force and unit in done and p.proxy_path.exists():
             skipped += 1
             continue
+
+        # Say what was chosen before the work starts. Three rounds of "it is
+        # stuck on this file" were spent guessing which source and which filter
+        # graph a recording had picked; the log should simply say.
+        dur = float(r["duration_s"] or 0)
+        log.info("S03.1 %s: %s, %s, %.0fs -> %s", rid, mode,
+                 ", ".join(x.name for x in inputs), dur, p.proxy_path.name)
+        started = time.monotonic()
+        # A pass that runs many times longer than its own footage is wedged, not
+        # slow. Bounded so one bad file reports itself instead of holding the
+        # whole run; the rest of the corpus still gets processed.
+        budget = max(float(cfg.get("process.ffmpeg_min_timeout_s", 300)),
+                     dur * float(cfg.get("process.ffmpeg_timeout_factor", 20)))
         cmd = reproject.build_command(p, hwaccel=hwaccel, encoder=encoder,
                                       has_audio=True, extra_input=extra,
                                       inputs=inputs, fps=proxy_fps)
         try:
-            proc.run(cmd, check=True)
+            proc.run(cmd, check=True, timeout=budget)
+        except subprocess.TimeoutExpired:
+            log.error("S03.1 %s: gave up after %.0fs on %.0fs of footage. "
+                      "The command was: %s", rid, budget, dur, " ".join(cmd))
+            db.mark_unit(conn, STAGE, unit, status="failed", detail="timeout")
+            failed += 1
+            continue
         except (proc.ToolFailed, proc.ToolMissing) as exc:
             # A missing audio stream is the common case, not a real failure.
             log.debug("S03.1 %s with audio failed (%s); retrying video only", rid, exc)
@@ -117,15 +138,25 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
                 proc.run(reproject.build_command(p, hwaccel=hwaccel, encoder=encoder,
                                                  has_audio=False, extra_input=extra,
                                                  inputs=inputs, fps=proxy_fps),
-                         check=True)
+                         check=True, timeout=budget)
+            except subprocess.TimeoutExpired:
+                log.error("S03.1 %s: gave up after %.0fs on %.0fs of footage",
+                          rid, budget, dur)
+                db.mark_unit(conn, STAGE, unit, status="failed", detail="timeout")
+                failed += 1
+                continue
             except (proc.ToolFailed, proc.ToolMissing) as exc2:
                 log.warning("S03.1 %s failed: %s", rid, exc2)
                 db.mark_unit(conn, STAGE, unit, status="failed", detail=str(exc2)[:500])
                 failed += 1
                 continue
+        took = time.monotonic() - started
+        log.info("S03.1 %s: done in %.0fs (%.2fx realtime)", rid, took,
+                 (dur / took) if took > 0 else 0.0)
         db.mark_unit(conn, STAGE, unit, detail=json.dumps(
             {"proxy": str(p.proxy_path), "audio": str(p.audio_path),
-             "sources": [str(x) for x in inputs], "mode": mode}))
+             "sources": [str(x) for x in inputs], "mode": mode,
+             "seconds": round(took, 1)}))
         built += 1
     bar.close(f"{built} built, {skipped} already done, {failed} failed")
     if modes:

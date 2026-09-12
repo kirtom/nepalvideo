@@ -131,6 +131,10 @@ process:
   # frames a second, and v360 is the whole cost of S03.1, so halving the frames
   # halves the pass. 0 keeps the source rate.
   proxy_fps: 15
+  # A pass running many times longer than its own footage is wedged, not slow.
+  # Bounded so one bad file reports itself and the rest of the corpus still runs.
+  ffmpeg_timeout_factor: 20
+  ffmpeg_min_timeout_s: 300
   scene_threshold: 27.0
   min_shot_len_s: 1.5
   # S03.3
