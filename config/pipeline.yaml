@@ -131,6 +131,16 @@ process:
   # frames a second, and v360 is the whole cost of S03.1, so halving the frames
   # halves the pass. 0 keeps the source rate.
   proxy_fps: 15
+  # x264 preset for proxies. These are watched by a scene detector and sampled
+  # for metrics, never delivered, so encoding effort buys nothing: measured 3.9s
+  # at medium against 1.9s at veryfast for the same clip and the same file size.
+  encoder_preset: veryfast
+  # The equirect proxy. Its only consumers are shot detection and metric
+  # sampling -- the Gate 3 draft renders 360 material from yaw views, not from
+  # this -- so 640x320 is a legitimate trade if v360 is taking too long. It is
+  # the one remaining lever on S03.1's cost.
+  proxy_size: [1024, 512]
+  flat_proxy_size: [960, 540]
   # A pass running many times longer than its own footage is wedged, not slow.
   # Bounded so one bad file reports itself and the rest of the corpus still runs.
   ffmpeg_timeout_factor: 20

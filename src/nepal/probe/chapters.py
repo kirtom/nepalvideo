@@ -104,13 +104,18 @@ def group_recordings(assets: Sequence[dict[str, Any]]) -> list[Recording]:
         if a.get("kind") not in ("video360", "video_flat"):
             continue
         name = a.get("filename") or Path(a["s3_key"]).name
-        ck = parse_chapter(name)
-        if ck and ck.method in ("insta360", "gopro"):
+        # Only action cameras chapter a take across files. A phone names every
+        # clip IMG_1234.MOV, and the generic rule read that as base "IMG",
+        # chapter 1234 -- collapsing every video on the phone into one
+        # "recording". It produced a single 230 MB proxy of hundreds of
+        # unrelated clips concatenated, took 52 minutes to build, and would have
+        # given S03.2 shots spanning moments months apart with timestamps
+        # measured from the wrong start. Telegram is the same: its exports are
+        # separate messages, never chapters.
+        ck = parse_chapter(name) if a.get("source") == "camera" else None
+        if ck:
             key = f"{a['source']}:{ck.recording_key}"
             methods[key] = ck.method
-        elif ck and ck.method == "generic":
-            key = f"{a['source']}:{ck.recording_key}"
-            methods[key] = "generic"
         else:
             key = f"{a['source']}:{Path(name).stem}"
             methods[key] = "singleton"

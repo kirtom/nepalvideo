@@ -185,6 +185,17 @@ def build_lens_pair_graph(fov_deg: float, *,
             f"ih_fov={fov_deg:g}:iv_fov={fov_deg:g},scale={pw}:{ph}[eqout]"), ["eqout"]
 
 
+def build_flat_graph_clamped(*, proxy_size: tuple[int, int] = (960, 540)
+                             ) -> tuple[str, list[str]]:
+    """Flat video scaled down to the proxy size -- and never up.
+
+    An .lrv is already a 640x360 proxy. Enlarging it to 960x540 and re-encoding
+    costs the full pass to produce something worse than the input.
+    """
+    pw, ph = proxy_size
+    return (f"[0:v]scale=w='min(iw,{pw})':h='min(ih,{ph})'[eqout]"), ["eqout"]
+
+
 def build_flat_graph(*, proxy_size: tuple[int, int] = (960, 540)) -> tuple[str, list[str]]:
     """Flat or wide-mode footage skips v360 entirely -- a single proxy."""
     w, h = proxy_size
@@ -195,7 +206,8 @@ def plan_for_mode(sources: Sequence[Path], recording_id: str, work: Path, *,
                   mode: str, fov_deg: float = 193.0,
                   proxy_size: tuple[int, int] = (1024, 512),
                   view_size: tuple[int, int] = (960, 540),
-                  proxy_bitrate: str = "2M") -> "ReprojectPlan":
+                  proxy_bitrate: str = "2M",
+                  passthrough: bool = False) -> "ReprojectPlan":
     """One recording's pass, chosen by what the frame actually is.
 
     ``flat`` skips v360 completely. That is not only correct -- reprojecting
@@ -212,8 +224,13 @@ def plan_for_mode(sources: Sequence[Path], recording_id: str, work: Path, *,
         fc, _ = build_lens_pair_graph(fov_deg, proxy_size=proxy_size)
     elif mode == "dual_fisheye":
         fc, _ = build_proxy_only_graph(fov_deg, proxy_size=proxy_size)
+    elif passthrough:
+        # Already no larger than the proxy: remux it rather than re-encode.
+        # 55 of this corpus's minutes are .lrv files the camera wrote as
+        # proxies; re-encoding them produces something worse, slowly.
+        fc = ""
     else:
-        fc, _ = build_flat_graph(proxy_size=view_size)
+        fc, _ = build_flat_graph_clamped(proxy_size=view_size)
 
     return ReprojectPlan(filter_complex=fc,
                          outputs=[("eqout", out, proxy_bitrate)],
@@ -269,7 +286,8 @@ def build_command(p: ReprojectPlan, *, hwaccel: str | None = None,
                   encoder: str = "libx264", has_audio: bool = True,
                   sample_rate: int = 16000, extra_input: Sequence[str] = (),
                   inputs: Sequence[Path] | None = None,
-                  fps: float | None = None) -> list[str]:
+                  fps: float | None = None,
+                  preset: str | None = None) -> list[str]:
     """The full argv. Kept separate from execution so it can be asserted on.
 
     ``inputs`` carries more than one source for a lens pair, where the graph
@@ -284,10 +302,16 @@ def build_command(p: ReprojectPlan, *, hwaccel: str | None = None,
     for src in srcs:
         cmd += list(extra_input)
         cmd += ["-i", str(src)]
-    cmd += ["-filter_complex", p.filter_complex]
+    if p.filter_complex:
+        cmd += ["-filter_complex", p.filter_complex]
 
     for label, path, bitrate in p.outputs:
+        if not p.filter_complex:                 # remux: no filter, no re-encode
+            cmd += ["-map", "0:v:0", "-c:v", "copy", str(path)]
+            continue
         cmd += ["-map", f"[{label}]", "-c:v", encoder, "-b:v", bitrate]
+        if preset:
+            cmd += ["-preset", preset]
         if fps:
             cmd += ["-r", f"{fps:g}"]
         cmd += [str(path)]

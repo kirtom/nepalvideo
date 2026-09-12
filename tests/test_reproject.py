@@ -440,3 +440,44 @@ def test_a_square_360_container_is_still_a_lens(tmp_path):
          "height": 2880, "frame_shape": None, "kind": "video360",
          "chapter_index": 39} for i in (0, 1)])
     assert pick_sources(a, tmp_path)[1] == "lens_pair"
+
+
+# -- not re-encoding a proxy that is already a proxy --------------------
+
+def test_a_source_no_larger_than_the_proxy_is_remuxed(tmp_path):
+    """An .lrv is already 640x360. Enlarging it to 960x540 and re-encoding
+    costs a full pass to produce something worse: 4.09s against 0.08s."""
+    from nepal.process.reproject import plan_for_mode, build_command
+    p = plan_for_mode([pathlib.Path("a.lrv")], "r", tmp_path, mode="flat",
+                      passthrough=True)
+    assert p.filter_complex == ""
+    cmd = build_command(p, inputs=[pathlib.Path("a.lrv")], fps=15, preset="veryfast")
+    assert "-c:v" in cmd and cmd[cmd.index("-c:v") + 1] == "copy"
+    assert "-filter_complex" not in cmd
+    assert "libx264" not in cmd
+
+
+def test_a_remux_still_extracts_audio(tmp_path):
+    """S03.4 needs the 16 kHz track whatever happened to the video."""
+    from nepal.process.reproject import plan_for_mode, build_command
+    p = plan_for_mode([pathlib.Path("a.lrv")], "r", tmp_path, mode="flat",
+                      passthrough=True)
+    cmd = build_command(p, inputs=[pathlib.Path("a.lrv")], has_audio=True)
+    assert "pcm_s16le" in cmd and str(p.audio_path) in cmd
+
+
+def test_flat_video_larger_than_the_proxy_is_scaled_down_only(tmp_path):
+    from nepal.process.reproject import plan_for_mode
+    p = plan_for_mode([pathlib.Path("a.mp4")], "r", tmp_path, mode="flat",
+                      view_size=(960, 540))
+    assert "min(iw,960)" in p.filter_complex
+    assert "v360" not in p.filter_complex
+
+
+def test_the_preset_is_applied_only_where_something_is_encoded(tmp_path):
+    from nepal.process.reproject import plan_for_mode, build_command
+    enc = plan_for_mode([pathlib.Path("a.mp4")], "r", tmp_path, mode="flat")
+    assert "-preset" in build_command(enc, preset="veryfast")
+    remux = plan_for_mode([pathlib.Path("a.lrv")], "r", tmp_path, mode="flat",
+                          passthrough=True)
+    assert "-preset" not in build_command(remux, preset="veryfast")

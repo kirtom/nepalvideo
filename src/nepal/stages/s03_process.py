@@ -80,6 +80,11 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
     built = skipped = failed = 0
     modes: dict[str, int] = {}
     proxy_fps = float(cfg.get("process.proxy_fps", 0)) or None
+    preset = str(cfg.get("process.encoder_preset", "veryfast")) or None
+    eq = cfg.get("process.proxy_size", [1024, 512])
+    eq_size = (int(eq[0]), int(eq[1]))
+    flat = cfg.get("process.flat_proxy_size", [960, 540])
+    proxy_w, proxy_h = int(flat[0]), int(flat[1])
     total_s = sum(float(r["duration_s"] or 0) for r in recs)
     bar = Progress("S03.1 reprojecting", len(recs))
     for r in recs:
@@ -103,7 +108,17 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
             src = reproject.concat_list(paths, work / "concat" / f"{rid}.ffconcat")
             inputs = [src]
             extra = ["-f", "concat", "-safe", "0"]
-        p = reproject.plan_for_mode(paths, rid, work, mode=mode, fov_deg=fov_deg)
+        # A source already no larger than the proxy is remuxed, not re-encoded:
+        # 55 minutes of this corpus are .lrv files the camera wrote as proxies.
+        chosen = {str(a.get("s3_key") or "").rsplit("/", 1)[-1]: a
+                  for a in assets_by_rec.get(rid, [])}
+        first = chosen.get(paths[0].name) or {}
+        w, h = first.get("width") or 0, first.get("height") or 0
+        passthrough = (mode == "flat" and 0 < w <= proxy_w and 0 < h <= proxy_h)
+        p = reproject.plan_for_mode(paths, rid, work, mode=mode, fov_deg=fov_deg,
+                                    proxy_size=eq_size,
+                                    view_size=(proxy_w, proxy_h),
+                                    passthrough=passthrough)
         if not force and unit in done and p.proxy_path.exists():
             skipped += 1
             continue
@@ -112,8 +127,9 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
         # stuck on this file" were spent guessing which source and which filter
         # graph a recording had picked; the log should simply say.
         dur = float(r["duration_s"] or 0)
-        log.info("S03.1 %s: %s, %s, %.0fs -> %s", rid, mode,
-                 ", ".join(x.name for x in inputs), dur, p.proxy_path.name)
+        log.info("S03.1 %s: %s%s, %s, %.0fs", rid, mode,
+                 " (remux)" if passthrough else "",
+                 ", ".join(x.name for x in inputs), dur)
         started = time.monotonic()
         # A pass that runs many times longer than its own footage is wedged, not
         # slow. Bounded so one bad file reports itself instead of holding the
@@ -122,7 +138,8 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
                      dur * float(cfg.get("process.ffmpeg_timeout_factor", 20)))
         cmd = reproject.build_command(p, hwaccel=hwaccel, encoder=encoder,
                                       has_audio=True, extra_input=extra,
-                                      inputs=inputs, fps=proxy_fps)
+                                      inputs=inputs, fps=proxy_fps,
+                                      preset=preset)
         try:
             proc.run(cmd, check=True, timeout=budget)
         except subprocess.TimeoutExpired:
@@ -137,7 +154,8 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
             try:
                 proc.run(reproject.build_command(p, hwaccel=hwaccel, encoder=encoder,
                                                  has_audio=False, extra_input=extra,
-                                                 inputs=inputs, fps=proxy_fps),
+                                                 inputs=inputs, fps=proxy_fps,
+                                                 preset=preset),
                          check=True, timeout=budget)
             except subprocess.TimeoutExpired:
                 log.error("S03.1 %s: gave up after %.0fs on %.0fs of footage",
