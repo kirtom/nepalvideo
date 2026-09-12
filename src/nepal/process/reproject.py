@@ -61,7 +61,8 @@ class ReprojectPlan:
 
 
 def build_proxy_only_graph(fov_deg: float, *,
-                           proxy_size: tuple[int, int] = (1024, 512)) -> tuple[str, list[str]]:
+                           proxy_size: tuple[int, int] = (1024, 512),
+                           work_scale: float = 2.0) -> tuple[str, list[str]]:
     """Phase A: the equirectangular proxy alone, with no split.
 
     The four yaw views were measured at 79% of this stage's runtime, and nothing
@@ -72,9 +73,15 @@ def build_proxy_only_graph(fov_deg: float, *,
 
     Deliberately emits no ``split``: a split whose outputs are not all consumed
     makes ffmpeg refuse the whole graph.
+
+    The frame is scaled down before v360 rather than after. Reprojection costs
+    per pixel and is the whole cost of this pass, so running it on a 3840x1920
+    source to produce 1024x512 does roughly four times the necessary work.
     """
     pw, ph = proxy_size
-    return (f"[0:v]v360=input=dfisheye:output=e:ih_fov={fov_deg:g}:iv_fov={fov_deg:g},"
+    pre_w, pre_h = int(pw * work_scale), int(ph * work_scale)
+    return (f"[0:v]scale={pre_w}:{pre_h},"
+            f"v360=input=dfisheye:output=e:ih_fov={fov_deg:g}:iv_fov={fov_deg:g},"
             f"scale={pw}:{ph}[eqout]"), ["eqout"]
 
 
@@ -146,8 +153,8 @@ def build_360_graph(fov_deg: float, *, proxy_size: tuple[int, int] = (1024, 512)
 
 
 def build_lens_pair_graph(fov_deg: float, *,
-                          proxy_size: tuple[int, int] = (1024, 512)
-                          ) -> tuple[str, list[str]]:
+                          proxy_size: tuple[int, int] = (1024, 512),
+                          work_scale: float = 2.0) -> tuple[str, list[str]]:
     """Two circular-lens inputs stacked into the frame v360 expects.
 
     An Insta360 in dual-stream mode writes one circle per file -- _00_ and _10_
@@ -157,9 +164,17 @@ def build_lens_pair_graph(fov_deg: float, *,
 
     Both inputs must be the same height for hstack, which they are: the camera
     writes the two lenses identically.
+
+    Each lens is scaled down *before* the stack, so v360 reprojects a 2048x1024
+    frame rather than the 5760x2880 the card wrote. v360 is the whole cost of
+    this pass and its cost is per pixel, so this is roughly eight times less
+    work for output that is scaled to 1024x512 either way -- there is no sense
+    doing expensive geometry on pixels that are about to be thrown away.
     """
     pw, ph = proxy_size
-    return (f"[0:v][1:v]hstack=inputs=2[df];"
+    lens = max(64, int(pw * work_scale / 2))          # each circle is square
+    return (f"[0:v]scale={lens}:{lens}[l];[1:v]scale={lens}:{lens}[r];"
+            f"[l][r]hstack=inputs=2[df];"
             f"[df]v360=input=dfisheye:output=e:"
             f"ih_fov={fov_deg:g}:iv_fov={fov_deg:g},scale={pw}:{ph}[eqout]"), ["eqout"]
 
@@ -393,11 +408,21 @@ def pick_sources(assets: Sequence[dict], data_root: Path
         return data_root / rel
 
     def shape_of(a: dict) -> str:
+        """Fisheye semantics apply only to 360 containers.
+
+        Guessing from dimensions alone calls every square video a lens: a
+        Telegram round video message is square by definition, and this demanded
+        a partner lens for each of them before skipping the recording entirely.
+        A phone clip is flat whatever its aspect.
+        """
         recorded = (a.get("frame_shape") or "").strip()
         if recorded:
             return recorded
+        if (a.get("kind") or "") != "video360":
+            return "flat"
         from nepal.probe.manifest import frame_shape
-        return frame_shape(a.get("width"), a.get("height"))
+        shape = frame_shape(a.get("width"), a.get("height"))
+        return "flat" if shape == "unknown" else shape
 
     live = [a for a in assets if resolve(a).exists()]
     by_shape: dict[str, list[dict]] = {}
@@ -431,8 +456,8 @@ def pick_sources(assets: Sequence[dict], data_root: Path
                     len(pair))
         return None
 
-    if by_shape.get("flat") or by_shape.get("unknown"):
-        group = by_shape.get("flat") or by_shape["unknown"]
+    group = by_shape.get("flat") or by_shape.get("unknown")
+    if group:
         return [resolve(a) for a in cheapest(group)], "flat"
     return None
 

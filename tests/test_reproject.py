@@ -358,7 +358,24 @@ def test_the_lens_pair_graph_stacks_before_reprojecting(tmp_path):
     from nepal.process.reproject import build_lens_pair_graph
     fc, _ = build_lens_pair_graph(193.0)
     assert fc.index("hstack") < fc.index("v360")
-    assert "[0:v][1:v]hstack=inputs=2" in fc
+    assert "hstack=inputs=2" in fc
+    assert "[0:v]" in fc and "[1:v]" in fc
+
+
+def test_reprojection_happens_after_the_downscale_not_before():
+    """v360 costs per pixel and is the whole cost of this pass. Reprojecting a
+    5760x2880 stack to make a 1024x512 proxy is 4x the necessary work --
+    measured at 12.0s against 3.0s for the same five seconds of footage."""
+    from nepal.process.reproject import build_lens_pair_graph, build_proxy_only_graph
+    for fc, _ in (build_lens_pair_graph(193.0), build_proxy_only_graph(193.0)):
+        assert fc.index("scale") < fc.index("v360"), fc
+
+
+def test_the_working_size_is_larger_than_the_output():
+    """Downscaling below the output would throw away detail the proxy keeps."""
+    from nepal.process.reproject import build_proxy_only_graph
+    fc, _ = build_proxy_only_graph(193.0, proxy_size=(1024, 512), work_scale=2.0)
+    assert "scale=2048:1024" in fc and "scale=1024:512" in fc
 
 
 def test_the_flat_plan_never_mentions_v360(tmp_path):
@@ -383,3 +400,32 @@ def test_the_proxy_frame_rate_can_be_capped(tmp_path):
     p = plan_for_mode([pathlib.Path("a.mp4")], "r", tmp_path, mode="flat")
     assert "-r" in build_command(p, fps=15)
     assert "-r" not in build_command(p, fps=None)
+
+
+def test_a_square_telegram_video_is_not_mistaken_for_a_lens(tmp_path):
+    """Round video messages are square by definition. Guessing shape from
+    dimensions demanded a partner lens for each of them, then skipped the
+    recording for not having one."""
+    from nepal.process.reproject import pick_sources
+    a = _on_disk(tmp_path, [{"s3_key": "raw/c/round.mp4", "container": "mp4",
+                             "width": 384, "height": 384, "frame_shape": None,
+                             "kind": "video_flat", "chapter_index": 1}])
+    assert pick_sources(a, tmp_path)[1] == "flat"
+
+
+def test_a_square_phone_clip_is_flat_too(tmp_path):
+    from nepal.process.reproject import pick_sources
+    a = _on_disk(tmp_path, [{"s3_key": "raw/c/IMG_1.MOV", "container": "mov",
+                             "width": 1080, "height": 1080, "frame_shape": None,
+                             "kind": "video_flat", "chapter_index": 1}])
+    assert pick_sources(a, tmp_path)[1] == "flat"
+
+
+def test_a_square_360_container_is_still_a_lens(tmp_path):
+    """The narrowing must not lose the real case it exists for."""
+    from nepal.process.reproject import pick_sources
+    a = _on_disk(tmp_path, [
+        {"s3_key": f"raw/c/VID_{i}0_039.insv", "container": "insv", "width": 2880,
+         "height": 2880, "frame_shape": None, "kind": "video360",
+         "chapter_index": 39} for i in (0, 1)])
+    assert pick_sources(a, tmp_path)[1] == "lens_pair"
