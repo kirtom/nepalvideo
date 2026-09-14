@@ -686,3 +686,58 @@ def test_build_music_map_reserves_the_primaries_by_itself():
         for seg in act["segments"][1:]:
             assert seg["track_id"] not in (primaries - {own}) or \
                 len(tracks) < len(m["acts"]) + 1
+
+
+# -- the credits track ------------------------------------------------
+def _track(track_id, s3_key, title="", artist=None):
+    from nepal.spine.music import Track
+    return Track(track_id=track_id, s3_key=s3_key, title=title, artist=artist)
+
+
+def _pool():
+    return [
+        _track("t1", "raw/music/Aria - Shtil.mp3", "Shtil", "Aria"),
+        _track("t2", "raw/music/Marusha.Somewhere over the Rainbow.mp3",
+               "Somewhere Over The Rainbow", "Marusha"),
+        _track("t3", "raw/music/Kino - Gruppa krovi.mp3", "Gruppa krovi", "Kino"),
+    ]
+
+
+def test_the_credits_track_is_found_by_file_name():
+    from nepal.spine.music import pick_credits_track
+    t = pick_credits_track(_pool(), "Marusha.Somewhere over the Rainbow.mp3")
+    assert t is not None and t.track_id == "t2"
+
+
+def test_it_is_found_by_stem_title_or_a_fragment():
+    """The configured value may be the file name, the stem, or the title as
+    tagged. A setting that reads as a decision and quietly matches nothing is
+    the failure mode this project keeps paying for."""
+    from nepal.spine.music import pick_credits_track
+    for name in ("Marusha.Somewhere over the Rainbow",
+                 "somewhere over the rainbow",
+                 "MARUSHA.SOMEWHERE OVER THE RAINBOW.MP3"):
+        t = pick_credits_track(_pool(), name)
+        assert t is not None and t.track_id == "t2", name
+
+
+def test_no_name_configured_reserves_nothing():
+    from nepal.spine.music import pick_credits_track
+    assert pick_credits_track(_pool(), None) is None
+    assert pick_credits_track(_pool(), "  ") is None
+
+
+def test_a_name_that_matches_nothing_returns_none_for_the_caller_to_report():
+    from nepal.spine.music import pick_credits_track
+    assert pick_credits_track(_pool(), "Never Gonna Give You Up.mp3") is None
+
+
+def test_the_credits_track_does_not_compete_for_an_act():
+    """Left in the pool it wins an act on its features, and that act is then
+    scored against a cue that is never going to play there."""
+    from nepal.spine.music import assign_acts, pick_credits_track
+    pool = _pool()
+    credits = pick_credits_track(pool, "Marusha.Somewhere over the Rainbow.mp3")
+    scored = [t for t in pool if t is not credits]
+    assignment = assign_acts(scored)
+    assert credits.track_id not in assignment.by_act.values()

@@ -204,6 +204,40 @@ def callback_affinity(act1: Track, candidate: Track) -> float:
     return bonus
 
 
+def pick_credits_track(tracks: Sequence["Track"], name: str | None
+                       ) -> "Track | None":
+    """The one track held back for the end credits, by filename or title.
+
+    A credits track is not a worse fit for some act -- it is not competing at
+    all. Left in the pool it would win an act on its features and then be
+    unavailable where it was actually wanted, and the act it won would be
+    scored against a cue that is never going to play there.
+
+    Matched loosely on purpose: the configured value may be the file name, the
+    stem, or the title as tagged, and the caller warns when nothing matches.
+    A silently unmatched name is the failure mode this project keeps paying
+    for -- a setting that reads as a decision and does nothing.
+    """
+    want = (name or "").strip().lower()
+    if not want:
+        return None
+    stem = want.rsplit("/", 1)[-1]
+    stem_no_ext = stem.rsplit(".", 1)[0] if "." in stem else stem
+    for t in tracks:
+        base = (t.s3_key or "").rsplit("/", 1)[-1].lower()
+        candidates = {base, base.rsplit(".", 1)[0] if "." in base else base,
+                      (t.title or "").strip().lower()}
+        if stem in candidates or stem_no_ext in candidates:
+            return t
+    # Nothing matched exactly; fall back to a containment match so that
+    # "Somewhere over the Rainbow" finds "Marusha - Somewhere Over The Rainbow".
+    for t in tracks:
+        haystack = f"{(t.s3_key or '').rsplit('/', 1)[-1]} {t.artist or ''} {t.title or ''}".lower()
+        if stem_no_ext and stem_no_ext in haystack:
+            return t
+    return None
+
+
 @dataclass
 class Assignment:
     by_act: dict[int, str]

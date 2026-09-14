@@ -291,3 +291,9 @@ music:
   # Optional: drop tracks below this Spotify instrumentalness (playlist source
   # only -- an mp3 carries no such field). Off by default.
   min_instrumentalness: null
+  # One track held back for the end credits (spec section S07.2). It is
+  # withdrawn before the act assignment runs, not filtered out afterwards: left
+  # in the pool it wins an act on its features, and that act is then scored
+  # against a cue that will never play there. Matched on file name, stem or
+  # title; a name that matches nothing is a warning, never a silent no-op.
+  credits_track: "Marusha.Somewhere over the Rainbow.mp3"
