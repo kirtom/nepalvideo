@@ -456,6 +456,7 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
     total_s = music_mod.choose_total_duration(
         float(cfg.get("film.target_duration_s")),
         float(cfg.get("film.max_duration_s")),
+        min_s=float(cfg.get("film.min_duration_s")),
         material_s=None,
         growth_bias=float(cfg.get("film.growth_bias")),
         selectivity=float(cfg.get("film.material_selectivity")))

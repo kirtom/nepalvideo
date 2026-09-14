@@ -274,11 +274,44 @@ def test_unknown_material_means_the_target():
     assert choose_total_duration(1200, 2700, material_s=0) == 1200
 
 
-def test_material_that_barely_covers_the_film_buys_nothing():
-    """A film cut 1:1 from its rushes is not a cut. Below the selectivity the
-    material needs, there is no surplus to spend."""
-    assert choose_total_duration(1200, 2700, material_s=1200, selectivity=3.0) == 1200
-    assert choose_total_duration(1200, 2700, material_s=3600, selectivity=3.0) == 1200
+def test_material_that_exactly_covers_the_film_buys_nothing():
+    """A film cut 1:1 from its rushes is not a cut. At exactly the selectivity
+    the material needs, there is no surplus to spend."""
+    assert choose_total_duration(1200, 2400, material_s=3600, selectivity=3.0) == 1200
+
+
+def test_the_film_shrinks_when_the_material_will_not_carry_the_target():
+    """Twenty minutes padded out to hit a number is worse than fifteen that
+    earned their place."""
+    got = choose_total_duration(1200, 2400, min_s=900, material_s=3000,
+                                selectivity=3.0)
+    assert got == pytest.approx(1000.0)
+    assert got < 1200
+
+
+def test_the_shrink_stops_at_the_floor():
+    """Below fifteen minutes it is not the film any more."""
+    for material in (60, 600, 1800):
+        got = choose_total_duration(1200, 2400, min_s=900, material_s=material)
+        assert got == 900
+
+
+def test_without_a_floor_the_target_is_the_floor():
+    """Callers that state no minimum get the old behaviour: never shorter."""
+    assert choose_total_duration(1200, 2400, material_s=600) == 1200
+
+
+def test_the_runtime_stays_inside_the_stated_range():
+    for material in (0.1, 600, 3600, 36000, 3_600_000):
+        got = choose_total_duration(1200, 2400, min_s=900, material_s=material)
+        assert 900 <= got <= 2400, material
+
+
+def test_the_target_is_neither_a_cap_nor_a_floor():
+    """Fifteen to forty, aiming at twenty."""
+    thin = choose_total_duration(1200, 2400, min_s=900, material_s=2400)
+    rich = choose_total_duration(1200, 2400, min_s=900, material_s=360_000)
+    assert thin < 1200 < rich
 
 
 def test_the_film_grows_with_material_but_stays_under_the_ceiling():

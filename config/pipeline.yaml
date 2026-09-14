@@ -20,12 +20,14 @@ aws:
   proxy_only: false
 
 film:
-  # The film aims for the target and may grow toward the ceiling where the
-  # material genuinely supports it. The bias is deliberate: twenty minutes is
-  # the length the creative brief was written for, and a longer cut has to earn
-  # it rather than happen by default.
+  # The film aims for the target and moves either way as the material warrants.
+  # Twenty minutes is the length the creative brief was written for, so a longer
+  # cut has to earn it rather than happen by default -- but the target is not a
+  # cap, and it is not a floor either. Where the material will not carry twenty
+  # minutes, fifteen is a better film than twenty padded out.
+  min_duration_s:  900           # 15 min -- shorter than this is not the film
   target_duration_s: 1200        # 20 min -- what it aims for
-  max_duration_s: 2700           # 45 min -- hard ceiling
+  max_duration_s: 2400           # 40 min -- hard ceiling
   short_duration_s: 180          # the 3 min cut
   shot_count_min: 150
   shot_count_max: 200

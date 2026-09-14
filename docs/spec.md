@@ -21,7 +21,7 @@ The operator runs **one command**. The pipeline pauses three times for a decisio
 
 | Attribute | Value |
 |---|---|
-| Primary output | ~20 min film, 1080p or 4K H.264/H.265 |
+| Primary output | 15–40 min film, aiming at ~20, 1080p or 4K H.264/H.265 |
 | Secondary output | ~3 min short cut, same timeline, higher selection threshold |
 | Scope | The whole history: from the first planning message through the trek to the return |
 | Tone | Slightly melancholic and epic, **shifting across five acts** — not one sustained mood |
@@ -100,7 +100,25 @@ gives the pre-dawn alpine start on summit day and the golden hours either side.
 These enter `score_ctx` as first-class terms, and they choose where the
 music-out windows of §S07 land.
 
-### 1.6 Tonal constraint (mandatory)
+### 1.6 Runtime is a range, not a number
+
+**15 to 40 minutes, aiming at 20.** The target is the length the brief was
+written for, but it is neither a cap nor a floor.
+
+The film grows past it only where the material earns it: nothing counts as
+surplus until there are three times the film's length in shots that survive the
+quality gate, and past that it moves a diminishing fraction toward the ceiling,
+so forty minutes is approached and never casually reached.
+
+Shortage is the mirror image and is not hedged. Where the material will not
+carry twenty minutes the film is cut to what the material holds, floored at
+fifteen. Twenty minutes padded out to hit a number is worse than fifteen that
+earned their place.
+
+Until S05 has scored the shots this is unknown, and the honest answer is the
+target: the film neither grows nor shrinks on a guess.
+
+### 1.7 Tonal constraint (mandatory)
 
 Twenty minutes of unbroken melancholic-epic reads as a perfume advert by minute eight. The assembly **must** place **at least one "levity" shot per act from Act 2 onward** — the bad meal, the argument about the route, someone swearing at a stuck zipper, a stupid joke. Grief and awe only land when something ordinary sits next to them.
 
@@ -598,7 +616,7 @@ If the library is too small or a poor fit, fall back to the reference palette in
 
 `silence_window` is the mandatory hard cut to silence after the Act 4 peak.
 
-**Acceptance:** act durations sum to within ±30 s of the 1,200 s target; every act has at least one swell timestamp.
+**Acceptance:** act durations sum to within ±30 s of the runtime chosen by §1.6; every act has at least one swell timestamp.
 
 ---
 
@@ -799,7 +817,7 @@ Lambda plus a Bedrock call. The corpus is now a few hundred rows of text and fit
 
 | Constraint | Value |
 |---|---|
-| Total duration | 1,200 s ± 30 s |
+| Total duration | The runtime chosen by §1.6, ±30 s — within 900–2,400 s |
 | Shot count | 150–200 |
 | Chronology | Strictly non-decreasing within each act |
 | Act durations | As allocated in `music_map.json` |
@@ -811,8 +829,8 @@ Lambda plus a Bedrock call. The corpus is now a few hundred rows of text and fit
 | Act 1 | Message caption cards interleaved; ≥ 1 round-video-message clip |
 | Act 4 | Peak shot lands on the highest swell, followed by `silence_window` — a single held shot with audio faded to wind only |
 | Act 5 | Must open on a shot echoing an Act 1 composition where one exists, and **must reach the journey home** — ≥ 3 slots from Kathmandu, the Delhi layover or the flight, and a closing card from an "after"-phase message |
-| Speech | Every transcribed moment that survives Gate 2 is placed. Speech is the spine, not a bonus — see §1.6 |
-| Natural sound | 3–5 music-out windows of 10–20 s, placed at the highest-exertion moments — see §1.7 |
+| Speech | Every transcribed moment that survives Gate 2 is placed. Speech is the spine, not a bonus — see §1.4 |
+| Natural sound | 3–5 music-out windows of 10–20 s, placed at the highest-exertion moments — see §1.5 |
 | Place cards | One per new `place_name`, carrying day and altitude |
 
 **Shot duration model** (before beat snapping):

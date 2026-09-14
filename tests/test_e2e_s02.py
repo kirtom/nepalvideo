@@ -278,7 +278,9 @@ def test_silence_window_follows_the_act_four_peak(spined):
     act4 = next(a for a in m["acts"] if a["act"] == 4)
     sw = m["silence_window"]
     assert sw["t_start"] == pytest.approx(act4["t_end"])
-    assert 2.0 <= sw["t_end"] - sw["t_start"] <= 4.0
+    # lengthened from 3 s: a hard cut to silence needs room to land
+    assert sw["t_end"] - sw["t_start"] == pytest.approx(
+        float(cfg.get("assemble.silence_window_s")), abs=0.01)
 
 
 # -- act boundaries ----------------------------------------------------

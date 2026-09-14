@@ -317,39 +317,48 @@ def _assign_with_reuse(pool: Sequence[Track], acts: Sequence[int],
 # -- act durations and the music map -----------------------------------
 
 def choose_total_duration(target_s: float, max_s: float, *,
+                          min_s: float | None = None,
                           material_s: float | None = None,
                           growth_bias: float = 0.35,
                           selectivity: float = 3.0) -> float:
-    """Decide how long the film should be.
+    """Decide how long the film should be, within [min_s, max_s].
 
-    ``target_s`` is the length the creative brief was written for and
-    ``max_s`` the ceiling it may not pass. The film starts at the target and
-    has to earn anything beyond it, because surplus footage is a weak reason to
-    make a film longer.
+    ``target_s`` is the length the creative brief was written for. It is an aim,
+    not a cap and not a floor: the film moves either way as the material
+    warrants, and a longer cut has to earn it rather than happen by default.
 
     ``material_s`` is how much footage is genuinely worth using -- the summed
     duration of the shots that survive the quality gate. Until S05 has scored
-    them that is unknown, and the honest answer is the target: the film does
-    not grow on a guess.
+    them that is unknown, and the honest answer is the target: the film neither
+    grows nor shrinks on a guess.
 
     Growth is driven by how many film-lengths of usable material there are.
     ``selectivity`` says how much footage a minute of film is cut from; at the
     default of 3 the film must have three times its own length in keepable
-    shots before any surplus is counted at all. Past that the film moves a
+    shots before any surplus is counted at all. Past that it moves a
     diminishing fraction of the way to the ceiling::
 
         fraction = 1 - 1 / (1 + growth_bias * surplus)
 
-    so the ceiling is approached and never casually reached -- at the default
-    bias, twice the material needed buys about 6 of the 25 available minutes,
-    and it takes roughly ten times to reach 39.
+    so the ceiling is approached and never casually reached.
+
+    Shortage is treated as the mirror image, and it is not hedged: where the
+    material will not carry the target, the film is cut to what the material
+    holds, floored at ``min_s``. Fifteen minutes of footage that earned its
+    place is a better film than twenty minutes padded out to hit a number.
     """
     target_s, max_s = float(target_s), float(max_s)
-    if max_s <= target_s or material_s is None or material_s <= 0:
+    floor = float(min_s) if min_s is not None else target_s
+    floor = min(floor, target_s)
+    if material_s is None or material_s <= 0:
         return target_s
+
     usable = float(material_s) / max(selectivity, 1e-9)
     surplus = usable / target_s - 1.0
-    if surplus <= 0:
+
+    if surplus < 0:                       # not enough to fill the target
+        return round(max(floor, min(target_s, usable)), 3)
+    if surplus == 0 or max_s <= target_s:
         return target_s
     fraction = 1.0 - 1.0 / (1.0 + max(growth_bias, 0.0) * surplus)
     return round(min(max_s, target_s + fraction * (max_s - target_s)), 3)
