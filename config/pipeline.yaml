@@ -45,6 +45,10 @@ film:
   # makes it one swell into a hard cut to silence. Set it to 0.0 to keep stills
   # out of the summit entirely.
   photo_share_by_act: {}
+  # The pre-title sequence: 15-25 s from Act 3 or 4, then a hard cut to a title
+  # card. Carved off the top, so the acts are allocated over the remainder. This
+  # is the one deliberate break in chronology.
+  cold_open_s: 20
   # How much keepable footage a minute of finished film is cut from. The film
   # counts nothing as surplus until it has this many times its own length in
   # shots that survive the quality gate.
@@ -60,12 +64,18 @@ film:
 # no longer the single most powerful move in the film but a section of it.
 # Act 1 is capped too; beyond about five minutes, Telegram screenshots drag
 # however good they are.
+# Act 1 is half what it was. Nearly three minutes of planning before anything
+# happens is a long time to ask for in a twenty-minute film, and it is the
+# thinnest act in the corpus -- seventeen pre-trek clips and sixty-two
+# photographs across two and a half months. The time moves to Act 5, which is no
+# longer only the descent: "walked down" is not an ending, and the return
+# through Kathmandu, the Delhi layover and the flight home is a better one.
 acts:
-  - {act: 1, name: Planning,       target_s: 167, min_s:  90, max_s:  300}
-  - {act: 2, name: Approach,       target_s: 287, min_s: 150, max_s:  700}
-  - {act: 3, name: Climb,          target_s: 407, min_s: 240, max_s: 1150}
-  - {act: 4, name: Highest point,  target_s: 113, min_s:  90, max_s:  150}
-  - {act: 5, name: Descent,        target_s: 227, min_s: 120, max_s:  600}
+  - {act: 1, name: Planning,          target_s:  83, min_s:  45, max_s:  180}
+  - {act: 2, name: Approach,          target_s: 287, min_s: 150, max_s:  700}
+  - {act: 3, name: Climb,             target_s: 407, min_s: 240, max_s: 1150}
+  - {act: 4, name: Highest point,     target_s: 113, min_s:  90, max_s:  150}
+  - {act: 5, name: Descent and return, target_s: 311, min_s: 150, max_s:  700}
 
 probe:
   # S01.4 fisheye FOV auto-solve
@@ -215,7 +225,15 @@ assemble:
     4: [2.0, 4.0]
     5: [5.0, 8.0]
   act4_held_shot_s: [6.0, 10.0]
-  silence_window_s: 3.0
+  # A hard cut to silence needs room to land; three seconds is a gap, five is a
+  # held breath.
+  silence_window_s: 5.0
+  # Music-out windows: no music at all, original audio at full level, placed at
+  # the highest-exertion moments S05 finds. At -14 LUFS music with everything
+  # ducked to -28 under it, location sound is inaudible for the whole runtime --
+  # which throws away breathing at five thousand metres, wind, boots on scree.
+  natural_sound_windows: 4
+  natural_sound_window_s: [10.0, 20.0]
   max_reassembly_loops: 3
 
 render:

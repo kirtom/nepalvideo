@@ -25,20 +25,82 @@ The operator runs **one command**. The pipeline pauses three times for a decisio
 | Secondary output | ~3 min short cut, same timeline, higher selection threshold |
 | Scope | The whole history: from the first planning message through the trek to the return |
 | Tone | Slightly melancholic and epic, **shifting across five acts** — not one sustained mood |
-| Narrative spine | Chronological, with altitude as the dramatic axis |
+| Narrative spine | Chronological within acts, opened by a cold open (§1.2), with altitude as the dramatic axis |
 | Protagonist | The operator (Keller) and his trek partner (Kulikov) |
 
 ### 1.1 Five-act structure
 
 | Act | Name | Target duration | Material | Musical character |
 |---|---|---|---|---|
-| 1 | Planning | 2–3 min | Telegram messages, screenshots, maps, gear photos, round video messages | Sparse solo piano. Small, domestic, wistful. Should sound like a city in winter, not mountains. |
+| 1 | Planning | **~1.5 min** | Telegram messages, screenshots, maps, gear photos, round video messages | Sparse solo piano. Small, domestic, wistful. Should sound like a city in winter, not mountains. |
 | 2 | Approach | 4–5 min | Arrival, low-altitude trail, villages, tea houses | Warmth entering. Strings arriving over piano. |
 | 3 | The climb | 6–7 min | High trail, effort, weather, altitude gain | The build. Slow post-rock swell or cold orchestral. Should feel like it costs something. |
 | 4 | Highest point | 1.5–2 min | Summit / max altitude reached | Peak swell, **then hard-cut to silence.** 2–3 s of wind and breathing. This is the single most powerful move in the film. |
-| 5 | Descent / return | 3–4 min | Coming down, the last days, arrival home | Return to the Act 1 piano theme, fuller. The callback is what makes 20 minutes read as a film rather than a montage. |
+| 5 | Descent / return | **~5 min** | Coming down, the last days, **Kathmandu, the Delhi layover, the journey home** | Return to the Act 1 piano theme, fuller. The callback is what makes 20 minutes read as a film rather than a montage. |
 
-### 1.2 Tonal constraint (mandatory)
+Act 1 was halved from 2–3 min. Nearly three minutes of planning before anything
+happens is a long time to ask for in a twenty-minute film, and the act's material
+is its thinnest: seventeen pre-trek clips and sixty-two photographs across two and
+a half months. The time moves to Act 5.
+
+Act 5 is no longer only the descent. Descent is an anticlimax -- "walked down" is
+not an ending -- but the corpus holds a better one: the return itself. Two hundred
+and seventy-six clips from 11-12 May are Kathmandu, the Delhi layover and the
+airports home, and three hundred and fifty-four Telegram messages in the "after"
+phase are where the reflection lives. The act must reach the flight home, and the
+film's last words should come from a message sent after everyone got back.
+
+### 1.2 Cold open (mandatory)
+
+A 15-25 s pre-title sequence drawn from Act 3 or Act 4 -- the pass, or the hardest
+moment -- then a hard cut to black and a card reading "three months earlier".
+
+This is the one deliberate break in chronology and it is worth stating plainly as
+a deviation. Without it the film opens on ninety seconds of a city in winter, and
+asks the audience to wait for a reason to keep watching. Budget comes off the top:
+acts are allocated over `target_duration_s - cold_open_s`.
+
+### 1.3 Altitude must be visible
+
+Altitude is named above as the dramatic axis and the film never shows it. The
+database holds DEM elevation for 1,083 assets, GeoNames place names, and the full
+GPS track; none of it reaches the screen. Required:
+
+- **A place card at each new location**: `Day 6 · Syalagaun · 4,068 m`. Orientation,
+  and it makes the climb read as progress rather than as more mountains.
+- **A recurring elevation-profile motif** -- a thin line filling as the film
+  advances, the pass its obvious apex. Roughly six appearances, ~3 s each.
+- **A summit card carrying the number**: `Larkya La — 5,147 m`.
+
+### 1.4 Speech is the spine
+
+A twenty-minute film of landscape under continuous music is a screensaver. What
+separates a documentary from a montage is a human thread, and this corpus has
+one: 1,936 Telegram messages, 229 of them notable, and round video messages that
+are the best narration material in the project.
+
+The original design allotted them one slot, in Act 1. That is a token. Instead:
+
+- S03.5 transcription is **not optional**. Without `faster-whisper` installed the
+  film has no voice at all.
+- The 8–12 moments where someone *says* something -- a worry, a joke, a decision
+  -- are selected first, and the surrounding shots are built around them.
+- Sparse voice beats constant narration. Round videos are mostly pre-trek, so
+  this mainly carries Act 1; action-camera audio in wind is largely unusable and
+  the trek stays mostly wordless. That is the right shape.
+
+### 1.5 Exertion is the story
+
+`new_max_alt` rewards altitude novelty. The dramatically valuable material is
+struggle: the slowest hour, the steepest gain, the long unexplained stop. The GPS
+track already encodes all three -- speed between fixes, metres gained per hour,
+and gaps where nobody moved -- and time of day is free from the timestamps, which
+gives the pre-dawn alpine start on summit day and the golden hours either side.
+
+These enter `score_ctx` as first-class terms, and they choose where the
+music-out windows of §S07 land.
+
+### 1.6 Tonal constraint (mandatory)
 
 Twenty minutes of unbroken melancholic-epic reads as a perfume advert by minute eight. The assembly **must** place **at least one "levity" shot per act from Act 2 onward** — the bad meal, the argument about the route, someone swearing at a stuck zipper, a stupid joke. Grief and awe only land when something ordinary sits next to them.
 
@@ -745,9 +807,13 @@ Lambda plus a Bedrock call. The corpus is now a few hundred rows of text and fit
 | Levity | ≥ 1 levity-tagged shot per act, Acts 2–5 |
 | Location diversity | ≤ 3 shots from the same `place_name` per act |
 | Cut points | Snapped to the nearest beat; act transitions snapped to a downbeat |
+| Cold open | 15–25 s from Act 3 or 4 at the head, then a title card. The only break in chronology |
 | Act 1 | Message caption cards interleaved; ≥ 1 round-video-message clip |
 | Act 4 | Peak shot lands on the highest swell, followed by `silence_window` — a single held shot with audio faded to wind only |
-| Act 5 | Must open on a shot echoing an Act 1 composition where one exists |
+| Act 5 | Must open on a shot echoing an Act 1 composition where one exists, and **must reach the journey home** — ≥ 3 slots from Kathmandu, the Delhi layover or the flight, and a closing card from an "after"-phase message |
+| Speech | Every transcribed moment that survives Gate 2 is placed. Speech is the spine, not a bonus — see §1.6 |
+| Natural sound | 3–5 music-out windows of 10–20 s, placed at the highest-exertion moments — see §1.7 |
+| Place cards | One per new `place_name`, carrying day and altitude |
 
 **Shot duration model** (before beat snapping):
 
@@ -773,6 +839,14 @@ Lambda plus a Bedrock call. The corpus is now a few hundred rows of text and fit
 ### S07 — Draft render
 
 Batch job. Conform from the **proxies**, not the originals. 960×540, H.264, music bed mixed at −14 LUFS, original audio ducked to −28 LUFS under music except where `has_speech = 1` (duck music to −22 instead).
+
+**Music-out windows.** Music at −14 with everything under it at −28 means the
+location sound is inaudible for the whole runtime, which throws away the most
+visceral material the trek produced: breathing at five thousand metres, wind,
+boots on scree, a river. Three to five windows of 10–20 s carry **no music at
+all** — original audio at full level — placed at the highest-exertion moments
+S05 identifies. The Act 4 silence lengthens from 3 s to 5 s: a hard cut to
+silence needs room to land.
 
 Burn in shot_id and timecode as a small overlay so Gate 3 feedback can reference specific moments.
 
