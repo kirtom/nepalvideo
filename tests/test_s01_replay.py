@@ -104,3 +104,69 @@ def test_orphan_asset_rows_are_removed_and_their_message_link_cleared(conn):
     # the message survives; only its broken link is dropped
     assert conn.execute("SELECT media_asset FROM messages").fetchone()[0] is None
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+# -- S01.2 stale recordings ------------------------------------------
+def _cfg():
+    from nepal.config import Config
+    return Config({"probe": {"max_chapter_gap_s": 1.0}})
+
+
+def _video(conn, asset_id, name, rid=None, when="2024-05-06T08:00:00+00:00"):
+    conn.execute("INSERT INTO assets(asset_id, s3_key, source, kind, container, "
+                 "duration_s, created_at, created_at_utc, recording_id) "
+                 "VALUES (?,?,?,?,?,?,?,?,?)",
+                 (asset_id, f"raw/media_from_camera/{name}", "camera",
+                  "video360", "mp4", 10.0, when, when, rid))
+    conn.commit()
+
+
+def test_a_recording_the_grouping_no_longer_produces_is_removed(conn):
+    """An upsert never removes. Three recordings from the old rule -- the one
+    that collapsed every phone clip into a single take -- outlived it and were
+    still being reported as S03.1 failures two runs later."""
+    from nepal.stages.s01_probe import group_chapters
+    conn.execute("INSERT INTO recordings(recording_id, source, is_360, "
+                 "start_utc, duration_s, asset_count) VALUES "
+                 "('phone_keller_IMG','phone',0,'2024-05-06T08:00:00+00:00',1.0,7)")
+    conn.commit()
+    _video(conn, "a1", "VID_20240506_080000_00_001.mp4")
+
+    rep = group_chapters(_cfg(), conn)
+    assert "phone_keller_IMG" in rep["removed"]
+    assert [r[0] for r in conn.execute("SELECT recording_id FROM recordings")] \
+        == ["camera_20240506_080000"]
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_a_stale_recording_that_still_owns_assets_is_kept_and_reported(conn):
+    """Deleting it would take its assets' only link to a moment with it. That
+    is a bug in the grouping, not something to paper over silently."""
+    from nepal.stages.s01_probe import group_chapters
+    conn.execute("INSERT INTO recordings(recording_id, source, is_360, "
+                 "start_utc, duration_s, asset_count) VALUES "
+                 "('legacy','phone',0,'2024-05-06T08:00:00+00:00',1.0,1)")
+    conn.commit()
+    _video(conn, "a1", "VID_20240506_080000_00_001.mp4")
+    conn.execute("INSERT INTO assets(asset_id, s3_key, source, kind, recording_id) "
+                 "VALUES ('orphan','raw/x.jpg','phone','photo','legacy')")
+    conn.commit()
+
+    rep = group_chapters(_cfg(), conn)
+    assert rep["stale_still_used"] == ["legacy"]
+    assert rep["removed"] == []
+
+
+def test_shots_of_a_removed_recording_go_with_it(conn):
+    from nepal.stages.s01_probe import group_chapters
+    conn.execute("INSERT INTO recordings(recording_id, source, is_360, "
+                 "start_utc, duration_s, asset_count) VALUES "
+                 "('gone','phone',0,'2024-05-06T08:00:00+00:00',1.0,1)")
+    conn.execute("INSERT INTO shots(shot_id, recording_id, media_kind, start_s, "
+                 "end_s) VALUES ('gone#0000','gone','video',0.0,3.0)")
+    conn.commit()
+    _video(conn, "a1", "VID_20240506_080000_00_001.mp4")
+
+    group_chapters(_cfg(), conn)
+    assert conn.execute("SELECT COUNT(*) FROM shots").fetchone()[0] == 0
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []

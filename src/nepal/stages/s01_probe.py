@@ -303,6 +303,31 @@ def group_chapters(cfg: Config, conn) -> dict[str, Any]:
             ck = chapters.parse_chapter(a["filename"])
             conn.execute("UPDATE assets SET recording_id=?, chapter_index=? WHERE asset_id=?",
                          (r.recording_id, ck.chapter_index if ck else None, aid))
+    # Recordings the current grouping no longer produces have to go, not just
+    # stop being written. An upsert leaves them behind, and a leftover from an
+    # older grouping rule is not inert: three of them survived the change that
+    # stopped collapsing every phone clip into one recording, and S03.1 then
+    # spent three runs reporting them as failures against files that were by
+    # then filed somewhere else.
+    keep = {r.recording_id for r in recs}
+    removed, still_used = [], []
+    for (rid,) in list(conn.execute("SELECT recording_id FROM recordings")):
+        if rid in keep:
+            continue
+        if conn.execute("SELECT 1 FROM assets WHERE recording_id=? LIMIT 1",
+                        (rid,)).fetchone():
+            still_used.append(rid)
+            continue
+        conn.execute("DELETE FROM shots WHERE recording_id=?", (rid,))
+        conn.execute("DELETE FROM recordings WHERE recording_id=?", (rid,))
+        removed.append(rid)
+    if removed:
+        log.info("S01.2 removed %d recording(s) the current grouping no longer "
+                 "produces: %s", len(removed), ", ".join(sorted(removed)[:5]))
+    if still_used:
+        log.warning("S01.2 %d recording(s) are not in the new grouping but "
+                    "still own assets, so they were kept: %s",
+                    len(still_used), ", ".join(sorted(still_used)[:5]))
     conn.commit()
 
     by_id = {a["asset_id"]: a for a in assets}
@@ -312,7 +337,8 @@ def group_chapters(cfg: Config, conn) -> dict[str, Any]:
     log.info("S01.2 %d recordings (%d multi-chapter), %d continuity notes",
              len(recs), len(multi), len(problems))
     return {"n_recordings": len(recs), "n_multi_chapter": len(multi),
-            "continuity_problems": problems}
+            "continuity_problems": problems, "n_removed": len(removed),
+            "removed": sorted(removed), "stale_still_used": sorted(still_used)}
 
 
 # ---------------------------------------------------------------- gps check
