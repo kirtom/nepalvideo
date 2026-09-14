@@ -91,8 +91,15 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["NEPAL_NO_PROGRESS"] = "1"
     _setup_logging(args.verbose)
 
-    from nepal.config import Config
-    cfg = Config.load(args.config)
+    from nepal.config import Config, ConfigNotFound
+    try:
+        cfg = Config.load(args.config)
+    except ConfigNotFound as exc:
+        raise SystemExit(str(exc))
+    # Which file the run is reading is worth one line: the config can now be
+    # found in several places, and "that tunable had no effect" is a much
+    # harder thing to diagnose than "it read a different file than you edited".
+    logging.getLogger("nepal").info("config %s", cfg.path)
 
     if args.cmd == "s01":
         from nepal.stages import s01_probe

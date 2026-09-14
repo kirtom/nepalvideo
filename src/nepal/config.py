@@ -12,7 +12,54 @@ from typing import Any
 
 import yaml
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "pipeline.yaml"
+CONFIG_NAME = Path("config") / "pipeline.yaml"
+# The source-checkout location: <root>/src/nepal/config.py -> <root>/config/.
+# Correct when the package is run from the repository and meaningless when it
+# is not, which is why it is one candidate among several rather than the answer.
+DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / CONFIG_NAME
+
+
+class ConfigNotFound(FileNotFoundError):
+    """No pipeline.yaml at any of the places it is looked for."""
+
+    def __init__(self, tried: "list[Path]"):
+        self.tried = list(tried)
+        looked = "\n  ".join(str(t) for t in self.tried)
+        super().__init__(
+            "no pipeline.yaml found. Pass one with --config, or set "
+            "NEPAL_CONFIG.\nLooked in:\n  " + looked)
+
+
+def candidate_configs(start: "os.PathLike | str | None" = None) -> "list[Path]":
+    """Every place a config is looked for, in the order it is looked.
+
+    Deriving the path from the package's own location alone is right only for a
+    source checkout. Installed into a virtualenv the same arithmetic points at
+    ``.venv/lib/python3.14/config/pipeline.yaml`` -- a path nobody chose, whose
+    absence reads as a missing file rather than a wrong guess. So: the
+    environment first, then the project the command was run in, then the source
+    layout, then upward from wherever the package actually landed, which finds
+    the project when the virtualenv lives inside it.
+    """
+    out: list[Path] = []
+    env = os.environ.get("NEPAL_CONFIG")
+    if env:
+        out.append(Path(env).expanduser())
+    here = Path(start).resolve() if start else Path.cwd().resolve()
+    out += [d / CONFIG_NAME for d in (here, *here.parents)]
+    out.append(DEFAULT_CONFIG)
+    out += [d / CONFIG_NAME for d in Path(__file__).resolve().parents]
+    seen: set[Path] = set()
+    return [p for p in out if not (p in seen or seen.add(p))]
+
+
+def find_config(start: "os.PathLike | str | None" = None) -> Path:
+    """The first candidate that exists, or ConfigNotFound naming them all."""
+    tried = candidate_configs(start)
+    for p in tried:
+        if p.is_file():
+            return p
+    raise ConfigNotFound(tried)
 
 
 class DuplicateKeyError(ValueError):
@@ -80,7 +127,9 @@ class Config:
 
     @classmethod
     def load(cls, path: str | os.PathLike | None = None) -> "Config":
-        p = Path(path) if path else Path(os.environ.get("NEPAL_CONFIG", DEFAULT_CONFIG))
+        p = Path(path).expanduser() if path else find_config()
+        if not p.is_file():
+            raise ConfigNotFound([p])
         with open(p) as fh:
             return cls(yaml.load(fh, Loader=_StrictLoader), p)
 

@@ -110,3 +110,75 @@ def test_the_shipped_config_has_no_duplicate_keys():
     cfg = Config.load(DEFAULT_CONFIG)
     assert cfg.get("process.proxy_fps") == 15
     assert cfg.get("process.photo_workers") == 0
+
+
+# -- finding the config ----------------------------------------------
+def test_an_installed_package_still_finds_the_projects_config(tmp_path, monkeypatch):
+    """Three directories up from config.py is the repository root only in a
+    source checkout. Installed into a virtualenv the same arithmetic points at
+    .venv/lib/python3.14/config/pipeline.yaml -- a path nobody chose, whose
+    absence reads as a missing file rather than a wrong guess."""
+    from nepal.config import find_config
+
+    project = tmp_path / "nepalvideo"
+    (project / "config").mkdir(parents=True)
+    (project / "config" / "pipeline.yaml").write_text("project: {name: t}\n")
+    venv = project / ".venv" / "lib" / "python3.14" / "site-packages" / "nepal"
+    venv.mkdir(parents=True)
+    monkeypatch.delenv("NEPAL_CONFIG", raising=False)
+    assert find_config(venv) == project / "config" / "pipeline.yaml"
+
+
+def test_the_environment_beats_every_other_location(tmp_path, monkeypatch):
+    from nepal.config import find_config
+
+    chosen = tmp_path / "mine.yaml"
+    chosen.write_text("project: {name: t}\n")
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "pipeline.yaml").write_text("project: {name: other}\n")
+    monkeypatch.setenv("NEPAL_CONFIG", str(chosen))
+    assert find_config(tmp_path) == chosen
+
+
+def test_the_nearest_project_wins_over_one_further_up(tmp_path, monkeypatch):
+    from nepal.config import find_config
+
+    for name in ("outer", "outer/inner"):
+        (tmp_path / name / "config").mkdir(parents=True)
+        (tmp_path / name / "config" / "pipeline.yaml").write_text("project: {}\n")
+    monkeypatch.delenv("NEPAL_CONFIG", raising=False)
+    assert find_config(tmp_path / "outer" / "inner") == \
+        tmp_path / "outer" / "inner" / "config" / "pipeline.yaml"
+
+
+def test_a_missing_config_says_where_it_looked(tmp_path, monkeypatch):
+    """A FileNotFoundError on a path the user never typed is not a diagnosis."""
+    from nepal.config import candidate_configs, ConfigNotFound
+
+    monkeypatch.delenv("NEPAL_CONFIG", raising=False)
+    root = tmp_path / "a" / "b"
+    root.mkdir(parents=True)
+    tried = candidate_configs(root)
+    assert root / "config" / "pipeline.yaml" in tried
+    message = str(ConfigNotFound(tried))
+    assert "Looked in:" in message
+    assert str(root / "config" / "pipeline.yaml") in message
+    assert "--config" in message and "NEPAL_CONFIG" in message
+
+
+def test_every_candidate_is_listed_once(tmp_path, monkeypatch):
+    """The working directory walk and the package walk overlap whenever the
+    virtualenv lives inside the project, which is the ordinary case."""
+    from nepal.config import candidate_configs
+
+    monkeypatch.delenv("NEPAL_CONFIG", raising=False)
+    tried = candidate_configs(tmp_path)
+    assert len(tried) == len(set(tried))
+
+
+def test_an_explicit_config_that_does_not_exist_is_reported_clearly(tmp_path):
+    import pytest
+    from nepal.config import Config, ConfigNotFound
+
+    with pytest.raises(ConfigNotFound):
+        Config.load(tmp_path / "nope.yaml")
