@@ -4,7 +4,7 @@
     nepal s01 [--force] [--skip-fov] [--skip-clock]
     nepal fetch-reference        SRTM tiles + GeoNames gazetteer
     nepal s02 [--force] [--skip-asr]
-    nepal s03 [--force]          per-clip processing (S03.0 photo shots)
+    nepal s03 [--force] [--redo STEPS]   per-clip processing
     nepal fov-check              Gate 1 seam comparison sheets
     nepal report                 the chronological checkpoint table
     nepal decisions              auto-solved values with confidence
@@ -63,8 +63,14 @@ def main(argv: list[str] | None = None) -> int:
     from nepal import diagnose as _diagnose
     _diagnose.add_arguments(pd)
 
-    p3 = sub.add_parser("s03", help="S03 -- per-clip processing (S03.0 photo shots)")
+    p3 = sub.add_parser("s03", help="S03 -- per-clip processing")
     p3.add_argument("--force", action="store_true", help="recompute completed sub-steps")
+    # --force on S03 means rebuilding every proxy: three and a half hours. The
+    # cheap steps after it are the ones that get re-run while the film is being
+    # tuned, so they are reachable without paying for the expensive one.
+    p3.add_argument("--redo", metavar="STEPS", default="",
+                    help="comma-separated sub-steps to recompute: "
+                         "proxies,shots,photos,metrics,gate")
 
     pfc = sub.add_parser("fov-check",
                          help="render the Gate 1 FOV comparison sheets")
@@ -111,7 +117,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "s03":
         from nepal.stages import s03_process
-        rep = s03_process.run(cfg, force=args.force)
+        redo = {x.strip() for x in args.redo.split(",") if x.strip()}
+        rep = s03_process.run(cfg, force=args.force, redo=redo)
         ph = rep.get("photos") or {}
         if ph.get("error"):
             print(f"S03.0 {ph['error']}")

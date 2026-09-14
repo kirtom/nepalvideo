@@ -145,3 +145,65 @@ def test_rerunning_detection_does_not_duplicate_shots(project):
     n1 = conn.execute("SELECT COUNT(*) FROM shots").fetchone()[0]
     detect_shots(cfg, conn)
     assert conn.execute("SELECT COUNT(*) FROM shots").fetchone()[0] == n1
+
+
+# -- S03.3 and S03.7, against a real proxy ---------------------------
+@needs_tools
+def test_s03_3_measures_every_shot_from_the_proxy(project):
+    """Measured through OpenCV against a file ffmpeg wrote, not against a
+    hand-built array. Every metric this pipeline has got wrong so far was wrong
+    at exactly this boundary."""
+    from nepal.stages.s03_process import measure_shots
+    cfg, conn = project
+    rep = measure_shots(cfg, conn)
+    assert rep["n_measured"] == rep["n_shots"] > 0
+    assert not rep["failed"]
+    rows = conn.execute("SELECT sharpness, exposure_pen, motion_mag, stability "
+                        "FROM shots WHERE media_kind='video'").fetchall()
+    assert rows and all(all(v is not None for v in r) for r in rows)
+    assert all(0.0 <= r["stability"] <= 1.0 for r in rows)
+
+
+@needs_tools
+def test_s03_3_does_not_remeasure_what_it_already_measured(project):
+    from nepal.stages.s03_process import measure_shots
+    cfg, conn = project
+    assert measure_shots(cfg, conn)["n_shots"] == 0
+
+
+@needs_tools
+def test_a_static_shot_scores_as_steadier_than_a_moving_one(project):
+    """The first half is a scrolling test pattern, the second is still bars.
+    If the motion metrics cannot tell those apart they cannot tell a walking
+    shot from a locked-off one either."""
+    cfg, conn = project
+    rows = conn.execute("SELECT motion_mag, stability FROM shots "
+                        "WHERE media_kind='video' ORDER BY start_s").fetchall()
+    assert len(rows) == 2
+    moving, static = rows[0], rows[1]
+    assert static["motion_mag"] < moving["motion_mag"]
+    assert static["stability"] >= moving["stability"]
+
+
+@needs_tools
+def test_s03_7_gives_every_shot_a_status(project):
+    from nepal.stages.s03_process import apply_gate
+    cfg, conn = project
+    rep = apply_gate(cfg, conn)
+    assert rep["n_shots"] > 0 and rep["n_unmeasured"] == 0
+    assert not conn.execute(
+        "SELECT 1 FROM shots WHERE status NOT IN ('candidate','rejected')").fetchall()
+
+
+@needs_tools
+def test_the_gate_judges_a_shot_on_its_own_sources_curve(project):
+    """The camera curve would reject this material; the telegram curve is the
+    one that keeps Act 1 alive, and it must be the asset's curve that decides."""
+    from nepal.stages.s03_process import apply_gate
+    cfg, conn = project
+    conn.execute("UPDATE shots SET sharpness = 2.5")
+    conn.commit()
+    conn.execute("UPDATE assets SET quality_curve='camera'")
+    assert apply_gate(cfg, conn)["n_kept"] == 0
+    conn.execute("UPDATE assets SET quality_curve='telegram'")
+    assert apply_gate(cfg, conn)["n_kept"] > 0

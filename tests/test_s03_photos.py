@@ -113,17 +113,27 @@ def test_a_still_has_no_stability_or_motion(project):
 
 
 def test_a_blown_out_photo_is_rejected(project):
+    """Written as a shot, but marked rejected. S03.7 owns status for every shot
+    and re-runs whenever the thresholds move; a photo deleted here would need
+    the whole decode pass again to come back."""
     cfg, conn, data = project
     add_photo(conn, data, "blown.jpg", TREK + timedelta(days=4), kind="blown")
-    rep = build_photo_shots(cfg, conn)
-    assert rep["n_shots"] == 0
-    assert "below the quality gate" in rep["rejected"]
+    build_photo_shots(cfg, conn)
+    assert conn.execute("SELECT status FROM shots").fetchone()[0] == "rejected"
 
 
 def test_a_photo_with_no_detail_is_rejected(project):
     cfg, conn, data = project
     add_photo(conn, data, "flat.jpg", TREK + timedelta(days=4), kind="flat")
-    assert build_photo_shots(cfg, conn)["n_shots"] == 0
+    build_photo_shots(cfg, conn)
+    assert conn.execute("SELECT status FROM shots").fetchone()[0] == "rejected"
+
+
+def test_a_good_photo_is_a_candidate(project):
+    cfg, conn, data = project
+    add_photo(conn, data, "good.jpg", TREK + timedelta(days=4))
+    build_photo_shots(cfg, conn)
+    assert conn.execute("SELECT status FROM shots").fetchone()[0] == "candidate"
 
 
 def test_a_photo_outside_every_act_is_skipped_not_measured(project):

@@ -23,6 +23,8 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from nepal.process import metrics
+
 log = logging.getLogger(__name__)
 
 # .heic is in PHOTO_EXT because iPhones shoot it by default, but Pillow cannot
@@ -48,27 +50,26 @@ def heif_available() -> bool:
 
 
 def sharpness(img: np.ndarray) -> float:
-    """Laplacian variance -- the same measure the FOV frame picker uses."""
-    from scipy.ndimage import laplace
-    gray = img if img.ndim == 2 else img[..., :3].mean(axis=2)
-    return float(np.var(laplace(gray.astype(np.float32))))
+    """``log(var(Laplacian))`` -- deliberately the same function as S03.3.
 
-
-def exposure_penalty(img: np.ndarray, clip_lo: float = 8.0,
-                     clip_hi: float = 247.0) -> float:
-    """How much of the frame is lost to clipping, plus drift from mid-grey.
-
-    0 is a well-exposed frame; 1 is unusable. Snow and sky make the highlight
-    end the one that matters here -- a blown-out ridge carries no detail no
-    matter how sharp the lens was.
+    A photograph and a frame of video end up in the same timeline, ranked by
+    the same score against the same ``quality_curves``, whose ``min_sharpness``
+    of 4.0 is a log value. Measuring stills on the raw variance instead put them
+    two orders of magnitude above every clip: the photo gate passed everything,
+    and ``technical_score`` saturated its tanh so that sharpness carried no
+    information at all in the choice of which stills to use.
     """
-    gray = img if img.ndim == 2 else img[..., :3].mean(axis=2)
-    g = gray.astype(np.float32)
-    if g.size == 0:
-        return 1.0
-    clipped = float(((g <= clip_lo) | (g >= clip_hi)).mean())
-    drift = abs(float(g.mean()) - 128.0) / 128.0
-    return float(min(1.0, clipped + 0.5 * drift))
+    return metrics.sharpness(metrics.to_gray(img))
+
+
+def exposure_penalty(img: np.ndarray) -> float:
+    """The spec's measure (S03.3): the fraction of the frame that is clipped.
+
+    Shared with video for the same reason as sharpness. An earlier version
+    added a penalty for drifting from mid-grey, which reads a snowfield at
+    altitude -- the subject of this film -- as a badly exposed photograph.
+    """
+    return metrics.exposure_penalty(metrics.to_gray(img))
 
 
 def slot_duration_s(aspect: float | None = None, *, base_s: float = 3.0,

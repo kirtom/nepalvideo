@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -21,7 +22,8 @@ from typing import Any
 
 from nepal import db, freshness
 from nepal.config import Config
-from nepal.process import reproject, shots as shots_mod, stills
+from nepal.process import (gate as gate_mod, metrics as metrics_mod,
+                           reproject, shots as shots_mod, stills)
 from nepal.spine import acts as acts_mod, gps as gps_mod
 from nepal.util import proc
 from nepal.util.progress import Progress, heartbeat
@@ -289,9 +291,10 @@ def _measure(item: dict[str, Any], *, max_px: int, slot_base: float,
 
     sharp = stills.sharpness(arr)
     pen = stills.exposure_penalty(arr)
-    if not stills.passes_gate(sharp, pen, curve):
-        return {"rejected": "below the quality gate"}
-
+    # A photograph that fails the gate is still written, as a rejected shot.
+    # S03.7 owns status for every shot in the film and re-runs whenever the
+    # thresholds move; a photo deleted here instead would need the 9-minute
+    # decode pass again to come back.
     dur = stills.slot_duration_s((w / h) if h else None, base_s=slot_base)
     return {
         "shot_id": f"photo_{item['asset_id'][:16]}",
@@ -311,8 +314,176 @@ def _measure(item: dict[str, Any], *, max_px: int, slot_base: float,
         "audio_lufs": None,
         "view_kind": "still",
         "score_tech": round(stills.technical_score(sharp, pen), 4),
-        "status": "candidate",
+        "status": "candidate" if stills.passes_gate(sharp, pen, curve) else "rejected",
     }
+
+
+def measure_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
+    """S03.3 -- sharpness, exposure, motion and stability for every video shot.
+
+    Sampled from the proxy, five points per shot, three consecutive frames at
+    each. One VideoCapture per recording walked forward in shot order: seeking
+    a long proxy is the cost here, and a recording that became a single shot
+    still only pays for five seeks.
+
+    Resumable through the data rather than through ``stage_units``: a shot with
+    a sharpness has been measured. That survives a kill mid-run without a unit
+    per shot, and ``--force`` re-measures everything.
+
+    The distribution of each metric is logged at the end. The gate's thresholds
+    are the spec's, written before anyone had seen this corpus, and the only way
+    to know whether they reject the intended 70% is to look at the numbers they
+    are about to be applied to.
+    """
+    proxies = cfg.work_root / "proxies"
+    where = "" if force else " AND s.sharpness IS NULL"
+    rows = [dict(r) for r in conn.execute(
+        "SELECT s.shot_id, s.recording_id, s.start_s, s.end_s, r.is_360 "
+        "FROM shots s JOIN recordings r ON r.recording_id = s.recording_id "
+        f"WHERE s.media_kind = 'video'{where} "
+        "ORDER BY s.recording_id, s.start_s")]
+    if not rows:
+        return {"n_shots": 0, "note": "every video shot already measured"}
+
+    by_rec: dict[str, list[dict]] = {}
+    for r in rows:
+        by_rec.setdefault(r["recording_id"], []).append(r)
+    missing = [rid for rid in by_rec if not (proxies / f"{rid}_eq.mp4").exists()]
+    for rid in missing:
+        by_rec.pop(rid, None)
+
+    n_samples = int(cfg.get("process.metric_samples_per_shot", 5))
+    n_frames = int(cfg.get("process.metric_frames_per_sample", 3))
+    flow_px = int(cfg.get("process.metric_flow_px", metrics_mod.FLOW_WIDTH))
+    jerk_ref = float(cfg.get("process.metric_jerk_ref_px", metrics_mod.JERK_REF_PX))
+    workers = int(cfg.get("process.metric_workers", 0)) or (os.cpu_count() or 4)
+
+    bar = Progress("S03.3 measuring shots", sum(len(v) for v in by_rec.values()))
+    results: list[dict[str, Any]] = []
+    lock = threading.Lock()
+    failed: dict[str, int] = {}
+
+    def measure_recording(rid: str) -> None:
+        import cv2
+        shots = by_rec[rid]
+        cap = cv2.VideoCapture(str(proxies / f"{rid}_eq.mp4"))
+        try:
+            if not cap.isOpened():
+                with lock:
+                    failed["unreadable proxy"] = failed.get("unreadable proxy", 0) + len(shots)
+                bar.step(len(shots))
+                return
+            for sh in shots:
+                try:
+                    times = metrics_mod.sample_times(sh["start_s"], sh["end_s"], n_samples)
+                    groups = metrics_mod.read_samples(
+                        proxies / f"{rid}_eq.mp4", times,
+                        frames_per_sample=n_frames, cap=cap)
+                    m = metrics_mod.measure_samples(
+                        groups, equirect=bool(sh["is_360"]),
+                        width=flow_px, jerk_ref=jerk_ref)
+                except Exception as exc:               # a bad proxy, not a bug
+                    log.debug("S03.3 %s: %s", sh["shot_id"], exc)
+                    m = None
+                    with lock:
+                        key = type(exc).__name__
+                        failed[key] = failed.get(key, 0) + 1
+                if m is None:
+                    with lock:
+                        failed["no frames"] = failed.get("no frames", 0) + 1
+                else:
+                    with lock:
+                        results.append({"shot_id": sh["shot_id"], **m})
+                bar.step()
+        finally:
+            cap.release()
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        list(pool.map(measure_recording, list(by_rec)))
+    bar.close(f"{len(results)} measured")
+
+    conn.executemany(
+        "UPDATE shots SET sharpness=?, exposure_pen=?, motion_mag=?, stability=? "
+        "WHERE shot_id=?",
+        [(r["sharpness"], r["exposure_pen"], r["motion_mag"], r["stability"],
+          r["shot_id"]) for r in results])
+    conn.commit()
+
+    dist = {k: metrics_mod.percentiles([r[k] for r in results])
+            for k in ("sharpness", "exposure_pen", "motion_mag", "stability")}
+    for k, v in dist.items():
+        log.info("S03.3 %-13s %s", k, v)
+    if missing:
+        log.warning("S03.3 %d recording(s) have shots but no proxy on disk", len(missing))
+    if failed:
+        log.warning("S03.3 could not measure: %s", failed)
+    return {"n_shots": len(rows), "n_measured": len(results),
+            "n_missing_proxies": len(missing), "failed": failed,
+            "samples_per_shot": n_samples, "distribution": dist}
+
+
+def apply_gate(cfg: Config, conn) -> dict[str, Any]:
+    """S03.7 -- reject what is not worth a caption, a transcription or a human.
+
+    Runs over every shot each time rather than only the new ones: the gate is
+    a pure function of metrics and thresholds, both of which change while the
+    film is being tuned, and a stale rejection is invisible -- the shot simply
+    never appears again. Cheap enough to redo: one SQL read and no decoding.
+    """
+    rows = [dict(r) for r in conn.execute(
+        "SELECT s.shot_id, s.media_kind, s.start_s, s.end_s, s.sharpness, "
+        "s.exposure_pen, s.stability, s.has_speech, s.act, "
+        "COALESCE(a.quality_curve, ra.quality_curve, 'camera') AS curve "
+        "FROM shots s "
+        "LEFT JOIN assets a ON a.asset_id = s.asset_id "
+        "LEFT JOIN assets ra ON ra.asset_id = ("
+        "  SELECT asset_id FROM assets WHERE recording_id = s.recording_id "
+        "  ORDER BY chapter_index LIMIT 1)")]
+    if not rows:
+        return {"n_shots": 0}
+
+    speech_factor = float(cfg.get("gate.speech_sharpness_factor",
+                                  gate_mod.SPEECH_SHARPNESS_FACTOR))
+    speech_min_s = float(cfg.get("gate.speech_min_duration_s",
+                                 gate_mod.SPEECH_MIN_DURATION_S))
+    reasons: dict[str, int] = {}
+    by_curve: dict[str, list[int]] = {}
+    by_act: dict[Any, list[int]] = {}
+    updates: list[tuple[str, str]] = []
+    unmeasured = 0
+    for r in rows:
+        if r["media_kind"] == "video" and r["sharpness"] is None:
+            unmeasured += 1
+        why = gate_mod.verdict(r, cfg.quality_curve(r["curve"]),
+                               speech_sharpness_factor=speech_factor,
+                               speech_min_duration_s=speech_min_s)
+        updates.append(("candidate" if why is None else "rejected", r["shot_id"]))
+        if why:
+            reasons[why] = reasons.get(why, 0) + 1
+        for tally, key in ((by_curve, r["curve"]), (by_act, r["act"])):
+            seen = tally.setdefault(key, [0, 0])
+            seen[0] += 1
+            seen[1] += 1 if why is None else 0
+
+    conn.executemany("UPDATE shots SET status=? WHERE shot_id=?", updates)
+    conn.commit()
+
+    kept = sum(1 for st, _ in updates if st == "candidate")
+    surviving_by_act = {k: v[1] for k, v in by_act.items()}
+    log.info("S03.7 %d of %d shot(s) survive (%.0f%% rejected); reasons %s",
+             kept, len(rows), 100.0 * (1 - kept / max(1, len(rows))), reasons)
+    for curve, (n, ok) in sorted(by_curve.items()):
+        log.info("S03.7 %-9s %d of %d survive (%.0f%% rejected)",
+                 curve, ok, n, 100.0 * (1 - ok / max(1, n)))
+    log.info("S03.7 survivors per act %s",
+             {k: v for k, v in sorted(surviving_by_act.items(), key=lambda kv: (kv[0] is None, kv[0]))})
+    if unmeasured:
+        log.warning("S03.7 %d video shot(s) have no metrics -- run S03.3 first; "
+                    "they were judged on duration alone", unmeasured)
+    return {"n_shots": len(rows), "n_kept": kept, "reasons": reasons,
+            "by_curve": {k: {"n": n, "kept": ok} for k, (n, ok) in by_curve.items()},
+            "survivors_by_act": {str(k): v for k, v in surviving_by_act.items()},
+            "n_unmeasured": unmeasured}
 
 
 def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
@@ -384,6 +555,7 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
         list(pool.map(measure, range(len(work))))
 
     out: list[dict[str, Any]] = []
+    gated = 0
     for m in measured:
         if m is None:
             continue
@@ -391,8 +563,9 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
             rejected[m["rejected"]] = rejected.get(m["rejected"], 0) + 1
         else:
             out.append(m)
+            gated += m["status"] == "rejected"
 
-    scan.close(f"{len(out)} became shots")
+    scan.close(f"{len(out)} became shots, {gated} of them below the gate")
     db.upsert(conn, "shots", ["shot_id"], out)
     by_act: dict[int, int] = {}
     for s in out:
@@ -416,7 +589,8 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
             "n_needs_heif": missing_heif}
 
 
-def run(cfg: Config, *, force: bool = False) -> dict[str, Any]:
+def run(cfg: Config, *, force: bool = False,
+        redo: set[str] | None = None) -> dict[str, Any]:
     conn = db.init(cfg.db_path)
     report: dict[str, Any] = {"stage": STAGE, "started_utc": db.utcnow()}
     done = db.done_units(conn, STAGE)
@@ -425,9 +599,20 @@ def run(cfg: Config, *, force: bool = False) -> dict[str, Any]:
 
     steps = [("proxies", lambda: build_proxies(cfg, conn, force=force)),
              ("shots", lambda: detect_shots(cfg, conn)),
-             ("photos", lambda: build_photo_shots(cfg, conn))]
+             ("photos", lambda: build_photo_shots(cfg, conn)),
+             ("metrics", lambda: measure_shots(
+                 cfg, conn, force=force or "metrics" in (redo or ()))),
+             # The gate is re-run every time: it is pure, it is cheap, and a
+             # rejection left over from an older threshold is invisible.
+             ("gate", lambda: apply_gate(cfg, conn))]
+    # The gate is a pure function of metrics and thresholds, both of which move
+    # while the film is being tuned, so it is never skipped as already done.
+    always = {"gate"} | set(redo or ())
+    unknown = (redo or set()) - {name for name, _ in steps}
+    if unknown:
+        raise SystemExit(f"unknown --redo step(s): {', '.join(sorted(unknown))}")
     for name, fn in steps:
-        if not force and name in done:
+        if not force and name in done and name not in always:
             report[name] = {"skipped": "already done"}
             continue
         report[name] = fn()

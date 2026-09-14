@@ -682,8 +682,33 @@ Sample 5 frames evenly within each shot from the equirect proxy:
 
 - `sharpness` = `log(var(Laplacian(gray)))`, median across samples
 - `exposure_pen` = fraction of pixels above 250 or below 5, median across samples
-- `motion_mag` = mean magnitude of Farnebäck optical flow between consecutive sampled frames
-- `stability` = `1 / (1 + var(motion vectors))`; where IMU is available, prefer `1 / (1 + mean(|jerk|))` from the gyro track
+- `motion_mag` = mean magnitude of Farnebäck optical flow between consecutive frames, median across samples
+- `stability` = `1 / (1 + jerk / jerk_ref)`, where jerk is the change in the mean flow vector between two consecutive frame pairs
+
+Three refinements to the above, each forced by this corpus:
+
+**Sample three consecutive frames at each of the five points, not one.** Motion
+measured between frames seconds apart is not motion, it is displacement. And
+**shake is not motion** — this camera was on a pole, on a walking person, for
+four and a half hours, so almost every shot moves. What separates a usable
+walking shot from an unusable one is the *second* derivative: a steady pan has a
+large constant flow field, a shaken camera has one that reverses between
+frames. Hence jerk rather than `var(motion vectors)`. `jerk_ref`
+(`process.metric_jerk_ref_px`) is a calibration point, not a constant of
+nature; S03.3 logs the measured distribution of all four metrics so it can be
+moved against real material.
+
+**Measure sharpness and exposure on the central band of an equirect proxy.**
+A 2:1 equirectangular frame stretches the poles across the full width, so sky
+and the photographer's own boots occupy half the pixels and pull every
+measurement toward the same value. The horizon band is where the film is.
+
+**Photographs are measured on the same scale.** `log(var(Laplacian))` and the
+clipped-pixel fraction, from the same functions — a still and a frame of video
+are ranked against each other in S05 and gated against the same curves, so they
+cannot be on different scales. (They were: stills used raw Laplacian variance,
+which sits two orders of magnitude above the curves' `min_sharpness` of 4.0, so
+the photo gate passed everything and `score_tech` saturated.)
 
 #### S03.4 Audio
 
@@ -713,6 +738,25 @@ Reject shots where, **against the curve appropriate to the asset's `quality_curv
 | min duration | 1.5 s | 1.5 s | 1.0 s |
 
 Set `status = 'rejected'`. Expect roughly 70% rejection on camera material. Telegram material must not be judged on the camera curve or Act 1 loses its core content.
+
+**A shot carrying speech is judged on a floor of its own.** §1.4 makes voice the
+spine of the film: a soft, wobbly frame under a sentence that carries the story
+is worth more than a sharp frame of nothing, and the picture can always be cut
+away from while the audio keeps running. Where `has_speech = 1` the sharpness
+floor is multiplied by `gate.speech_sharpness_factor`, the minimum duration
+drops to `gate.speech_min_duration_s`, and the stability floor does not apply.
+Exposure still does — a blown-out frame carries no picture at any length.
+
+A metric that was never measured does not reject. A photograph has no stability
+by design; a shot whose proxy failed has nothing at all. The gate removes the
+demonstrably unusable, not the unknown.
+
+The gate is a pure function of the metrics and the thresholds, so it is re-run
+on every S03 invocation rather than skipped as already done: both sides move
+while the film is being tuned, and a rejection left over from an older threshold
+is invisible — the shot simply never appears again. Rejected shots stay in the
+table as rows, including photographs, so that a threshold change brings them
+back without re-decoding anything.
 
 #### S03.8 Storage transition
 
