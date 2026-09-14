@@ -150,11 +150,31 @@ def extract_audio(src: str | Path, dest: str | Path, *, sample_rate: int = 16000
 
 # -- exiftool ----------------------------------------------------------
 
+def _capture_tag_args() -> list[str]:
+    """Request exactly the capture-time tags the manifest knows how to read.
+
+    A tag this scan does not ask for does not exist as far as the manifest is
+    concerned, however carefully asset_datetime() ranks it. That has now bitten
+    twice: OffsetTimeOriginal was absent and every Nepal photo landed 5h45m
+    out, then CreationDate was absent and 276 clips kept the export date their
+    QuickTime stamp had been rewritten to. Deriving the request from
+    CAPTURE_TAGS is what stops it happening a third time -- the reader and the
+    request cannot drift apart if only one of them is written by hand.
+    """
+    from nepal.probe.manifest import CAPTURE_TAGS
+    return [f"-{tag}" for tag in CAPTURE_TAGS]
+
+
 EXIF_TAGS = [
     "-FileName", "-Directory", "-FileSize", "-FileType", "-MIMEType", "-ImageSize",
-    "-Duration", "-VideoFrameRate", "-CreateDate", "-DateTimeOriginal",
-    "-MediaCreateDate", "-GPSLatitude", "-GPSLongitude", "-GPSAltitude",
-    "-GPSDateTime", "-Make", "-Model",
+    "-Duration", "-VideoFrameRate",
+    *_capture_tag_args(),
+    "-GPSLatitude", "-GPSLongitude", "-GPSAltitude", "-Make", "-Model",
+    # EXIF keeps a timestamp's UTC offset in a SEPARATE tag. Omitting these
+    # from the request makes asset_datetime()'s timezone handling dead code and
+    # silently shifts every Nepal photo by 5h45m onto the wrong day.
+    "-OffsetTimeOriginal", "-OffsetTime", "-OffsetTimeDigitized",
+    "-GPSHPositioningError",
 ]
 
 

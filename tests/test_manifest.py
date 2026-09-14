@@ -5,7 +5,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from nepal.probe.manifest import (classify, telegram_subkind, exif_get, parse_exif_datetime,
-                                  parse_gps, parse_duration, NEPAL_TZ, walk_media)
+                                  parse_gps, parse_duration, NEPAL_TZ, walk_media,
+                                  asset_datetime, capture_time_spread, CAPTURE_TAGS,
+                                  refine_kind, frame_shape)
 
 
 @pytest.mark.parametrize("path,source,kind,curve", [
@@ -210,3 +212,139 @@ def test_asset_datetime_defaults_to_utc_with_no_hints():
 
 def test_asset_datetime_missing():
     assert asset_datetime({"File:FileName": "x.jpg"}) is None
+
+
+# -- a rewritten timestamp ---------------------------------------------
+#
+# Tags copied from a real IMG_3196.MOV in the corpus. Keys:CreationDate holds
+# the true capture time with its offset; every QuickTime and Track stamp was
+# rewritten to the minute the file was exported, eighteen months later.
+EXPORTED_MOV = {
+    "SourceFile": "/data/media_from_phones/kulikov/IMG_3196.MOV",
+    "Keys:CreationDate": "2024:05:11 15:45:12+05:30",
+    "Keys:GPSCoordinates": "28.5934 77.2491 214.447",
+    "QuickTime:CreateDate": "2025:11:22 23:24:56",
+    "QuickTime:ModifyDate": "2025:11:22 23:24:56",
+    "QuickTime:Duration": 2.06666666666667,
+    "Track1:MediaCreateDate": "2025:11:22 23:24:56",
+    "Track1:TrackCreateDate": "2025:11:22 23:24:56",
+    "Composite:GPSLatitude": 28.5934,
+    "Composite:GPSLongitude": 77.2491,
+    "Composite:GPSAltitude": 214.447,
+    "System:FileModifyDate": "2026:09:08 20:07:38+03:00",
+}
+
+
+def test_apple_creation_date_beats_a_rewritten_quicktime_stamp():
+    """An export, AirDrop or iCloud download rewrites QuickTime:CreateDate but
+    leaves Keys:CreationDate alone. Reading CreateDate first put 276 clips
+    eighteen months after the trek, outside every act."""
+    got = asset_datetime(EXPORTED_MOV)
+    assert got == datetime(2024, 5, 11, 15, 45, 12,
+                           tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    # and in UTC it lands on the real trek day, not in 2025
+    assert got.astimezone(timezone.utc).date() == datetime(2024, 5, 11).date()
+
+
+def test_creation_date_carries_its_own_offset_so_no_assumption_is_made():
+    """+05:30 is India, not Nepal's +05:45 -- these clips are the Delhi layover
+    on the way home. A per-file offset is evidence; a default is a guess."""
+    got = asset_datetime(EXPORTED_MOV, assume_tz=NEPAL_TZ)
+    assert got.utcoffset() == timedelta(hours=5, minutes=30)
+
+
+def test_creation_date_is_the_highest_authority_tag():
+    assert CAPTURE_TAGS[0] == "CreationDate"
+
+
+def test_a_photo_with_no_keys_group_still_uses_datetimeoriginal():
+    """Only QuickTime containers carry Keys:CreationDate, so adding it must not
+    disturb how a JPEG or HEIC is read."""
+    row = {"ExifIFD:DateTimeOriginal": "2024:05:04 07:12:33",
+           "ExifIFD:OffsetTimeOriginal": "+05:45"}
+    assert asset_datetime(row) == datetime(2024, 5, 4, 7, 12, 33, tzinfo=NEPAL_TZ)
+
+
+def test_capture_time_spread_measures_the_disagreement():
+    spread = capture_time_spread(EXPORTED_MOV)
+    assert spread is not None
+    seconds, earliest, latest = spread
+    assert earliest == "CreationDate"
+    assert latest in ("CreateDate", "MediaCreateDate")
+    assert seconds / 86400.0 == pytest.approx(560, abs=2)
+
+
+def test_capture_time_spread_is_none_when_there_is_nothing_to_compare():
+    assert capture_time_spread({"ExifIFD:DateTimeOriginal": "2024:05:04 07:12:33"}) is None
+    assert capture_time_spread({}) is None
+
+
+def test_capture_time_spread_is_tiny_on_a_healthy_file():
+    """A file straight off the phone agrees with itself, so a spread threshold
+    does not fire on ordinary material."""
+    row = {"Keys:CreationDate": "2024:05:04 07:12:33+05:45",
+           "QuickTime:CreateDate": "2024:05:04 01:27:33",
+           "Track1:MediaCreateDate": "2024:05:04 01:27:33"}
+    seconds, _, _ = capture_time_spread(row)
+    assert seconds == 0.0
+
+
+def test_every_capture_tag_is_actually_requested_from_exiftool():
+    """A tag the scan does not ask for does not exist, however carefully
+    asset_datetime() ranks it.
+
+    This has bitten twice: OffsetTimeOriginal was missing from the request and
+    every Nepal photo landed 5h45m out; CreationDate was missing and 276 clips
+    kept the export date their QuickTime stamp had been rewritten to. Both
+    times the reader was right and the request was short.
+    """
+    from nepal.util.proc import EXIF_TAGS
+    missing = [t for t in CAPTURE_TAGS if f"-{t}" not in EXIF_TAGS]
+    assert missing == [], f"asset_datetime() reads {missing}, exiftool is never asked for them"
+
+
+def test_the_separate_offset_tags_are_requested_too():
+    """asset_datetime() falls back to these for a stamp with no inline zone."""
+    from nepal.util.proc import EXIF_TAGS
+    for tag in ("-OffsetTimeOriginal", "-OffsetTime", "-OffsetTimeDigitized"):
+        assert tag in EXIF_TAGS
+
+
+# -- what the frame is, not what the extension says ---------------------
+
+def test_frame_shape_reads_the_three_real_layouts():
+    """An Insta360 card holds all three under .insv and .lrv."""
+    from nepal.probe.manifest import frame_shape
+    assert frame_shape(3840, 1920) == "dual_fisheye"    # both circles in frame
+    assert frame_shape(1024, 512) == "dual_fisheye"     # its proxy
+    assert frame_shape(2880, 2880) == "single_fisheye"  # one lens of a pair
+    assert frame_shape(3840, 2160) == "flat"            # ordinary 4K
+    assert frame_shape(640, 360) == "flat"              # its proxy
+
+
+def test_frame_shape_of_the_unprobed_is_unknown_not_a_guess():
+    from nepal.probe.manifest import frame_shape
+    for w, h in ((None, None), (0, 0), (1920, 0), ("x", "y")):
+        assert frame_shape(w, h) == "unknown"
+
+
+def test_a_flat_clip_in_a_360_container_is_demoted():
+    """52 of this corpus's 130 minutes of camera video are flat 4K in .insv or
+    .lrv. Reprojecting them through v360 warps them, slowly."""
+    assert refine_kind("video360", 3840, 2160) == ("video_flat", "flat")
+    assert refine_kind("video360", 640, 360) == ("video_flat", "flat")
+
+
+def test_real_360_keeps_its_kind_and_gains_a_shape():
+    assert refine_kind("video360", 1024, 512) == ("video360", "dual_fisheye")
+    assert refine_kind("video360", 2880, 2880) == ("video360", "single_fisheye")
+
+
+def test_an_mp4_is_never_promoted_to_360_by_its_aspect():
+    """2:1 is a legitimate cinematic crop, not evidence of a fisheye."""
+    assert refine_kind("video_flat", 3840, 1920) == ("video_flat", None)
+    assert refine_kind("photo", 3840, 1920) == ("photo", None)
+
+
+def test_an_unprobed_360_file_keeps_the_benefit_of_the_doubt():
+    assert refine_kind("video360", None, None) == ("video360", None)

@@ -1,0 +1,108 @@
+"""Photo shots -- the stills that earn a place in a film made of motion.
+
+Roughly half the corpus is photographs, and until now none of it could reach
+the cut: a timeline slot points at a shot, and every shot belonged to a video
+recording. A trek is photographed as much as it is filmed, and Act 1 in
+particular is planning material that was never filmed at all.
+
+Stills are a seasoning. The film is motion; a held frame is punctuation, and
+too many turn a documentary into a slideshow. So the share of the runtime they
+may take is capped (``film.photo_share``) and only the best of them compete for
+it -- see ``nepal.select.allocate_photo_budget``.
+
+Scoring is deliberately narrow. Sharpness and exposure carry over from video
+unchanged. Stability and motion do not apply to a still and are left NULL
+rather than given a flattering default, because a photo would otherwise win
+every stability comparison against real footage by virtue of not moving.
+"""
+from __future__ import annotations
+
+import logging
+import math
+from typing import Any, Sequence
+
+import numpy as np
+
+from nepal.process import metrics
+
+log = logging.getLogger(__name__)
+
+# .heic is in PHOTO_EXT because iPhones shoot it by default, but Pillow cannot
+# decode HEIF on its own -- and a photo the pipeline classifies but cannot open
+# is worse than one it never saw, because it is counted as material and then
+# silently lost. On this corpus that was 339 of 706 photographs, very nearly
+# half. pillow-heif registers the opener when it is installed; heif_available()
+# reports the truth so the operator is told what to install rather than left
+# with a count of unreadable files.
+try:                                    # pragma: no cover - import-time probe
+    import pillow_heif as _pillow_heif
+    _pillow_heif.register_heif_opener()
+    _HEIF = True
+except Exception:                       # pragma: no cover - absent or broken
+    _HEIF = False
+
+HEIF_EXT = {".heic", ".heif"}
+
+
+def heif_available() -> bool:
+    """Whether .heic photographs can be decoded in this environment."""
+    return _HEIF
+
+
+def sharpness(img: np.ndarray) -> float:
+    """``log(var(Laplacian))`` -- deliberately the same function as S03.3.
+
+    A photograph and a frame of video end up in the same timeline, ranked by
+    the same score against the same ``quality_curves``, whose ``min_sharpness``
+    of 4.0 is a log value. Measuring stills on the raw variance instead put them
+    two orders of magnitude above every clip: the photo gate passed everything,
+    and ``technical_score`` saturated its tanh so that sharpness carried no
+    information at all in the choice of which stills to use.
+    """
+    return metrics.sharpness(metrics.to_gray(img))
+
+
+def exposure_penalty(img: np.ndarray) -> float:
+    """The spec's measure (S03.3): the fraction of the frame that is clipped.
+
+    Shared with video for the same reason as sharpness. An earlier version
+    added a penalty for drifting from mid-grey, which reads a snowfield at
+    altitude -- the subject of this film -- as a badly exposed photograph.
+    """
+    return metrics.exposure_penalty(metrics.to_gray(img))
+
+
+def slot_duration_s(aspect: float | None = None, *, base_s: float = 3.0,
+                    min_s: float = 2.0, max_s: float = 4.5) -> float:
+    """How long a still is held.
+
+    Long enough to read, short enough not to stall the cut. A panorama earns a
+    little longer because the eye has further to travel across it; S06 snaps
+    the value to the beat grid afterwards, so this is a preference rather than
+    a final duration.
+    """
+    if aspect and aspect > 2.0:
+        base_s *= 1.25
+    return float(min(max_s, max(min_s, base_s)))
+
+
+def technical_score(sharp: float, exposure_pen: float, *,
+                    sharp_ref: float = 8.0) -> float:
+    """One 0..1 number per still, for ranking stills against each other.
+
+    Sharpness is unbounded above and heavy-tailed, so it is squashed against a
+    reference rather than normalised across the set -- otherwise one macro shot
+    of lichen rescales every landscape into looking soft.
+    """
+    s = math.tanh(max(0.0, sharp) / max(sharp_ref, 1e-6))
+    return float(max(0.0, min(1.0, s * (1.0 - max(0.0, min(1.0, exposure_pen))))))
+
+
+def passes_gate(sharp: float, exposure_pen: float, curve: dict[str, float]) -> bool:
+    """The quality floor for the asset's source, reusing the video curves.
+
+    A photo is held on screen for three seconds with nothing moving to distract
+    from it, so it is judged at least as strictly as a frame of video.
+    """
+    return (sharp >= float(curve.get("min_sharpness", 0.0))
+            and exposure_pen <= float(curve.get("max_exposure_pen", 1.0)))

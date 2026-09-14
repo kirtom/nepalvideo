@@ -172,6 +172,25 @@ def parse_offset(value: Any) -> timezone | None:
     return timezone(delta if m.group("sign") == "+" else -delta)
 
 
+# Capture-time tags in order of authority.
+#
+# CreationDate is Apple's com.apple.quicktime.creationdate, which exiftool
+# reports as Keys:CreationDate. It is the only capture stamp in a .MOV that
+# carries its own UTC offset, and -- crucially -- the only one that survives
+# being exported, AirDropped or pulled out of iCloud. QuickTime:CreateDate and
+# the per-track MediaCreateDate are rewritten by those operations, so a phone's
+# whole library can arrive stamped with the minute it was copied. On this
+# corpus that is exactly what happened: 276 clips carried
+# QuickTime:CreateDate 2025-11-22 23:24-23:25 -- four-second intervals, the
+# signature of a batch export -- while Keys:CreationDate held the true
+# 2024-05-11 15:45:12+05:30. Reading CreateDate first put every one of them
+# eighteen months after the trek, outside every act, unreachable by the film.
+#
+# A JPEG or HEIC has no Keys group, so DateTimeOriginal still wins there.
+CAPTURE_TAGS = ("CreationDate", "DateTimeOriginal", "CreateDate",
+                "MediaCreateDate", "GPSDateTime")
+
+
 def asset_datetime(row: dict[str, Any], *,
                    assume_tz: timezone | None = None) -> datetime | None:
     """The device-reported capture time, with its zone resolved.
@@ -182,9 +201,11 @@ def asset_datetime(row: dict[str, Any], *,
     5 h 45 m -- which would land photos on the wrong day, corrupt the GPS
     interpolation in S02.2 and mis-assign acts. An inline zone on the
     timestamp itself still wins, since it is unambiguous.
+
+    Tags are tried in ``CAPTURE_TAGS`` order; see the note there for why
+    Apple's CreationDate outranks QuickTime's CreateDate.
     """
-    raw = exif_get(row, "DateTimeOriginal", "CreateDate", "MediaCreateDate",
-                   "GPSDateTime")
+    raw = exif_get(row, *CAPTURE_TAGS)
     if raw is None:
         return None
     if DATE_RE.search(str(raw)) and DATE_RE.search(str(raw)).group("tz"):
@@ -192,6 +213,87 @@ def asset_datetime(row: dict[str, Any], *,
     tz = parse_offset(exif_get(row, "OffsetTimeOriginal", "OffsetTime",
                                "OffsetTimeDigitized"))
     return parse_exif_datetime(raw, assume_tz=tz or assume_tz)
+
+
+def capture_time_spread(row: dict[str, Any], *,
+                        assume_tz: timezone | None = None
+                        ) -> tuple[float, str, str] | None:
+    """How far the container's capture-time tags disagree, and which two.
+
+    Returns ``(seconds, earliest_tag, latest_tag)`` or None when fewer than two
+    tags are present. A file whose own tags disagree by months is a file whose
+    timestamp has been rewritten, and the disagreement is the evidence: it is
+    worth reporting even once the right tag has been chosen, because it says
+    the material needs checking rather than trusting.
+    """
+    found: list[tuple[str, datetime]] = []
+    for tag in CAPTURE_TAGS:
+        raw = exif_get(row, tag)
+        if raw is None:
+            continue
+        dt = (parse_exif_datetime(raw) if (DATE_RE.search(str(raw))
+              and DATE_RE.search(str(raw)).group("tz"))
+              else parse_exif_datetime(raw, assume_tz=assume_tz))
+        if dt is not None:
+            found.append((tag, dt))
+    if len(found) < 2:
+        return None
+    lo = min(found, key=lambda kv: kv[1])
+    hi = max(found, key=lambda kv: kv[1])
+    return (hi[1] - lo[1]).total_seconds(), lo[0], hi[0]
+
+
+# What the frame's shape says about how it was shot. An Insta360 card holds
+# three different things under two extensions, and the extension distinguishes
+# none of them:
+#
+#   3840x1920, 1024x512   aspect 2.0   both fisheye circles in one frame
+#   2880x2880             aspect 1.0   ONE circular lens; its partner is the
+#                                      neighbouring _10_ / _00_ file
+#   3840x2160,  640x360   aspect 1.78  flat, single-lens, not 360 at all
+#
+# On this corpus that is 84 minutes of true 360, 21 minutes of lens pairs and
+# 52 minutes of flat 4K. Treating all of it as dual-fisheye reprojects flat
+# footage through v360 -- the wrong output, produced the slowest possible way --
+# and made the FOV solve measure a stitch seam on frames that have no seam.
+DUAL_FISHEYE_ASPECT = (1.85, 2.15)
+SINGLE_FISHEYE_ASPECT = (0.9, 1.15)
+
+
+def frame_shape(width: Any, height: Any) -> str:
+    """'dual_fisheye' | 'single_fisheye' | 'flat' | 'unknown' from the frame."""
+    try:
+        w, h = float(width), float(height)
+    except (TypeError, ValueError):
+        return "unknown"
+    if w <= 0 or h <= 0:
+        return "unknown"
+    aspect = w / h
+    if DUAL_FISHEYE_ASPECT[0] <= aspect <= DUAL_FISHEYE_ASPECT[1]:
+        return "dual_fisheye"
+    if SINGLE_FISHEYE_ASPECT[0] <= aspect <= SINGLE_FISHEYE_ASPECT[1]:
+        return "single_fisheye"
+    return "flat"
+
+
+def refine_kind(kind: str, width: Any, height: Any) -> tuple[str, str | None]:
+    """Correct a path-derived kind against the frame, returning (kind, shape).
+
+    ``classify`` is a pure function of the path and stays that way -- it runs
+    before anything has been probed. This is the second pass, once the frame
+    size is known, and it only ever *demotes*: a .insv that turns out to be
+    16:9 is flat footage in a 360 container, but an .mp4 is never promoted to
+    360 on the strength of its aspect alone, since 2:1 is a legitimate
+    cinematic crop.
+    """
+    if kind != "video360":
+        return kind, None
+    shape = frame_shape(width, height)
+    if shape == "flat":
+        return "video_flat", shape
+    if shape == "unknown":
+        return kind, None
+    return "video360", shape
 
 
 def parse_gps(row: dict[str, Any]) -> tuple[float | None, float | None, float | None]:
@@ -242,13 +344,31 @@ def parse_duration(value: Any) -> float | None:
     return float(m.group(1)) if m else None
 
 
-def walk_media(root: Path, *, skip_hidden: bool = True) -> list[Path]:
-    """Every regular file under root, sorted for deterministic asset ordering."""
+# Directories that turn up inside a delivered nepal_data/ but are not media.
+# The AWS CLI installer alone is 272 MB and 5,875 .rst files, which would
+# outnumber the actual footage in the manifest and pollute every count the
+# operator reads at the Milestone 1 checkpoint.
+DEFAULT_EXCLUDE_DIRS = frozenset({
+    "aws", "work", "node_modules", "__pycache__", "venv", ".venv",
+    "$RECYCLE.BIN", "System Volume Information", "lost+found",
+})
+
+
+def walk_media(root: Path, *, skip_hidden: bool = True,
+               exclude_dirs: frozenset[str] | set[str] | None = None) -> list[Path]:
+    """Every regular media-bearing file under root, sorted for deterministic
+    asset ordering. Excluded directories are pruned rather than filtered, so a
+    large tree of irrelevant files costs nothing to skip."""
+    excluded = {d.lower() for d in
+                (DEFAULT_EXCLUDE_DIRS if exclude_dirs is None else exclude_dirs)}
     out: list[Path] = []
     for p in sorted(root.rglob("*")):
         if not p.is_file():
             continue
-        if skip_hidden and any(part.startswith(".") for part in p.relative_to(root).parts):
+        parts = p.relative_to(root).parts
+        if skip_hidden and any(part.startswith(".") for part in parts):
+            continue
+        if any(part.lower() in excluded for part in parts[:-1]):
             continue
         out.append(p)
     return out

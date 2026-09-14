@@ -54,23 +54,84 @@ def test_fov_recovers_the_projected_lens_fov(probed):
 
 
 @needs_tools
-@pytest.mark.parametrize("device", ["keller", "kulikov"])
-def test_clock_offsets_recover_the_planted_skew(probed, device):
-    """Device timestamps are whole-second, so 1 s is the honest tolerance --
-    the correlation itself resolves far finer than the metadata does."""
-    truth, report, _ = probed
-    got = report["clock"][device]["offset_s"]
-    want = truth[f"true_{device}_offset_s"]
-    assert abs(got - want) <= 1.0, f"{device}: got {got}, want {want}"
-    assert not report["clock"][device]["needs_manual"]
+def test_reference_clock_is_the_gps_validated_phone(probed):
+    """The spec nominates the camera as reference. On material where the
+    camera's battery went flat that is the one clock that is provably wrong,
+    while phone photos carry satellite time. The evidence must decide."""
+    truth, report, cfg = probed
+    from nepal import db
+    conn = db.init(cfg.db_path)
+    assert db.get_decision(conn, "clock_reference") == truth["reference_clock"]
+    assert db.get_decision_float(conn, "clock_vs_gps_phone_keller_s") == pytest.approx(0.0, abs=2)
+    conn.close()
 
 
 @needs_tools
-def test_unrelated_audio_pairs_are_rejected(probed):
-    """kulikov has a decoy clip sharing no sound with any camera take."""
+def test_reference_device_takes_zero_offset(probed):
     _, report, _ = probed
-    k = report["clock"]["kulikov"]
-    assert k["pairs_accepted"] < k["pairs_total"]
+    assert report["clock"]["keller"]["offset_s"] == pytest.approx(0.0, abs=1.0)
+
+
+@needs_tools
+def test_second_phone_offset_recovered(probed):
+    """Device timestamps are whole-second, so 1 s is the honest tolerance --
+    the correlation resolves far finer than the metadata does."""
+    truth, report, _ = probed
+    got = report["clock"]["kulikov"]["offset_s"]
+    assert abs(got - truth["true_kulikov_offset_s"]) <= 1.0
+    assert not report["clock"]["kulikov"]["needs_manual"]
+
+
+@needs_tools
+def test_fourteen_day_camera_clock_error_is_recovered(probed):
+    """The headline case. A flat battery resets an action camera's clock, and
+    the resulting error is thousands of times wider than the +/-600 s window
+    GCC-PHAT searches. Coincidence voting proposes candidates, audio picks
+    the right one and refines it to sub-second."""
+    truth, report, _ = probed
+    got = report["clock"]["camera"]["offset_s"]
+    want = truth["true_camera_offset_s"]
+    assert abs(got - want) <= 1.0, f"got {got}, want {want}"
+    assert abs(got - want) < 86400, "must not be a whole-day shift out"
+    assert not report["clock"]["camera"]["needs_manual"]
+    assert report["clock"]["camera"]["pairs_accepted"] >= 3
+
+
+@needs_tools
+def test_camera_corrected_time_lands_inside_the_trek(probed):
+    """The point of the correction: after it, camera recordings sit inside the
+    window the phones describe, which is what every downstream join needs."""
+    from nepal import db
+    _, _, cfg = probed
+    conn = db.init(cfg.db_path)
+    row = conn.execute(
+        "SELECT MIN(created_at_utc) lo, MAX(created_at_utc) hi FROM assets "
+        "WHERE source='camera' AND created_at_utc IS NOT NULL").fetchone()
+    phone = conn.execute(
+        "SELECT MIN(created_at_utc) lo, MAX(created_at_utc) hi FROM assets "
+        "WHERE source LIKE 'phone_%' AND created_at_utc IS NOT NULL").fetchone()
+    conn.close()
+    assert row["lo"] and phone["lo"]
+    from datetime import datetime, timedelta
+    cam_lo = datetime.fromisoformat(row["lo"])
+    ph_lo = datetime.fromisoformat(phone["lo"])
+    ph_hi = datetime.fromisoformat(phone["hi"])
+    assert ph_lo - timedelta(days=1) <= cam_lo <= ph_hi + timedelta(days=1), \
+        f"camera {cam_lo} outside phone window {ph_lo}..{ph_hi}"
+
+
+@needs_tools
+def test_only_confident_audio_pairs_are_accepted(probed):
+    """Checked on the camera, which is the device that still solves by audio
+    now that GPS-carrying phones take their offset from satellite time. Pair
+    rejection itself is covered directly in tests/test_clock.py, including a
+    decoy that shares no sound with anything."""
+    _, report, _ = probed
+    c = report["clock"]["camera"]
+    assert c["pairs_total"] >= 1, "the camera should have candidate pairs"
+    assert c["pairs_accepted"] >= 1
+    assert c["pairs_accepted"] <= c["pairs_total"]
+    assert not c["needs_manual"]
 
 
 @needs_tools
@@ -90,6 +151,21 @@ def test_chapters_collapse_into_one_recording(probed):
 def test_camera_reports_no_gps(probed):
     _, report, _ = probed
     assert report["gps_check"]["camera_has_gps"] is False
+
+
+@needs_tools
+def test_timezone_offset_tag_is_actually_requested(probed):
+    """Regression guard for a bug that unit tests could not catch: the code
+    read OffsetTimeOriginal but exiftool was never asked for it, so every
+    Nepal photo was parsed 5h45m off. The GPS comparison exposes it -- a
+    +20700 s median is exactly that timezone leaking through."""
+    from nepal import db
+    _, _, cfg = probed
+    conn = db.init(cfg.db_path)
+    delta = db.get_decision_float(conn, "clock_vs_gps_phone_keller_s")
+    conn.close()
+    assert delta is not None, "no GPS/clock comparison was recorded"
+    assert abs(delta) < 60, f"device clock sits {delta}s from GPS -- timezone leak?"
 
 
 @needs_tools
@@ -124,3 +200,40 @@ def test_rerun_is_idempotent_and_resumable(probed):
     again = s01_probe.run(cfg)
     assert again["manifest"] == {"skipped": "already done"}
     assert again["fov"]["skipped"] == "already done"
+
+
+# -- GPS evidence outranks the audio solve -----------------------------
+
+@needs_tools
+def test_a_gps_carrying_phone_gets_its_offset_from_satellite_time(probed):
+    """The bug this guards, from real material: kulikov's phone agreed with
+    satellite time to 1.0 s over 292 photos and keller's to 1.0 s over 338, so
+    the true offset between them was zero -- but GCC-PHAT returned 6781 s at
+    confidence 0.04 with 23 s of scatter across five pairs, and that was
+    applied. Nearly two hours of spurious correction, from the weakest evidence
+    available, overriding the strongest."""
+    truth, report, _ = probed
+    k = report["clock"]["kulikov"]
+    assert "GPS-derived" in k["method"], f"still solving by audio: {k['method']}"
+    assert k["confidence"] == 1.0
+    assert abs(k["offset_s"] - truth["true_kulikov_offset_s"]) <= 1.0
+
+
+@needs_tools
+def test_the_camera_still_uses_audio_since_it_carries_no_gps(probed):
+    """Audio cross-correlation is not abandoned -- it is the right tool for a
+    device with no satellite evidence, which is exactly the camera."""
+    _, report, _ = probed
+    c = report["clock"]["camera"]
+    assert "gcc-phat" in c["method"] or "coarse" in c["method"]
+    assert "GPS-derived" not in c["method"]
+
+
+@needs_tools
+def test_assets_contradicting_their_own_gps_time_are_restamped(probed):
+    """A device-wide offset cannot fix one asset whose stamp is simply wrong.
+    On real material a group of 276 assets carried a date eighteen months out
+    while their GPS placed them on the trek -- a batch file-transfer date."""
+    _, report, _ = probed
+    assert "n_restamped_from_gps" in report["manifest"]
+    assert report["manifest"]["n_restamped_from_gps"] >= 0

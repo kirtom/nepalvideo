@@ -3,11 +3,15 @@
 
 project:
   name: nepal
-  # Where the raw tree lives when running locally (Milestone 1-2).
-  data_root: ./nepal_data
-  # Working directory for derived artefacts.
-  work_root: ./work
-  db_path: ./work/db/nepal.sqlite
+  # The delivered media tree. Absolute, so it is unambiguous.
+  data_root: /data/projects/nepal_data
+  # Derived artefacts: proxies, yaw views, sampled frames, audio, reports.
+  # Kept on the same volume as the media rather than inside the repository,
+  # because S03 writes a 540p equirect proxy plus four rectilinear yaw views
+  # and a 16 kHz audio track for every recording -- on the order of 10-15 GB
+  # for 4.9 hours of footage, which does not belong on a system disk.
+  work_root: /data/projects/nepal_work
+  db_path: /data/projects/nepal_work/db/nepal.sqlite
 
 aws:
   region: eu-north-1
@@ -16,20 +20,64 @@ aws:
   proxy_only: false
 
 film:
-  total_duration_s: 1200
-  short_duration_s: 180
+  # The film aims for the target and moves either way as the material warrants.
+  # Twenty minutes is the length the creative brief was written for, so a longer
+  # cut has to earn it rather than happen by default -- but the target is not a
+  # cap, and it is not a floor either. Where the material will not carry twenty
+  # minutes, fifteen is a better film than twenty padded out.
+  min_duration_s:  900           # 15 min -- shorter than this is not the film
+  target_duration_s: 1200        # 20 min -- what it aims for
+  max_duration_s: 2400           # 40 min -- hard ceiling
+  short_duration_s: 180          # the 3 min cut
   shot_count_min: 150
   shot_count_max: 200
   duration_tolerance_s: 30
+  # How readily the film grows past the target. 0 pins it at the target
+  # regardless of material; 1 extends to whatever the material supports. Low by
+  # design -- surplus footage is a weak reason to make a film longer.
+  growth_bias: 0.35
+  # The film is motion; stills are punctuation. This is the share of each act's
+  # runtime that photographs may occupy -- applied per act, so it cannot pool
+  # into one place and turn Act 1 into a slideshow. Only the best stills compete
+  # for it; they are never ranked against footage, which they would either lose
+  # to everywhere or beat unfairly (a photograph wins every stability contest by
+  # not moving).
+  photo_share: 0.10
+  # Per-act overrides. Act 4 is the one worth a deliberate decision: the brief
+  # makes it one swell into a hard cut to silence. Set it to 0.0 to keep stills
+  # out of the summit entirely.
+  photo_share_by_act: {}
+  # The pre-title sequence: 15-25 s from Act 3 or 4, then a hard cut to a title
+  # card. Carved off the top, so the acts are allocated over the remainder. This
+  # is the one deliberate break in chronology.
+  cold_open_s: 20
+  # How much keepable footage a minute of finished film is cut from. The film
+  # counts nothing as surplus until it has this many times its own length in
+  # shots that survive the quality gate.
+  material_selectivity: 3.0
 
-# Act targets. duration_frac sums to 1.0; absolute targets derived from
-# film.total_duration_s. Ranges are the spec's stated minutes.
+# Act allocation. target_s is where each act sits at the 20-minute target and
+# sums to it; min_s and max_s bound how far it may move as the total changes.
+#
+# The bounds are deliberately asymmetric. Acts 2, 3 and 5 are the journey and
+# absorb almost all of any extra length. Act 4 barely moves: the brief describes
+# it as a peak swell and a hard cut to silence, which is a beat rather than a
+# phase, and at 45 minutes a linear share would make it four minutes long --
+# no longer the single most powerful move in the film but a section of it.
+# Act 1 is capped too; beyond about five minutes, Telegram screenshots drag
+# however good they are.
+# Act 1 is half what it was. Nearly three minutes of planning before anything
+# happens is a long time to ask for in a twenty-minute film, and it is the
+# thinnest act in the corpus -- seventeen pre-trek clips and sixty-two
+# photographs across two and a half months. The time moves to Act 5, which is no
+# longer only the descent: "walked down" is not an ending, and the return
+# through Kathmandu, the Delhi layover and the flight home is a better one.
 acts:
-  - {act: 1, name: Planning,       min_s: 120, max_s: 180}
-  - {act: 2, name: Approach,       min_s: 240, max_s: 300}
-  - {act: 3, name: Climb,          min_s: 360, max_s: 420}
-  - {act: 4, name: Highest point,  min_s:  90, max_s: 120}
-  - {act: 5, name: Descent,        min_s: 180, max_s: 240}
+  - {act: 1, name: Planning,          target_s:  83, min_s:  45, max_s:  180}
+  - {act: 2, name: Approach,          target_s: 287, min_s: 150, max_s:  700}
+  - {act: 3, name: Climb,             target_s: 407, min_s: 240, max_s: 1150}
+  - {act: 4, name: Highest point,     target_s: 113, min_s:  90, max_s:  150}
+  - {act: 5, name: Descent and return, target_s: 311, min_s: 150, max_s:  700}
 
 probe:
   # S01.4 fisheye FOV auto-solve
@@ -51,14 +99,34 @@ probe:
     max_audio_s: 120
     min_pair_confidence: 1.5
     min_confident_pairs: 3
+    # Stage 1: bulk offset from capture-activity histograms, for a device whose
+    # clock is days out (a flat battery resets an action camera's clock).
+    coarse_bin_s: 3600
+    coarse_max_offset_s: 3888000     # 45 days
   # S01.2 chapter grouping acceptance
   max_chapter_gap_s: 1.0
 
 spine:
+  # Reference data. Both are optional: absent, altitude and place names stay
+  # null and the stage reports it rather than failing.
+  srtm_dir: ./data/srtm             # SRTM .hgt tiles (see tools/fetch_reference.py)
+  geonames_path: ./data/geonames/NP.txt
   # S02.2 refuse to interpolate across gaps longer than this
   max_interp_gap_s: 14400     # 4 hours
   # S02.4 cluster distinct locations to ~500 m before reverse geocoding
   geocode_cluster_m: 500
+  # Act boundaries. The trek is the densest run of days with material; days
+  # separated by more than max_gap_days start a new run. Act 1 reaches back to
+  # the first planning material and Act 5 forward to the homecoming, both
+  # bounded -- without a bound, one mis-timestamped clip turns Act 5 into a
+  # 566-day act.
+  # Points further than this from the median position are not on the trek, so
+  # they are excluded from the envelope that classifies message phase. Generous
+  # enough to keep the trailhead city: Kathmandu is ~110 km from Manaslu.
+  trek_radius_km: 200
+  act_max_gap_days: 3
+  act_planning_window_days: 180
+  act_after_window_days: 30
   # S02.5 message classification
   notable_window_s: 1200      # 20 min around an altitude-gain local max
   card_max_chars: 180         # "short, self-contained, quotable"
@@ -70,26 +138,93 @@ spine:
   swell_percentile: 75
 
 process:
-  # S03.2 shot detection
+  # -- S03.0 stills ---------------------------------------------------
+  # Photographs are decoded at this size for the sharpness and exposure
+  # measures -- full resolution changes the numbers very little and costs a
+  # great deal on seven hundred files.
+  photo_analysis_px: 1024
+  # How long a still is held before S06 snaps it to the beat grid. Long enough
+  # to read, short enough not to stall the cut; a panorama earns 25% longer.
+  photo_slot_s: 3.0
+  # Threads for decoding. libheif releases the GIL and decoding dominates the
+  # cost, so this scales very nearly linearly -- 3.7x on four cores, with
+  # identical measurements. 0 means one per core.
+  photo_workers: 0
+
+  # -- S03.1 proxies --------------------------------------------------
+  # Proxy frame rate. Shot detection and metric sampling do not need thirty
+  # frames a second, and v360 is the whole cost of S03.1, so halving the frames
+  # halves the pass. 0 keeps the source rate.
+  proxy_fps: 15
+  # x264 preset for proxies. These are watched by a scene detector and sampled
+  # for metrics, never delivered, so encoding effort buys nothing: measured 3.9s
+  # at medium against 1.9s at veryfast for the same clip and the same file size.
+  encoder_preset: veryfast
+  # The equirect proxy. Its only consumers are shot detection and metric
+  # sampling -- the Gate 3 draft renders 360 material from yaw views, not from
+  # this -- so 640x320 is a legitimate trade if v360 is taking too long. It is
+  # the one remaining lever on S03.1's cost.
+  proxy_size: [1024, 512]
+  flat_proxy_size: [960, 540]
+  # Phase A writes the equirect proxy and audio only: 3.46x realtime against
+  # 0.73x for the specification's single pass, because each of the four
+  # rectilinear branches re-resamples the whole frame. S05 needs one yaw per
+  # surviving shot, not four per recording, so those are rendered as stills
+  # later. Set true to reproduce the single-pass design.
+  yaw_videos: false
+  # A pass running many times longer than its own footage is wedged, not slow.
+  # Bounded so one bad file reports itself and the rest of the corpus still runs.
+  ffmpeg_timeout_factor: 20
+  ffmpeg_min_timeout_s: 300
+
+  # -- S03.2 shot detection -------------------------------------------
+  # PySceneDetect ContentDetector (spec section S03.2).
   scene_threshold: 27.0
-  min_shot_len_s: 1.5
-  # S03.3
+  min_shot_s: 1.5
+  # A 360 camera on a walking person does not cut: 395 of 480 recordings came
+  # back with no detected boundary at all, one of them 29 minutes long. A shot
+  # is what the timeline chooses between and what a metric describes, and
+  # neither survives that length, so anything longer is divided into equal
+  # pieces of about this size. 0 disables the division.
+  max_shot_s: 20.0
+
+  # -- S03.3 technical metrics ----------------------------------------
+  # Sample points per shot. Five is the spec; each costs one seek plus three
+  # decoded frames, so the whole corpus is minutes, not hours.
   metric_samples_per_shot: 5
-  # S03.4 wind detection
+  # Frames read at each sample point. Three gives two consecutive flow fields,
+  # and it is the CHANGE between them -- the jerk -- that separates a shaky
+  # clip from one that is merely moving. Two frames cannot tell those apart.
+  metric_frames_per_sample: 3
+  # Flow is computed at this width. Farneback cost is per-pixel and shake is a
+  # low-frequency signal; measuring it at proxy resolution buys nothing.
+  metric_flow_px: 320
+  # Jerk, in pixels per frame squared at metric_flow_px, at which a shot scores
+  # half stable. A locked-off camera sits near zero, a hand-held phone while
+  # walking runs a few pixels. A calibration point, not a law: S03.3 logs the
+  # distribution it measured so this can be moved against real material.
+  metric_jerk_ref_px: 4.0
+  # Threads for sampling. Decoding releases the GIL. 0 means one per core.
+  metric_workers: 0
+
+  # -- S03.4 audio ----------------------------------------------------
+  # Wind: a shot whose energy below the cutoff exceeds this share of the total
+  # is roaring, not recording.
   wind_lf_ratio: 0.80
   wind_lf_cutoff_hz: 200
-  # S03.1 proxy sizes
-  proxy_eq: [1024, 512]
-  proxy_view: [960, 540]
-  yaws: [0, 90, 180, 270]
-  view_h_fov: 100
-  view_v_fov: 70
 
-# S03.7 quality gate — one curve per source class.
+# S03.7 quality gate -- one curve per source class (spec section S03.7).
 quality_curves:
   camera:   {min_sharpness: 4.0, max_exposure_pen: 0.15, min_stability: 0.35, min_duration_s: 1.5}
   phone:    {min_sharpness: 3.5, max_exposure_pen: 0.20, min_stability: 0.30, min_duration_s: 1.5}
   telegram: {min_sharpness: 2.0, max_exposure_pen: 0.35, min_stability: 0.15, min_duration_s: 1.0}
+
+# A shot carrying speech is judged on a floor of its own: the spec makes voice
+# the spine of the film (section 1.4), and a soft frame under a good sentence is
+# worth more than a sharp frame of nothing. Applied only where has_speech = 1.
+gate:
+  speech_sharpness_factor: 0.6
+  speech_min_duration_s: 1.0
 
 semantic:
   max_caption_shots: 2500     # THE ONLY UNBOUNDED COST — spec section 8.1
@@ -119,14 +254,40 @@ assemble:
     4: [2.0, 4.0]
     5: [5.0, 8.0]
   act4_held_shot_s: [6.0, 10.0]
-  silence_window_s: 3.0
+  # A hard cut to silence needs room to land; three seconds is a gap, five is a
+  # held breath.
+  silence_window_s: 5.0
+  # Music-out windows: no music at all, original audio at full level, placed at
+  # the highest-exertion moments S05 finds. At -14 LUFS music with everything
+  # ducked to -28 under it, location sound is inaudible for the whole runtime --
+  # which throws away breathing at five thousand metres, wind, boots on scree.
+  natural_sound_windows: 4
+  natural_sound_window_s: [10.0, 20.0]
   max_reassembly_loops: 3
 
 render:
   draft: {width: 960, height: 540, crf: 23}
-  music_lufs: -14.0
-  duck_lufs: -28.0
-  duck_lufs_speech: -22.0
+  music_lufs: -14.0            # the music bed
+  duck_lufs: -28.0             # location audio under the bed
+  duck_lufs_speech: -22.0      # music under speech
 
 music:
-  license_mode: personal       # personal | cleared — OPEN QUESTION 5
+  # How long one piece may play before the film moves to another. Without a cap
+  # a long track swallows its act -- a 9-minute one covered the whole 6.8-minute
+  # Climb, leaving the centre of the film on a single cue while 19 other tracks
+  # went unused. An act shorter than this stays in one piece, so Act 4 keeps the
+  # unbroken swell into the silence that the brief asks for.
+  max_segment_s: 150
+  license_mode: personal       # personal | cleared
+  # Source of track features: audio files in music/, or a playlist export.
+  # Audio is strictly better: it yields real beat grids and swells (which S06
+  # needs to snap cuts) and real dynamic range, which Act 3's target leans on
+  # and which no playlist export provides.
+  source: audio                # audio | playlist | auto
+  playlist_csv: null           # path; null means "the only .csv under music/"
+  # To exclude a track, take it out of music/. The folder is the source of
+  # truth; a name-matching filter here only risked dropping the wrong thing
+  # (Aria, Pilot, Bravo, Kino and Husky are all names of unrelated bands).
+  # Optional: drop tracks below this Spotify instrumentalness (playlist source
+  # only -- an mp3 carries no such field). Off by default.
+  min_instrumentalness: null

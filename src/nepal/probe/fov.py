@@ -93,13 +93,25 @@ class FovResult:
 
 def solve_from_scores(per_frame: Sequence[dict[int, float]], *,
                       min_confidence: float = 0.05,
-                      fallback_deg: float = 193.0) -> FovResult:
+                      fallback_deg: float = 193.0,
+                      neighbour_steps: int = 1) -> FovResult:
     """Reduce per-frame per-FOV discontinuity scores to one FOV.
 
     ``per_frame`` is one dict {fov: discontinuity} per sampled frame. The
     median across frames is taken per FOV (step 4 of the spec), then argmin.
-    Confidence is 1 - best/second_best: 0 when two candidates tie, approaching
-    1 when the winner is far clearer than the runner-up.
+
+    Confidence is 1 - best/reference, but the reference is deliberately *not*
+    the runner-up. Candidates are 2 deg apart, so 192, 194 and 196 reproject to
+    almost the same image and their seam scores are almost the same number: a
+    near-tie between neighbours is the resolution limit of the sweep, not
+    ambiguity about the answer. Scoring it as ambiguity made the measure report
+    ~0 for every input, clean parabola or flat noise alike -- on real material
+    it returned 0.012 with a perfectly ordinary minimum at 194.
+
+    The reference is therefore the best candidate at least ``neighbour_steps``
+    positions away from the winner, which asks the question that matters: is
+    there a localized minimum here, or is the curve flat? A parabola whose
+    tails are 20% worse scores 0.17; noise within 1% scores 0.01.
     """
     if not per_frame:
         return FovResult(fallback_deg, 0.0, "fallback:no-frames", {}, 0, True)
@@ -118,16 +130,41 @@ def solve_from_scores(per_frame: Sequence[dict[int, float]], *,
     if len(ranked) < 2:
         return FovResult(float(best_fov), 0.0, "seam-min:single-candidate",
                          medians, len(per_frame), False)
-    _, second = ranked[1]
-    confidence = 1.0 - (best / (second + EPS))
+
+    order = sorted(medians)                      # candidates by FOV, ascending
+    at = order.index(best_fov)
+    far = [medians[f] for i, f in enumerate(order) if abs(i - at) > neighbour_steps]
+    reference = min(far) if far else ranked[1][1]
+    confidence = 1.0 - (best / (reference + EPS))
 
     if confidence < min_confidence:
-        # No clear winner. Spec: fall back and surface at Gate 1 with thumbnails.
+        # No localized minimum. Spec: fall back and surface at Gate 1 with
+        # thumbnails -- `nepal fov-check` renders them.
         return FovResult(fallback_deg, round(confidence, 4),
                          f"fallback:low-confidence(argmin={best_fov})",
                          medians, len(per_frame), True)
     return FovResult(float(best_fov), round(confidence, 4), "seam-min",
                      medians, len(per_frame), False)
+
+
+def score_curve(medians: dict[int, float], width: int = 42) -> list[str]:
+    """The score curve as text, so its shape is readable without an image.
+
+    A clean U with one bottom is a good solve; a flat or double-bottomed line
+    is the operator's cue to trust the thumbnails over the number.
+    """
+    if not medians:
+        return []
+    lo, hi = min(medians.values()), max(medians.values())
+    span = (hi - lo) or 1.0
+    best = min(medians, key=lambda f: medians[f])
+    out = []
+    for f in sorted(medians):
+        v = medians[f]
+        bar = "#" * max(1, int(round((v - lo) / span * width)))
+        out.append(f"  {f:>3} deg  {v:8.5f}  {bar}"
+                   f"{'   <-- lowest seam discontinuity' if f == best else ''}")
+    return out
 
 
 # -- orchestration (needs ffmpeg) --------------------------------------
@@ -221,3 +258,51 @@ def pick_textured_frames(candidates: Sequence[tuple[Path, float, float]],
             break
 
     return picked[:n_frames]
+
+
+# -- Gate 1 thumbnails -------------------------------------------------
+
+def seam_strip(img: np.ndarray, seam_frac: float, crop_w: int = 200,
+               height_frac: float = 0.5) -> np.ndarray:
+    """A crop centred on one seam meridian, for looking at rather than scoring.
+
+    Only the middle band of the height is kept. An equirectangular frame is
+    wildly stretched at the poles, where a join is both unreadable and least
+    important; the horizon is where a bad stitch shows.
+    """
+    h, w = img.shape[:2]
+    x = int(round(w * seam_frac))
+    half = max(1, crop_w // 2)
+    lo, hi = max(0, x - half), min(w, x + half)
+    band = max(1, int(round(h * height_frac)))
+    top = max(0, (h - band) // 2)
+    return img[top:top + band, lo:hi]
+
+
+def contact_sheet(rows: "Sequence[tuple[str, np.ndarray]]", dest: "Path",
+                  *, pad: int = 6, label_w: int = 74) -> "Path":
+    """Stack labelled image rows into one PNG.
+
+    The operator's question at Gate 1 is "which of these looks right", and that
+    is answered by putting the candidates next to each other rather than in ten
+    separate files.
+    """
+    from PIL import Image, ImageDraw
+    if not rows:
+        raise ValueError("nothing to render")
+    tiles = [(label, np.asarray(a)) for label, a in rows]
+    cell_h = max(t.shape[0] for _, t in tiles)
+    cell_w = max(t.shape[1] for _, t in tiles)
+    sheet = Image.new("RGB",
+                      (label_w + cell_w + pad * 2,
+                       (cell_h + pad) * len(tiles) + pad),
+                      (18, 18, 20))
+    draw = ImageDraw.Draw(sheet)
+    for i, (label, arr) in enumerate(tiles):
+        y = pad + i * (cell_h + pad)
+        a = arr if arr.ndim == 3 else np.stack([arr] * 3, axis=-1)
+        sheet.paste(Image.fromarray(a.astype(np.uint8)), (label_w, y))
+        draw.text((6, y + cell_h // 2 - 4), label, fill=(235, 235, 235))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(dest)
+    return dest

@@ -28,6 +28,9 @@ import numpy as np
 log = logging.getLogger(__name__)
 EPS = 1e-12
 
+# Below this, a coarse alignment is not decisive against a whole-day shift.
+DIURNAL_CONFIDENCE = 1.35
+
 
 def gcc_phat(a: np.ndarray, b: np.ndarray, fs: int,
              max_lag_s: float = 600.0,
@@ -158,6 +161,191 @@ def reduce_measurements(device: str, measurements: Sequence[PairMeasurement], *,
         n_pairs_total=len(measurements), n_pairs_accepted=len(good),
         spread_s=round(spread, 3), measurements=measurements,
     )
+
+
+# -- coarse alignment --------------------------------------------------
+
+def activity_histogram(times: Sequence[datetime], t0: datetime, bin_s: float,
+                       n_bins: int) -> "np.ndarray":
+    """Capture counts per time bin, on an absolute grid starting at ``t0``."""
+    h = np.zeros(n_bins, dtype=float)
+    for t in times:
+        i = int((t - t0).total_seconds() // bin_s)
+        if 0 <= i < n_bins:
+            h[i] += 1.0
+    return h
+
+
+def coarse_offset_by_activity(reference: Sequence[datetime], target: Sequence[datetime],
+                              *, bin_s: float = 3600.0,
+                              max_offset_s: float = 45 * 86400.0) -> tuple[float, float]:
+    """Bulk clock error between two devices, for clocks that are days apart.
+
+    GCC-PHAT searches +/- 600 s. An action camera whose battery went flat
+    reverts its clock to the firmware epoch and can come back days or years
+    out -- a gap thousands of times wider than that window, which the audio
+    stage would simply never find.
+
+    Both devices were carried by people doing the same thing at the same
+    times: filming in the mornings, resting at midday, asleep at night. So
+    their capture-activity histograms have the same shape, and the lag that
+    best aligns them is the bulk clock error. Cross-correlating counts per
+    hour recovers it without decoding a single frame.
+
+    Returns ``(offset_s, confidence)`` where offset_s is what to ADD to the
+    target's timestamps, and confidence is the peak-to-runner-up ratio.
+
+    Note the one ambiguity this method cannot resolve on its own: trek activity
+    is diurnal, so a whole-day shift correlates nearly as well as the truth and
+    confidence stays modest (around 1.2) even when the answer is right. Days
+    that differ from each other -- a rest day, the summit push, a travel day --
+    are what break the tie, so real corpora score better than a synthetic
+    one. A one-day error is beyond what the +/-600 s audio stage can repair,
+    so anything below ``DIURNAL_CONFIDENCE`` must reach the operator at
+    Gate 1 rather than being applied silently.
+    """
+    if not reference or not target:
+        return 0.0, 0.0
+
+    t0 = min(min(reference), min(target)) - timedelta(seconds=max_offset_s)
+    t1 = max(max(reference), max(target)) + timedelta(seconds=max_offset_s)
+    n_bins = int((t1 - t0).total_seconds() // bin_s) + 1
+    if n_bins > 2_000_000:                     # guard a pathological span
+        bin_s = (t1 - t0).total_seconds() / 500_000
+        n_bins = int((t1 - t0).total_seconds() // bin_s) + 1
+
+    ref_h = activity_histogram(reference, t0, bin_s, n_bins)
+    tgt_h = activity_histogram(target, t0, bin_s, n_bins)
+    if ref_h.sum() == 0 or tgt_h.sum() == 0:
+        return 0.0, 0.0
+
+    ref_h = (ref_h - ref_h.mean()) / (ref_h.std() + EPS)
+    tgt_h = (tgt_h - tgt_h.mean()) / (tgt_h.std() + EPS)
+
+    corr = np.correlate(ref_h, tgt_h, mode="full")
+    lags = np.arange(-(len(tgt_h) - 1), len(ref_h))
+    keep = np.abs(lags * bin_s) <= max_offset_s
+    corr, lags = corr[keep], lags[keep]
+    if corr.size == 0:
+        return 0.0, 0.0
+
+    peak_i = int(np.argmax(corr))
+    peak = float(corr[peak_i])
+    offset_s = float(lags[peak_i] * bin_s)
+
+    guard = max(1, int(6 * 3600 / bin_s))      # ignore the peak's own shoulders
+    masked = corr.copy()
+    masked[max(0, peak_i - guard): peak_i + guard + 1] = -np.inf
+    runner = float(masked.max()) if np.isfinite(masked).any() else 0.0
+    confidence = peak / abs(runner) if runner not in (0.0, -np.inf) and abs(runner) > EPS \
+        else float("inf")
+    return offset_s, float(confidence)
+
+
+def coarse_candidates(reference: Sequence[datetime], target: Sequence[datetime],
+                      *, bin_s: float = 3600.0, max_offset_s: float = 45 * 86400.0,
+                      top_n: int = 3) -> list[tuple[float, float]]:
+    """The best few coarse alignments, as (offset_s, correlation).
+
+    When the diurnal ambiguity bites, the runner-up is a whole-day shift of
+    the winner. Showing the operator "14 days, or 13, or 15" at Gate 1 is a
+    question they can answer in seconds from memory; showing one number they
+    cannot check is how a wrong film gets made.
+    """
+    if not reference or not target:
+        return []
+    t0 = min(min(reference), min(target)) - timedelta(seconds=max_offset_s)
+    t1 = max(max(reference), max(target)) + timedelta(seconds=max_offset_s)
+    n_bins = int((t1 - t0).total_seconds() // bin_s) + 1
+    ref_h = activity_histogram(reference, t0, bin_s, n_bins)
+    tgt_h = activity_histogram(target, t0, bin_s, n_bins)
+    if ref_h.sum() == 0 or tgt_h.sum() == 0:
+        return []
+    ref_h = (ref_h - ref_h.mean()) / (ref_h.std() + EPS)
+    tgt_h = (tgt_h - tgt_h.mean()) / (tgt_h.std() + EPS)
+    corr = np.correlate(ref_h, tgt_h, mode="full")
+    lags = np.arange(-(len(tgt_h) - 1), len(ref_h))
+    keep = np.abs(lags * bin_s) <= max_offset_s
+    corr, lags = corr[keep], lags[keep]
+
+    out: list[tuple[float, float]] = []
+    work = corr.copy()
+    guard = max(1, int(6 * 3600 / bin_s))
+    for _ in range(top_n):
+        if not np.isfinite(work).any():
+            break
+        i = int(np.argmax(work))
+        out.append((float(lags[i] * bin_s), float(work[i])))
+        work[max(0, i - guard): i + guard + 1] = -np.inf
+    return out
+
+
+def offset_candidates_by_coincidence(reference: Sequence[datetime],
+                                     target: Sequence[datetime], *,
+                                     tolerance_s: float = 300.0,
+                                     max_offset_s: float = 45 * 86400.0,
+                                     top_n: int = 12) -> list[tuple[float, int]]:
+    """Candidate offsets from capture coincidences. Returns (offset_s, votes).
+
+    Histogram cross-correlation needs both sides to be dense. A camera with a
+    few dozen recordings against a phone with a thousand photos is not that,
+    and on sparse input the correlation peak is close to arbitrary -- on the
+    fixture corpus it scored the truth outside the top four candidates.
+
+    This is the more robust formulation. Every (reference, target) pair implies
+    one offset: the value that would make those two captures simultaneous. Most
+    such implied offsets are meaningless coincidences and scatter. But whenever
+    the two devices really did film the same moment -- and over a trek they do
+    so constantly -- the implied offset is the true one. So the truth shows up
+    as the densest cluster of implied offsets, while noise stays spread out.
+
+    A Hough-style vote rather than a correlation: it does not care how sparse
+    either side is, only that some captures genuinely coincide.
+
+    ``tolerance_s`` must stay well below the reference's typical spacing
+    between captures, and this is the method's one real constraint. Background
+    votes grow with tolerance x capture density: widen the window far enough
+    and every offset finds a nearby capture, so genuine coincidences stop
+    standing out. Measured on a 1.34 captures/hour reference against seven
+    sparse clips, the true offset wins comfortably up to 900 s and is lost at
+    1800 s. The default is deliberately tighter than that, and tight enough
+    that the audio stage's +/-600 s search can refine whatever it returns.
+    """
+    if not reference or not target:
+        return []
+
+    deltas = np.array(sorted(
+        (r - t).total_seconds() for r in reference for t in target), dtype=float)
+    deltas = deltas[np.abs(deltas) <= max_offset_s]
+    if deltas.size == 0:
+        return []
+
+    # sliding window: how many implied offsets sit within tolerance of each
+    left = 0
+    scored: list[tuple[int, float]] = []
+    for right in range(deltas.size):
+        while deltas[right] - deltas[left] > tolerance_s:
+            left += 1
+        scored.append((right - left + 1, float(np.median(deltas[left:right + 1]))))
+
+    # non-maximum suppression so one broad cluster yields one candidate
+    out: list[tuple[float, int]] = []
+    for votes, centre in sorted(scored, key=lambda x: -x[0]):
+        if all(abs(centre - c) > tolerance_s for c, _ in out):
+            out.append((centre, votes))
+        if len(out) >= top_n:
+            break
+    return out
+
+
+def apply_coarse(clips: Sequence["Clip"], offset_s: float) -> list["Clip"]:
+    """Shift a device's clips by a coarse offset, so the fine stage searches
+    around the right place."""
+    if not offset_s:
+        return list(clips)
+    shift = timedelta(seconds=offset_s)
+    return [Clip(c.clip_id, c.device, c.start + shift, c.duration_s, c.path, c.has_audio)
+            for c in clips]
 
 
 # -- candidate pairing -------------------------------------------------

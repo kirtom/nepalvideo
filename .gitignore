@@ -9,3 +9,7 @@ tests/fixtures/nepal_data/
 *.sqlite-wal
 *.sqlite-shm
 .venv/
+
+# Fetchable reference data -- 50 MB of SRTM tiles and a GeoNames dump.
+# Recreate with: python tools/fetch_reference.py
+data/

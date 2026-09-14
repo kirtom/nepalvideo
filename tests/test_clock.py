@@ -226,3 +226,211 @@ def test_naive_prefill_median_ignores_one_odd_pair():
 
 def test_naive_prefill_empty_is_zero():
     assert naive_offset([], [], []) == 0.0
+
+
+# -- coarse alignment for clocks that are days out ---------------------
+
+from nepal.probe.clock import coarse_offset_by_activity, activity_histogram, apply_coarse
+import random
+
+
+def _trek_activity(start, days=15, seed=3):
+    """Capture times with a realistic diurnal shape: busy at dawn and late
+    afternoon, quiet at midday, nothing overnight."""
+    rng = random.Random(seed)
+    out = []
+    for d in range(days):
+        for hour, n in ((6, 4), (7, 6), (8, 5), (11, 2), (15, 5), (16, 6), (17, 3)):
+            for _ in range(n):
+                out.append(start + timedelta(days=d, hours=hour,
+                                             minutes=rng.randrange(60)))
+    return sorted(out)
+
+
+def test_recovers_a_fourteen_day_camera_clock_error():
+    """The real corpus: camera filenames say 13 April, phone photos say
+    27 April. A flat battery reverts an action camera's clock, and the gap is
+    thousands of times wider than the +/-600 s audio search."""
+    truth = timedelta(days=14)
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc))
+    camera = [t - truth for t in phone]
+    offset, conf = coarse_offset_by_activity(phone, camera, bin_s=3600)
+    assert offset == pytest.approx(truth.total_seconds(), abs=3600)
+    assert conf > 1.0
+
+
+@pytest.mark.parametrize("days", [-30, -14, -1, 0, 1, 14, 30])
+def test_recovers_offsets_in_both_directions(days):
+    truth = timedelta(days=days)
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc))
+    camera = [t - truth for t in phone]
+    offset, _ = coarse_offset_by_activity(phone, camera, bin_s=3600)
+    assert offset == pytest.approx(truth.total_seconds(), abs=3600)
+
+
+def test_partial_overlap_still_aligns():
+    """The camera ran out of battery halfway: only the first eight days exist."""
+    truth = timedelta(days=14)
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=15)
+    cutoff = datetime(2024, 4, 27, tzinfo=timezone.utc) + timedelta(days=8)
+    camera = [t - truth for t in phone if t < cutoff]
+    offset, _ = coarse_offset_by_activity(phone, camera, bin_s=3600)
+    assert offset == pytest.approx(truth.total_seconds(), abs=2 * 3600)
+
+
+def test_no_offset_when_clocks_agree():
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc))
+    offset, _ = coarse_offset_by_activity(phone, list(phone), bin_s=3600)
+    assert abs(offset) <= 3600
+
+
+def test_coarse_alignment_is_bounded_by_max_offset():
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc))
+    camera = [t - timedelta(days=200) for t in phone]
+    offset, _ = coarse_offset_by_activity(phone, camera, max_offset_s=10 * 86400)
+    assert abs(offset) <= 10 * 86400
+
+
+def test_coarse_alignment_empty_inputs():
+    assert coarse_offset_by_activity([], []) == (0.0, 0.0)
+    assert coarse_offset_by_activity([datetime(2024, 4, 27, tzinfo=timezone.utc)], []) == (0.0, 0.0)
+
+
+def test_activity_histogram_bins_and_ignores_out_of_range():
+    t0 = datetime(2024, 4, 27, tzinfo=timezone.utc)
+    times = [t0, t0 + timedelta(minutes=30), t0 + timedelta(hours=2),
+             t0 - timedelta(hours=5)]
+    h = activity_histogram(times, t0, 3600, 4)
+    assert list(h) == [2.0, 0.0, 1.0, 0.0]
+
+
+def test_apply_coarse_shifts_clips():
+    c = Clip("c1", "camera", _t("2024-04-13T10:00:00"), 60, "a")
+    shifted = apply_coarse([c], 14 * 86400)
+    assert shifted[0].start == _t("2024-04-27T10:00:00")
+    assert shifted[0].clip_id == "c1"
+
+
+def test_apply_coarse_zero_is_identity():
+    c = Clip("c1", "camera", _t("2024-04-13T10:00:00"), 60, "a")
+    assert apply_coarse([c], 0)[0].start == c.start
+
+
+def test_diurnal_ambiguity_is_visible_rather_than_hidden():
+    """With an identical routine every day, a whole-day shift correlates almost
+    as well as the truth. The runner-up must therefore be a day away -- that is
+    the ambiguity, and it is what Gate 1 has to show."""
+    from nepal.probe.clock import coarse_candidates, DIURNAL_CONFIDENCE
+    truth = timedelta(days=14)
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc))
+    camera = [t - truth for t in phone]
+    cands = coarse_candidates(phone, camera, bin_s=3600, top_n=3)
+    assert cands[0][0] == pytest.approx(truth.total_seconds(), abs=3600)
+    gaps = [abs(c[0] - cands[0][0]) / 86400 for c in cands[1:]]
+    assert all(g == pytest.approx(round(g), abs=0.2) for g in gaps), gaps
+    _, conf = coarse_offset_by_activity(phone, camera, bin_s=3600)
+    assert conf < DIURNAL_CONFIDENCE, "a flat routine must not read as decisive"
+
+
+def test_days_that_differ_break_the_tie():
+    """Real treks are not identical every day -- a rest day and a summit push
+    give the correlation something to lock onto, and confidence rises."""
+    from nepal.probe.clock import coarse_offset_by_activity
+    base = datetime(2024, 4, 27, tzinfo=timezone.utc)
+    phone = _trek_activity(base, days=15)
+    # a rest day with almost nothing, and a summit day with a burst
+    phone = [t for t in phone if (t - base).days != 5]
+    phone += [base + timedelta(days=9, hours=4, minutes=m) for m in range(0, 180, 3)]
+    phone.sort()
+    truth = timedelta(days=14)
+    camera = [t - truth for t in phone]
+    offset, conf = coarse_offset_by_activity(phone, camera, bin_s=3600)
+    assert offset == pytest.approx(truth.total_seconds(), abs=3600)
+    assert conf > 1.3, f"varied days should be more decisive, got {conf:.2f}"
+
+
+# -- coincidence voting ------------------------------------------------
+
+from nepal.probe.clock import offset_candidates_by_coincidence
+
+
+def test_coincidence_finds_the_offset_from_sparse_material():
+    """The case histogram correlation fails: a handful of camera recordings
+    against a dense stream of phone photos."""
+    truth = 14 * 86400 + 63.0
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=15)
+    # only seven camera clips, each filmed alongside some phone capture
+    camera = [phone[i] - timedelta(seconds=truth) for i in (3, 20, 44, 60, 77, 90, 101)]
+    cands = offset_candidates_by_coincidence(phone, camera, tolerance_s=300)
+    assert cands, "no candidates produced"
+    assert cands[0][0] == pytest.approx(truth, abs=300)
+
+
+def test_coincidence_beats_histogram_on_sparse_input():
+    truth = 14 * 86400 + 63.0
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=15)
+    camera = [phone[i] - timedelta(seconds=truth) for i in (3, 20, 44, 60, 77, 90, 101)]
+    votes = offset_candidates_by_coincidence(phone, camera, tolerance_s=300)
+    hist, _ = coarse_offset_by_activity(phone, camera, bin_s=3600)
+    assert abs(votes[0][0] - truth) < abs(hist - truth) or abs(hist - truth) < 3600
+
+
+def test_coincidence_votes_are_ranked_by_agreement():
+    truth = 3600.0
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=10)
+    camera = [t - timedelta(seconds=truth) for t in phone[::4]]
+    cands = offset_candidates_by_coincidence(phone, camera, tolerance_s=900)
+    assert cands[0][1] >= cands[-1][1], "votes must be sorted descending"
+    assert cands[0][0] == pytest.approx(truth, abs=900)
+
+
+def test_coincidence_respects_max_offset():
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=5)
+    camera = [t - timedelta(days=200) for t in phone]
+    assert offset_candidates_by_coincidence(phone, camera, max_offset_s=10 * 86400) == []
+
+
+def test_coincidence_empty_inputs():
+    assert offset_candidates_by_coincidence([], []) == []
+
+
+def test_coincidence_candidates_are_separated():
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=10)
+    camera = [t - timedelta(seconds=3600) for t in phone[::4]]
+    cands = offset_candidates_by_coincidence(phone, camera, tolerance_s=900, top_n=6)
+    for i, (a, _) in enumerate(cands):
+        for b, _ in cands[i + 1:]:
+            assert abs(a - b) > 900, "non-maximum suppression failed"
+
+
+@pytest.mark.parametrize("tol", [60, 120, 300, 600, 900])
+def test_coincidence_works_across_usable_tolerances(tol):
+    truth = 14 * 86400 + 63.0
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=15)
+    camera = [phone[i] - timedelta(seconds=truth) for i in (3, 20, 44, 60, 77, 90, 101)]
+    cands = offset_candidates_by_coincidence(phone, camera, tolerance_s=tol)
+    assert cands[0][0] == pytest.approx(truth, abs=tol)
+
+
+def test_discrimination_degrades_as_the_window_widens():
+    """Documents the method's one constraint so nobody widens the window
+    thinking it makes detection more forgiving.
+
+    Background votes scale with tolerance x capture density, so the margin
+    between the true offset and the best impostor shrinks monotonically as the
+    window opens. The exact tolerance at which the truth is finally outvoted
+    depends on how dense the reference is, which is why the default is set well
+    inside the safe range rather than at the observed breaking point.
+    """
+    truth = 14 * 86400 + 63.0
+    phone = _trek_activity(datetime(2024, 4, 27, tzinfo=timezone.utc), days=15)
+    camera = [phone[i] - timedelta(seconds=truth) for i in (3, 20, 44, 60, 77, 90, 101)]
+
+    margins = []
+    for tol in (120, 300, 900, 3600):
+        c = offset_candidates_by_coincidence(phone, camera, tolerance_s=tol, top_n=4)
+        margins.append(c[0][1] / max(c[1][1], 1) if len(c) > 1 else float("inf"))
+
+    assert margins[0] >= margins[-1], f"margin should not improve with width: {margins}"
+    tight = offset_candidates_by_coincidence(phone, camera, tolerance_s=300, top_n=4)
+    assert tight[0][0] == pytest.approx(truth, abs=300), "the default must find it"

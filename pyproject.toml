@@ -14,17 +14,22 @@ dependencies = [
   "numpy>=1.24",
   "scipy>=1.10",          # Hungarian assignment, KD-tree, signal
   "pillow>=10.0",         # frame IO for the FOV solver
+  # iPhones shoot HEIC by default and Pillow cannot decode it alone. Core, not
+  # an extra: without it S03.0 loses roughly half the photographs -- 339 of 706
+  # on this corpus -- and a pipeline that silently drops half its stills by
+  # default is badly defaulted, not minimally installed.
+  "pillow-heif>=0.15",
   "pyyaml>=6.0",
   "python-dateutil>=2.8",
 ]
 
 [project.optional-dependencies]
 # S02.7 music analysis
-music = ["librosa>=0.10", "soundfile>=0.12"]
+music = ["librosa>=0.10", "soundfile>=0.12", "mutagen>=1.45"]
 # S02.6 / S03.5 speech
 asr = ["faster-whisper>=1.0"]
-# S03 vision metrics
-vision = ["opencv-python-headless>=4.8"]
+# S03 vision metrics and shot detection
+vision = ["opencv-python-headless>=4.8", "scenedetect>=0.6"]
 # S04 embeddings
 semantic = ["open-clip-torch>=2.24", "torch>=2.1"]
 # cloud stages
