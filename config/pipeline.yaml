@@ -138,7 +138,20 @@ spine:
   swell_percentile: 75
 
 process:
-  # S03.2 shot detection
+  # -- S03.0 stills ---------------------------------------------------
+  # Photographs are decoded at this size for the sharpness and exposure
+  # measures -- full resolution changes the numbers very little and costs a
+  # great deal on seven hundred files.
+  photo_analysis_px: 1024
+  # How long a still is held before S06 snaps it to the beat grid. Long enough
+  # to read, short enough not to stall the cut; a panorama earns 25% longer.
+  photo_slot_s: 3.0
+  # Threads for decoding. libheif releases the GIL and decoding dominates the
+  # cost, so this scales very nearly linearly -- 3.7x on four cores, with
+  # identical measurements. 0 means one per core.
+  photo_workers: 0
+
+  # -- S03.1 proxies --------------------------------------------------
   # Proxy frame rate. Shot detection and metric sampling do not need thirty
   # frames a second, and v360 is the whole cost of S03.1, so halving the frames
   # halves the pass. 0 keeps the source rate.
@@ -153,51 +166,59 @@ process:
   # the one remaining lever on S03.1's cost.
   proxy_size: [1024, 512]
   flat_proxy_size: [960, 540]
+  # Phase A writes the equirect proxy and audio only: 3.46x realtime against
+  # 0.73x for the specification's single pass, because each of the four
+  # rectilinear branches re-resamples the whole frame. S05 needs one yaw per
+  # surviving shot, not four per recording, so those are rendered as stills
+  # later. Set true to reproduce the single-pass design.
+  yaw_videos: false
   # A pass running many times longer than its own footage is wedged, not slow.
   # Bounded so one bad file reports itself and the rest of the corpus still runs.
   ffmpeg_timeout_factor: 20
   ffmpeg_min_timeout_s: 300
+
+  # -- S03.2 shot detection -------------------------------------------
+  # PySceneDetect ContentDetector (spec section S03.2).
   scene_threshold: 27.0
-  min_shot_len_s: 1.5
-  # S03.3
+  min_shot_s: 1.5
+
+  # -- S03.3 technical metrics ----------------------------------------
+  # Sample points per shot. Five is the spec; each costs one seek plus three
+  # decoded frames, so the whole corpus is minutes, not hours.
   metric_samples_per_shot: 5
-  # S03.4 wind detection
+  # Frames read at each sample point. Three gives two consecutive flow fields,
+  # and it is the CHANGE between them -- the jerk -- that separates a shaky
+  # clip from one that is merely moving. Two frames cannot tell those apart.
+  metric_frames_per_sample: 3
+  # Flow is computed at this width. Farneback cost is per-pixel and shake is a
+  # low-frequency signal; measuring it at proxy resolution buys nothing.
+  metric_flow_px: 320
+  # Jerk, in pixels per frame squared at metric_flow_px, at which a shot scores
+  # half stable. A locked-off camera sits near zero, a hand-held phone while
+  # walking runs a few pixels. A calibration point, not a law: S03.3 logs the
+  # distribution it measured so this can be moved against real material.
+  metric_jerk_ref_px: 4.0
+  # Threads for sampling. Decoding releases the GIL. 0 means one per core.
+  metric_workers: 0
+
+  # -- S03.4 audio ----------------------------------------------------
+  # Wind: a shot whose energy below the cutoff exceeds this share of the total
+  # is roaring, not recording.
   wind_lf_ratio: 0.80
   wind_lf_cutoff_hz: 200
-  # S03.1 proxy sizes
-  proxy_eq: [1024, 512]
-  proxy_view: [960, 540]
-  yaws: [0, 90, 180, 270]
-  view_h_fov: 100
-  view_v_fov: 70
 
-# S03.7 quality gate — one curve per source class.
+# S03.7 quality gate -- one curve per source class (spec section S03.7).
 quality_curves:
   camera:   {min_sharpness: 4.0, max_exposure_pen: 0.15, min_stability: 0.35, min_duration_s: 1.5}
   phone:    {min_sharpness: 3.5, max_exposure_pen: 0.20, min_stability: 0.30, min_duration_s: 1.5}
   telegram: {min_sharpness: 2.0, max_exposure_pen: 0.35, min_stability: 0.15, min_duration_s: 1.0}
 
-process:
-  # S03.0 stills. Photographs are decoded at this size for the sharpness and
-  # exposure measures -- full resolution changes the numbers very little and
-  # costs a great deal on seven hundred files.
-  photo_analysis_px: 1024
-  # How long a still is held before S06 snaps it to the beat grid. Long enough
-  # to read, short enough not to stall the cut; a panorama earns 25% longer.
-  photo_slot_s: 3.0
-  # Threads for decoding. libheif releases the GIL and decoding dominates the
-  # cost, so this scales very nearly linearly -- 3.7x on four cores, with
-  # identical measurements. 0 means one per core.
-  photo_workers: 0
-  # S03.1 phase A writes the equirect proxy and audio only: 3.46x realtime
-  # against 0.73x for the specification's single pass, because each of the four
-  # rectilinear branches re-resamples the whole frame. S05 needs one yaw per
-  # surviving shot, not four per recording, so those are rendered as stills
-  # later. Set true to reproduce the single-pass design.
-  yaw_videos: false
-  # S03.2 PySceneDetect ContentDetector (spec section S03.2).
-  scene_threshold: 27.0
-  min_shot_s: 1.5
+# A shot carrying speech is judged on a floor of its own: the spec makes voice
+# the spine of the film (section 1.4), and a soft frame under a good sentence is
+# worth more than a sharp frame of nothing. Applied only where has_speech = 1.
+gate:
+  speech_sharpness_factor: 0.6
+  speech_min_duration_s: 1.0
 
 semantic:
   max_caption_shots: 2500     # THE ONLY UNBOUNDED COST — spec section 8.1

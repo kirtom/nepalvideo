@@ -15,6 +15,36 @@ import yaml
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "pipeline.yaml"
 
 
+class DuplicateKeyError(ValueError):
+    """A mapping in the config declares the same key twice."""
+
+
+class _StrictLoader(yaml.SafeLoader):
+    """SafeLoader that refuses duplicate keys instead of silently keeping one.
+
+    YAML's rule is last-one-wins, applied without a word. A second ``process:``
+    block appended to the file -- the natural way to add a section for a new
+    stage -- therefore deletes the first one, and every tunable in it reverts
+    to whatever default the call site happened to pass. That is not a
+    hypothetical: it cost a 3.5-hour S03.1 run, which built every proxy at the
+    source frame rate because ``process.proxy_fps`` had been shadowed away.
+    A config file is the one place in this pipeline where a silent default is
+    indistinguishable from a decision, so the loader fails loudly instead.
+    """
+
+    def construct_mapping(self, node, deep=False):  # type: ignore[override]
+        seen: set[Any] = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise DuplicateKeyError(
+                    f"duplicate key {key!r} at line {key_node.start_mark.line + 1} "
+                    f"of {key_node.start_mark.name}: the later block would "
+                    f"silently replace the earlier one")
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 class Config:
     """Loaded pipeline configuration.
 
@@ -52,7 +82,7 @@ class Config:
     def load(cls, path: str | os.PathLike | None = None) -> "Config":
         p = Path(path) if path else Path(os.environ.get("NEPAL_CONFIG", DEFAULT_CONFIG))
         with open(p) as fh:
-            return cls(yaml.safe_load(fh), p)
+            return cls(yaml.load(fh, Loader=_StrictLoader), p)
 
     def get(self, dotted: str, default: Any = ...) -> Any:
         node: Any = self._data

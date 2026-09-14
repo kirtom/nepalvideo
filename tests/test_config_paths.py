@@ -75,3 +75,38 @@ def test_config_outside_a_config_dir_anchors_to_its_own_folder(tmp_path):
 def test_config_in_a_config_dir_anchors_to_the_project_root(tmp_path):
     cfg, root = _cfg(tmp_path)
     assert cfg.base_dir == root
+
+
+# -- duplicate keys ---------------------------------------------------
+def test_a_repeated_section_is_an_error_not_a_silent_replacement(tmp_path):
+    """YAML's rule is last-one-wins, applied without a word. A second
+    ``process:`` block appended to the config -- the natural way to add a
+    section for a new stage -- deleted the first one and reverted every tunable
+    in it to a call-site default. It cost a 3.5-hour run of S03.1, which built
+    every proxy at the source frame rate because ``proxy_fps`` was shadowed."""
+    import pytest
+    from nepal.config import Config, DuplicateKeyError
+
+    p = tmp_path / "dup.yaml"
+    p.write_text("process:\n  proxy_fps: 15\nprocess:\n  photo_workers: 0\n")
+    with pytest.raises(DuplicateKeyError) as exc:
+        Config.load(p)
+    assert "process" in str(exc.value)
+
+
+def test_a_repeated_key_inside_a_section_is_an_error_too(tmp_path):
+    import pytest
+    from nepal.config import Config, DuplicateKeyError
+
+    p = tmp_path / "dup.yaml"
+    p.write_text("process:\n  proxy_fps: 15\n  proxy_fps: 30\n")
+    with pytest.raises(DuplicateKeyError):
+        Config.load(p)
+
+
+def test_the_shipped_config_has_no_duplicate_keys():
+    """The guard is worth nothing if the file it guards is not loaded by it."""
+    from nepal.config import Config, DEFAULT_CONFIG
+    cfg = Config.load(DEFAULT_CONFIG)
+    assert cfg.get("process.proxy_fps") == 15
+    assert cfg.get("process.photo_workers") == 0
