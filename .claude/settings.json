@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(nepal:*)",
+      "Bash(nepal *)",
+      "Bash(pytest:*)",
+      "Bash(pytest *)",
+      "Bash(python3 -m pytest:*)",
+      "Bash(python3 -m pytest *)",
+      "Bash(python -m pytest:*)",
+      "Bash(python -m pytest *)",
+      "Bash(sqlite3:*)",
+      "Bash(sqlite3 *)",
+      "Bash(ffprobe:*)",
+      "Bash(ffprobe *)",
+      "Bash(exiftool:*)",
+      "Bash(exiftool *)",
+      "Bash(git:*)",
+      "Bash(git *)"
+    ],
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push --force *)",
+      "Bash(git push -f:*)",
+      "Bash(git push -f *)"
+    ]
+  }
+}
