@@ -674,7 +674,18 @@ PySceneDetect `ContentDetector` on the equirect proxy (or the flat proxy). Thres
 
 **Run per `recording_id`, not per file** — chapter joins must not produce boundaries.
 
-Write `shots` rows.
+**A scene longer than `process.max_shot_s` is divided into equal pieces.** A 360
+camera on a walking person does not cut: on this corpus 395 of 480 recordings
+came back with no detected boundary at all, one of them 29 minutes long. That is
+a correct answer to the question PySceneDetect was asked and a useless answer to
+the question the film asks. A shot is the unit the timeline chooses between and
+the unit one set of metrics describes, and neither survives that length — the
+best eight seconds of a ridge crossing average out against the twenty minutes of
+boots that follow. The division is arbitrary by construction, because there is
+no cut to find; S05 picks which piece is worth using.
+
+Write `shots` rows, replacing the recording's existing ones rather than adding
+to them: boundaries move whenever the threshold or the maximum length moves.
 
 #### S03.3 Technical metrics per shot
 

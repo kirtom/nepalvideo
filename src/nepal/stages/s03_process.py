@@ -210,6 +210,7 @@ def detect_shots(cfg: Config, conn) -> dict[str, Any]:
     max_gap = float(cfg.get("spine.max_interp_gap_s"))
     threshold = float(cfg.get("process.scene_threshold"))
     min_len = float(cfg.get("process.min_shot_s"))
+    max_len = float(cfg.get("process.max_shot_s", 20.0))
 
     recs = [dict(r) for r in conn.execute(
         "SELECT recording_id, start_utc, duration_s FROM recordings ORDER BY start_utc")]
@@ -234,7 +235,8 @@ def detect_shots(cfg: Config, conn) -> dict[str, Any]:
             continue
         if len(scenes) <= 1:
             no_cuts += 1
-        rows = shots_mod.shots_for_recording(scenes, rid, min_len_s=min_len)
+        rows = shots_mod.shots_for_recording(scenes, rid, min_len_s=min_len,
+                                             max_len_s=max_len)
         rec_start = _dt(r["start_utc"])
         for row in rows:
             ts = rec_start + timedelta(seconds=row["start_s"]) if rec_start else None
@@ -247,6 +249,13 @@ def detect_shots(cfg: Config, conn) -> dict[str, Any]:
         out += rows
     bar.close(f"{len(out)} shots from {len(pending)} recording(s)")
 
+    # Re-detection replaces a recording's shots rather than adding to them. The
+    # boundaries move whenever the threshold or the maximum length moves, and an
+    # upsert alone would leave the old numbering behind as extra shots that no
+    # longer describe anything. Photo shots have no recording_id and are
+    # untouched.
+    stale = [(rid,) for rid in {row["recording_id"] for row in out}]
+    conn.executemany("DELETE FROM shots WHERE recording_id = ?", stale)
     db.upsert(conn, "shots", ["shot_id"], out)
     by_act: dict[Any, int] = {}
     for row in out:

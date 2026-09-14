@@ -63,3 +63,49 @@ def test_a_video_shot_belongs_to_a_recording_not_an_asset():
     assert row["recording_id"] == "r"
     assert row["asset_id"] is None
     assert row["media_kind"] == "video"
+
+
+# -- long scenes ------------------------------------------------------
+def test_a_scene_within_the_limit_is_left_exactly_as_it_is():
+    from nepal.process.shots import split_long_scenes
+    assert split_long_scenes([(0.0, 12.0)], 20.0) == [(0.0, 12.0)]
+
+
+def test_a_long_scene_becomes_equal_pieces_covering_the_same_span():
+    """A 360 camera on a walking person does not cut. The longest recording in
+    this corpus is 29 minutes with no detected boundary at all, and one shot of
+    29 minutes is not a unit the timeline can choose between."""
+    from nepal.process.shots import split_long_scenes
+    out = split_long_scenes([(0.0, 100.0)], 20.0)
+    assert len(out) == 5
+    assert out[0][0] == 0.0 and out[-1][1] == 100.0
+    spans = {round(b - a, 3) for a, b in out}
+    assert spans == {20.0}
+    assert all(out[i][1] == out[i + 1][0] for i in range(len(out) - 1))
+
+
+def test_nothing_is_left_over_as_a_stub():
+    """Equal pieces, not fixed-length ones: 50 s at a 20 s limit is two 25 s
+    shots, never 20 + 20 + 10."""
+    from nepal.process.shots import split_long_scenes
+    out = split_long_scenes([(0.0, 50.0)], 20.0)
+    assert [round(b - a, 1) for a, b in out] == [25.0, 25.0]
+
+
+def test_the_division_never_produces_a_shot_below_the_minimum():
+    from nepal.process.shots import split_long_scenes
+    out = split_long_scenes([(0.0, 3.0)], 1.0, min_len_s=1.5)
+    assert all(b - a >= 1.5 for a, b in out)
+
+
+def test_a_zero_limit_disables_the_division():
+    from nepal.process.shots import split_long_scenes
+    assert split_long_scenes([(0.0, 1800.0)], 0.0) == [(0.0, 1800.0)]
+
+
+def test_a_recording_with_no_cuts_still_yields_usable_shots():
+    from nepal.process.shots import shots_for_recording
+    rows = shots_for_recording([(0.0, 120.0)], "camera_x", max_len_s=20.0)
+    assert len(rows) == 6
+    assert [r["shot_id"] for r in rows][:2] == ["camera_x#0000", "camera_x#0001"]
+    assert rows[-1]["end_s"] == 120.0

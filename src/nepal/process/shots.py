@@ -66,15 +66,49 @@ def merge_short_scenes(scenes: Sequence[tuple[float, float]],
     return [(round(a, 3), round(b, 3)) for a, b in out]
 
 
+def split_long_scenes(scenes: Sequence[tuple[float, float]],
+                      max_len_s: float = 20.0,
+                      min_len_s: float = 1.5) -> list[tuple[float, float]]:
+    """Cut a scene longer than ``max_len_s`` into equal pieces.
+
+    A 360 camera on a walking person does not cut. On this corpus 395 of 480
+    recordings came back with no detected boundary at all, one of them 29
+    minutes long -- which is a correct answer to the question PySceneDetect was
+    asked and a useless answer to the question the film asks. A shot is the unit
+    the timeline chooses between and the unit a metric describes, and neither
+    survives being 29 minutes long: the best eight seconds of a ridge crossing
+    average out against the twenty minutes of boots that follow.
+
+    Pieces are equal rather than fixed-length so nothing ends with a two-second
+    remainder, and the split is arbitrary by construction -- there is no cut to
+    find. It is S05 that picks which piece is worth using.
+    """
+    out: list[tuple[float, float]] = []
+    for start, end in scenes:
+        span = end - start
+        if span <= max_len_s or max_len_s <= 0:
+            out.append((start, end))
+            continue
+        n = max(1, int(round(span / max_len_s)))
+        if span / n < min_len_s:
+            n = max(1, int(span // max(min_len_s, 1e-6)))
+        step = span / n
+        out.extend((round(start + i * step, 3), round(start + (i + 1) * step, 3))
+                   for i in range(n))
+    return out
+
+
 def shots_for_recording(scenes: Sequence[tuple[float, float]], recording_id: str,
-                        *, min_len_s: float = 1.5) -> list[dict[str, Any]]:
+                        *, min_len_s: float = 1.5,
+                        max_len_s: float = 20.0) -> list[dict[str, Any]]:
     """Shot rows for one recording, numbered in order.
 
     The id carries the recording and the index so it is stable across re-runs:
     detection is deterministic, and a shot whose id moved would orphan every
     vote and score attached to it.
     """
-    merged = merge_short_scenes(scenes, min_len_s)
+    merged = split_long_scenes(merge_short_scenes(scenes, min_len_s),
+                               max_len_s, min_len_s)
     return [{
         "shot_id": f"{recording_id}#{i:04d}",
         "recording_id": recording_id,

@@ -181,6 +181,12 @@ process:
   # PySceneDetect ContentDetector (spec section S03.2).
   scene_threshold: 27.0
   min_shot_s: 1.5
+  # A 360 camera on a walking person does not cut: 395 of 480 recordings came
+  # back with no detected boundary at all, one of them 29 minutes long. A shot
+  # is what the timeline chooses between and what a metric describes, and
+  # neither survives that length, so anything longer is divided into equal
+  # pieces of about this size. 0 disables the division.
+  max_shot_s: 20.0
 
   # -- S03.3 technical metrics ----------------------------------------
   # Sample points per shot. Five is the spec; each costs one seek plus three
