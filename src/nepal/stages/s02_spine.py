@@ -20,6 +20,7 @@ from typing import Any, Sequence
 from nepal import db, freshness
 from nepal.config import Config
 from nepal.probe import manifest
+from nepal.util import proc as proc_util
 from nepal.util.progress import Progress
 from nepal.spine import acts as acts_mod
 from nepal.spine import dem as dem_mod
@@ -273,6 +274,43 @@ def _climb_events(track: list[gps_mod.GpsPoint]) -> list[datetime]:
 
 # ---------------------------------------------------------- S02.6 speech
 
+def usable_audio_files(files: Sequence[Path]) -> tuple[list[Path], dict[str, int]]:
+    """Split a folder listing into what can be transcribed and what cannot.
+
+    Separated from the stage because it is the part that was wrong and the part
+    worth testing, and a test for it should not have to load a 3 GB model.
+
+    A Telegram export writes a thumbnail beside every round video. Handed a
+    .jpg, faster-whisper passes it to PyAV, which asks the container for its
+    first audio stream and raises IndexError from inside a generator -- an error
+    naming neither the file nor the reason, which killed the whole stage after
+    large-v3 had spent half a minute loading. Extensions are not trusted beyond
+    dropping the obvious: a silent .mp4 is just as fatal, so every survivor is
+    probed for an audio stream.
+    """
+    usable: list[Path] = []
+    skipped: dict[str, int] = {}
+
+    def note(reason: str) -> None:
+        skipped[reason] = skipped.get(reason, 0) + 1
+
+    for f in files:
+        if not f.is_file() or f.suffix.lower() in manifest.PHOTO_EXT:
+            if f.is_file():
+                note(f"not audio or video ({f.suffix.lower() or 'no extension'})")
+            continue
+        try:
+            if not proc_util.probe_summary(f).get("has_audio"):
+                note("no audio stream")
+                continue
+        except Exception as exc:                  # a bad file, not a bug
+            log.debug("S02.6 could not probe %s: %s", f.name, exc)
+            note(f"unreadable ({type(exc).__name__})")
+            continue
+        usable.append(f)
+    return usable, skipped
+
+
 def transcribe_round_videos(cfg: Config, conn) -> dict[str, Any]:
     """The best narration material in the project: face plus voice, timestamped
     and unperformed. Small folder, so it is transcribed here rather than waiting
@@ -285,32 +323,48 @@ def transcribe_round_videos(cfg: Config, conn) -> dict[str, Any]:
         return {"skipped": "faster-whisper not installed"}
 
     folder = cfg.data_root / "chat_export" / "round_video_messages"
-    files = sorted(folder.glob("*")) if folder.exists() else []
-    files = [f for f in files if f.is_file()]
+    listing = sorted(folder.glob("*")) if folder.exists() else []
+    files, skipped = usable_audio_files(listing)
     if not files:
-        return {"skipped": "no round_video_messages"}
+        for reason, n in sorted(skipped.items(), key=lambda kv: -kv[1]):
+            log.info("S02.6 %d file(s) carry nothing to transcribe: %s", n, reason)
+        return {"skipped": "no round_video_messages with audio", "reasons": skipped}
 
     model_name = cfg.get("spine.whisper_model")
     language = cfg.get("spine.whisper_language")
-    log.info("S02.6 transcribing %d round video messages with %s (%s)",
+    log.info("S02.6 transcribing %d round video message(s) with %s (%s)",
              len(files), model_name, language or "auto-detect")
     model = WhisperModel(model_name, device="auto", compute_type="int8")
 
     out_dir = cfg.workdir("transcripts")
     done = db.done_units(conn, f"{STAGE}.asr")
     results = []
+
+    def note(reason: str) -> None:
+        skipped[reason] = skipped.get(reason, 0) + 1
+
+    bar = Progress("S02.6 transcribing", len([f for f in files if f.name not in done]))
     for f in files:
         if f.name in done:
             continue
-        segments, info = model.transcribe(str(f), language=language or None)
-        text = " ".join(seg.text.strip() for seg in segments).strip()
+        bar.step(note=f.name[-24:])
+        try:
+            segments, info = model.transcribe(str(f), language=language or None)
+            text = " ".join(seg.text.strip() for seg in segments).strip()
+        except Exception as exc:                  # one file must not end the stage
+            log.warning("S02.6 %s failed to transcribe: %s", f.name, exc)
+            note(f"transcription failed ({type(exc).__name__})")
+            continue
         (out_dir / f"{f.stem}.json").write_text(json.dumps(
             {"file": f.name, "language": info.language, "text": text},
             ensure_ascii=False, indent=1))
         results.append({"file": f.name, "chars": len(text), "language": info.language})
         db.mark_unit(conn, f"{STAGE}.asr", f.name)
-    log.info("S02.6 transcribed %d files", len(results))
-    return {"n_transcribed": len(results), "files": results}
+    bar.close(f"{len(results)} transcribed")
+    log.info("S02.6 transcribed %d file(s)", len(results))
+    for reason, n in sorted(skipped.items(), key=lambda kv: -kv[1]):
+        log.info("S02.6 %d file(s) skipped: %s", n, reason)
+    return {"n_transcribed": len(results), "files": results, "skipped": skipped}
 
 
 # ----------------------------------------------------------- S02.7 music
@@ -441,9 +495,27 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
                       for t in tracks for b in t.beats])
     conn.commit()
 
+    # One track may be reserved for the end credits. It is withdrawn before the
+    # assignment rather than filtered afterwards: left in the pool it wins an
+    # act on its features, and then the act it won has been scored against a cue
+    # that is never going to play there.
+    credits_name = cfg.get("music.credits_track", None)
+    credits_track = music_mod.pick_credits_track(tracks, credits_name)
+    if credits_name and credits_track is None:
+        log.warning("S02.7 music.credits_track is set to %r but no track in "
+                    "music/ matches it -- the credits have no cue and every "
+                    "track is still competing for an act", credits_name)
+    if credits_track is not None:
+        db.set_decision(conn, "credits_track", credits_track.track_id,
+                        confidence=1.0, method="config:music.credits_track")
+        log.info("S02.7 %s - %s is held back for the end credits",
+                 credits_track.artist or "?", credits_track.title or credits_track.s3_key)
+    scored = [t for t in tracks if t is not credits_track]
+
     assignment = music_mod.assign_acts(
-        tracks, license_mode=str(cfg.get("music.license_mode")),
+        scored, license_mode=str(cfg.get("music.license_mode")),
         feature_mask=playlist_mod.feature_mask_for(source))
+    report["credits_track"] = credits_track.track_id if credits_track else None
     for t in tracks:
         conn.execute("UPDATE music_tracks SET assigned_act=? WHERE track_id=?",
                      (t.assigned_act, t.track_id))

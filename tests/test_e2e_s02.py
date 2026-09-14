@@ -366,3 +366,49 @@ def test_stale_music_rows_do_not_survive_a_rerun(spined):
     assert "ghost-from-an-earlier-run" not in rows
     assert orphan_sections == 0, "sections left behind by a removed track"
     assert orphan_beats == 0, "beats left behind by a removed track"
+
+
+# -- S02.6 file selection, against real containers --------------------
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
+def test_s02_6_skips_what_cannot_be_transcribed(tmp_path):
+    """A Telegram export writes a thumbnail beside every round video, and a
+    round video can be silent. faster-whisper hands both to PyAV, which raises
+    IndexError from inside a generator -- so the stage died after large-v3 had
+    already loaded, on an error naming neither the file nor the reason.
+
+    Probed against real containers: the whole defect was the gap between what
+    the extension claims and what the file holds."""
+    from nepal.stages.s02_spine import usable_audio_files
+    from nepal.util import proc
+
+    def ff(*args):
+        proc.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args],
+                 check=True)
+
+    speech = tmp_path / "with_audio.mp4"
+    ff("-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=1",
+       "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+       str(speech))
+    silent = tmp_path / "silent.mp4"
+    ff("-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=1",
+       "-c:v", "libx264", "-pix_fmt", "yuv420p", str(silent))
+    thumb = tmp_path / "with_audio.jpg"
+    ff("-f", "lavfi", "-i", "testsrc=size=160x120:rate=1:duration=1",
+       "-frames:v", "1", str(thumb))
+
+    usable, skipped = usable_audio_files(sorted(tmp_path.iterdir()))
+    assert usable == [speech]
+    assert skipped["no audio stream"] == 1
+    assert any("jpg" in reason for reason in skipped)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
+def test_s02_6_counts_an_unreadable_file_rather_than_raising(tmp_path):
+    from nepal.stages.s02_spine import usable_audio_files
+
+    broken = tmp_path / "truncated.mp4"
+    broken.write_bytes(b"not actually an mp4")
+    usable, skipped = usable_audio_files([broken])
+    assert usable == []
+    assert sum(skipped.values()) == 1
