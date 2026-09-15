@@ -175,8 +175,15 @@ def geotag_assets(cfg: Config, conn) -> dict[str, Any]:
     conn.commit()
 
     if srtm.missing:
-        log.warning("S02.3 %d SRTM tile(s) missing from %s: %s -- altitude is null "
-                    "for those points. Fetch them with tools/fetch_reference.py",
+        # The fetcher covers the trek bounding box only and rejects fixes far
+        # from the route on purpose, so a tile missing here is almost always
+        # one under home or a layover -- points that carry no altitude in the
+        # film anyway. Saying "fetch it" sent one session chasing tiles the
+        # fetcher will never download.
+        log.warning("S02.3 %d SRTM tile(s) not present in %s: %s -- altitude is "
+                    "null for those points. Expected for off-route material "
+                    "(home, layovers); `nepal fetch-reference` only covers the "
+                    "trek extent",
                     len(srtm.missing), srtm.dir, ", ".join(sorted(srtm.missing)[:8]))
     if not gaz.places:
         log.warning("S02.4 no GeoNames gazetteer at %s -- place names stay null",
