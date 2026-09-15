@@ -147,10 +147,16 @@ invalidate parts of them, noted inline.
    - **S04.1 CLIP is the only remaining GPU candidate.** Do not wait on the
      quota case for it: S03.5 ran 32x faster than the local machine and
      S03.6 at 1.0 s/shot, both on CPU. Measure first.
-   - **S04.3 captioning is Bedrock** and is the only unbounded cost in the
-     project (`semantic.max_caption_shots`, default 2,500). 1,628 shots
-     survive the gate, so the cap does not bind yet — but check the model is
-     available in eu-north-1 before assuming the region.
+   - **S04.3 captioning is Bedrock**, and eu-north-1 has every model worth
+     using (Opus 5, Sonnet 5, Haiku 4.5, Fable 5.1, Nova) — **no region move
+     needed.** Estimated from the real shot counts and the image-token
+     formula: 1,632 shots × (4 frames @512px ≈ 196 tok each + text) ≈
+     **1.63M input and 0.21M output tokens**, i.e. **$5.39 on Sonnet 5**,
+     $2.69 on Haiku 4.5, $1.99 on Nova Pro — halved again by the Batch API,
+     which suits a stage that is not latency-sensitive. The spec's $20–40
+     assumed 2,500 shots at larger frames. `max_caption_shots` (2,500) does
+     not bind. Re-measure against real `usage` once the form clears; these
+     are published rates and Bedrock is partner-priced.
    - Gate 2 needs a representative face per cluster: the embeddings are in
      `work/faces/embeddings.npy`, and `nepal s03 --redo recluster` re-labels
      from them in seconds if a threshold moves.
@@ -211,6 +217,16 @@ before and after any remote stage, and check
   recordings were reprojected at 193; a materially different FOV would mean
   rebuilding those 22.
 - **`spine.whisper_language: ru`** is still marked "confirm".
+- **Bedrock needs a one-time use-case form.** Every model in every region —
+  Anthropic *and* Amazon Nova — returns `ValidationException: Operation not
+  allowed` until it is submitted. The Model Access page is retired (models
+  auto-enable on first invocation), so the form is the only gate left: Bedrock
+  console → Model catalog → an Anthropic model. It is per account, shares
+  details with Anthropic, and is the operator's to submit. Diagnosis note: the
+  error is identical for a root session and an IAM role, so it is not the
+  often-cited "Bedrock blocks root" — that hypothesis was tested and wrong.
+  `bedrock:InvokeModel` is already on the `nepal-pipeline-ec2` role, which is
+  the credential S04.3 should use.
 - **G-instance quota** requests (Spot `L-3819A6DF`, On-Demand `L-DB2E81BA`,
   4 vCPU each, eu-north-1) are open with AWS support. Until one lands, S03.6
   faces and S04.1 CLIP embeddings have no GPU to run on.
