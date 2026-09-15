@@ -664,7 +664,10 @@ def detect_faces(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
     against only what it re-reads; ``--redo faces`` re-reads everything.
     """
     proxies = cfg.work_root / "proxies"
-    where = "" if force else " AND s.has_face IS NULL"
+    # Resumable on face_score, not has_face: has_face carries a DEFAULT 0 from
+    # the schema, so every never-looked-at shot already has a value and a
+    # resumable run would select nothing. face_score is null until measured.
+    where = "" if force else " AND s.face_score IS NULL"
     rows = [dict(r) for r in conn.execute(
         "SELECT s.shot_id, s.recording_id, s.start_s, s.end_s, r.is_360 "
         "FROM shots s JOIN recordings r ON r.recording_id = s.recording_id "
@@ -773,7 +776,11 @@ def detect_faces(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
         "WHERE shot_id=?",
         [(1 if r["n"] else 0,
           named.get(r["cluster"]) if r["cluster"] is not None else None,
-          r["yaw"], r["score"], r["shot_id"]) for r in per_shot])
+          r["yaw"],
+          # a shot that was looked at and showed nothing scores 0, not null:
+          # null means "not yet looked at", which is what resumes the stage
+          r["score"] if r["score"] is not None else 0.0,
+          r["shot_id"]) for r in per_shot])
     conn.commit()
 
     sizes: dict[int, int] = {}
