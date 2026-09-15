@@ -240,11 +240,26 @@ the operator's.
      a 1.7 GB checkpoint took 455 s. `semantic.clip_threads` (0 = all cores)
      is now set in `load_model`; closing browsers is worth as much again, as
      it was for S02.6.
-   - **ViT-B-32 is being A/B'd against ViT-L-14** on nearest-neighbour
-     agreement, because MMR never uses an embedding's absolute value — only
-     "max similarity to what is already chosen". If the two agree about which
-     shots are each other's neighbours, B-32 is ~14x fewer FLOPs and the
-     stage is minutes rather than hours.
+   - **ViT-B-32 was A/B'd against ViT-L-14 and lost.** MMR never uses an
+     embedding's absolute value, only "max similarity to what is already
+     chosen", so the test was whether the two models agree about which shots
+     are each other's neighbours — not embedding quality in the abstract. On
+     48 real shortlisted shots: **nearest-neighbour agreement 40%, top-3
+     overlap 53%, pairwise-similarity Spearman 0.735.** Broad agreement about
+     global structure, real disagreement about specifics. B-32 is 0.54 s/shot
+     against ViT-L's 13.1 (**24x**), but it is not the same answer, so the
+     saving is not available. Caveat on the number: 48 shots is small, and
+     where several shots are near-ties the argmax is unstable between any two
+     models — but the burden was on B-32 to show equivalence and it did not.
+   - **Decision: ViT-L-14 locally, ~6 hours, overnight.** Free, what the spec
+     asks, and the artefact is meant to outlive the film as a searchable
+     index — which is exactly where ViT-L's extra capacity earns its cost. No
+     cloud is needed for this stage.
+   - **The stage now checkpoints** every `semantic.clip_checkpoint_every` (64)
+     shots, written to a temporary name and renamed. It used to hold every
+     vector in memory and write once at the end: a kill at hour five of six
+     threw away five hours and left nothing to resume from. The index is the
+     resume point.
    - **Predicate fixed 2026-09-16.** S04.1 asked for `status = 'candidate'`,
      but S05 promotes its picks to `'shortlisted'` — so once a cut existed,
      the stage would embed 1,232 rows and skip the 400 the film is made of.

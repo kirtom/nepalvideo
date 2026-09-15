@@ -318,6 +318,9 @@ semantic:
   clip_batch: 16
   # torch picks a thread count that is not the machine's core count. 0 = all.
   clip_threads: 0
+  # ViT-L is ~6 hours of CPU on this corpus. Write the array every N shots so a
+  # kill costs minutes, not the whole run; the index doubles as the resume point.
+  clip_checkpoint_every: 64
 
 score:
   tech:  {sharpness: 0.35, exposure: 0.25, stability: 0.30, duration_fit: 0.10}

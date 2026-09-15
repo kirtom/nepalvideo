@@ -86,12 +86,46 @@ def embed_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
         return {"skipped": "open_clip not installed"}
 
     proxies = cfg.work_root / "proxies"
+    every = int(cfg.get("semantic.clip_checkpoint_every", 64))
+    prior = np.load(emb_path) if (done and emb_path.exists()) else None
+    prior_ids = list(json.loads(idx_path.read_text())["shot_ids"]) if done else []
     vecs: list[np.ndarray] = []
     ids: list[str] = []
     pending_imgs: list[np.ndarray] = []
     pending_ids: list[str] = []
     failed: dict[str, int] = {}
+    saved = [0]
     bar = Progress("S04.1 embedding shots", len(todo))
+
+    def merged() -> tuple[np.ndarray, list[str]]:
+        if prior is not None:
+            return (np.vstack([prior] + vecs) if vecs else prior), prior_ids + ids
+        return (np.vstack(vecs) if vecs else np.zeros((0, 0), dtype=np.float32)), list(ids)
+
+    def checkpoint() -> np.ndarray:
+        """Write what has been embedded so far, atomically.
+
+        ViT-L-14 measures 13 s/shot on CPU, so a full corpus is ~6 hours. The
+        stage used to accumulate everything in memory and write once at the
+        end, which means a kill at hour five -- or the OOM killer on a box
+        already deep in swap -- threw away five hours and left no way to
+        resume. ``done`` is read back from the index on the next run, so a
+        checkpoint is also the resume point.
+
+        Written to a temporary name and renamed, because the failure this
+        guards against is the process dying, and dying midway through
+        ``np.save`` would leave a truncated array that reads as corrupt.
+        """
+        matrix, all_ids = merged()
+        tmp_e = emb_path.with_name(emb_path.name + ".tmp")
+        tmp_i = idx_path.with_name(idx_path.name + ".tmp")
+        with open(tmp_e, "wb") as fh:          # not np.save(path): it appends .npy
+            np.save(fh, matrix)
+        tmp_i.write_text(json.dumps({"shot_ids": all_ids, "model": model_name,
+                                     "pretrained": pretrained}))
+        tmp_e.replace(emb_path)
+        tmp_i.replace(idx_path)
+        return matrix
 
     def flush() -> None:
         if not pending_imgs:
@@ -100,6 +134,10 @@ def embed_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
         ids.extend(pending_ids)
         pending_imgs.clear()
         pending_ids.clear()
+        if len(ids) - saved[0] >= every:
+            checkpoint()
+            saved[0] = len(ids)
+            log.info("S04.1 checkpoint: %d of %d embedded", len(ids), len(todo))
 
     import cv2
     for r in todo:
@@ -131,16 +169,7 @@ def embed_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
     flush()
     bar.close(f"{len(ids)} embedded")
 
-    if done and emb_path.exists():
-        prior = np.load(emb_path)
-        prior_ids = json.loads(idx_path.read_text())["shot_ids"]
-        matrix = np.vstack([prior] + vecs) if vecs else prior
-        ids = prior_ids + ids
-    else:
-        matrix = np.vstack(vecs) if vecs else np.zeros((0, 0), dtype=np.float32)
-    np.save(emb_path, matrix)
-    idx_path.write_text(json.dumps({"shot_ids": ids, "model": model_name,
-                                    "pretrained": pretrained}))
+    matrix = checkpoint()
     log.info("S04.1 %d embedding(s) of dim %d in %s", matrix.shape[0],
              matrix.shape[1] if matrix.ndim > 1 else 0, emb_path)
     if failed:
