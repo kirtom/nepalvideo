@@ -1,0 +1,177 @@
+"""S06 -- selection, constraints and the beat grid."""
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+
+import numpy as np
+import pytest
+
+from nepal.process import assemble
+
+
+def shot(sid, score=0.5, **kw):
+    d = {"shot_id": sid, "score_total": score, "act": 3, "start_s": 0.0}
+    d.update(kw)
+    return d
+
+
+# -- slot budget -------------------------------------------------------
+
+def test_the_budget_is_the_act_runtime_over_a_mid_shot():
+    assert assemble.slot_budget(100.0, [4.0, 6.0]) == 20     # 100 / 5
+    assert assemble.slot_budget(83.0, [3.0, 5.0]) == 21      # 83 / 4
+
+
+def test_an_act_always_gets_at_least_one_slot():
+    assert assemble.slot_budget(1.0, [10.0, 20.0]) == 1
+
+
+# -- beat snapping -----------------------------------------------------
+
+def test_a_cut_snaps_to_the_nearest_beat_not_the_next_one():
+    """Snapping forward would push every following shot and accumulate."""
+    beats = [0.0, 1.0, 2.0, 3.0]
+    assert assemble.snap_to_beat(1.9, beats) == 2.0
+    assert assemble.snap_to_beat(2.1, beats) == 2.0
+
+
+def test_an_act_transition_snaps_to_a_downbeat():
+    beats = [0.0, 0.5, 1.0, 1.5, 2.0]
+    downbeats = [0.0, 2.0]
+    assert assemble.snap_to_beat(1.4, beats) == 1.5
+    assert assemble.snap_to_beat(1.4, beats, downbeats=downbeats) == 2.0
+
+
+def test_no_grid_leaves_the_time_alone():
+    assert assemble.snap_to_beat(3.7, []) == 3.7
+
+
+# -- MMR ---------------------------------------------------------------
+
+def _emb(mapping):
+    return {k: np.array(v, dtype=np.float32) / np.linalg.norm(v)
+            for k, v in mapping.items()}
+
+
+def test_without_diversity_pressure_the_best_shots_win():
+    cands = [shot("a", 0.9), shot("b", 0.8), shot("c", 0.7)]
+    got = assemble.mmr_select(cands, budget=2, embeddings={}, lam=0.0)
+    assert [s["shot_id"] for s in got] == ["a", "b"]
+
+
+def test_mmr_refuses_a_second_shot_that_looks_like_the_first():
+    """Three shots: a and b are the same ridge, c is different and scores
+    slightly lower. A plain greedy fill takes a then b; MMR takes a then c."""
+    E = _emb({"a": [1, 0], "b": [0.99, 0.01], "c": [0, 1]})
+    cands = [shot("a", 0.90), shot("b", 0.89), shot("c", 0.80)]
+    plain = assemble.mmr_select(cands, budget=2, embeddings=E, lam=0.0)
+    diverse = assemble.mmr_select(cands, budget=2, embeddings=E, lam=0.5)
+    assert [s["shot_id"] for s in plain] == ["a", "b"]
+    assert [s["shot_id"] for s in diverse] == ["a", "c"]
+
+
+def test_an_unknown_similarity_does_not_veto_a_shot():
+    """A shot missing from the embedding index must still be selectable --
+    it is footage we know less about, not footage that repeats."""
+    cands = [shot("a", 0.9), shot("nope", 0.8)]
+    got = assemble.mmr_select(cands, budget=2, embeddings=_emb({"a": [1, 0]}), lam=0.9)
+    assert [s["shot_id"] for s in got] == ["a", "nope"]
+
+
+def test_the_fill_stops_rather_than_forcing_an_inadmissible_shot():
+    cands = [shot("a", 0.9), shot("b", 0.8)]
+    got = assemble.mmr_select(cands, budget=2, embeddings={},
+                              admissible=lambda c, chosen: not chosen)
+    assert len(got) == 1
+
+
+def test_unscored_candidates_are_never_selected():
+    cands = [shot("a", None), shot("b", 0.1)]
+    got = assemble.mmr_select(cands, budget=5, embeddings={})
+    assert [s["shot_id"] for s in got] == ["b"]
+
+
+# -- constraints -------------------------------------------------------
+
+def test_chronology_is_by_capture_time():
+    rows = [shot("late", start_utc="2024-05-02T10:00:00"),
+            shot("early", start_utc="2024-05-01T10:00:00")]
+    assert [s["shot_id"] for s in assemble.chronological(rows)] == ["early", "late"]
+
+
+def test_a_shot_with_no_time_is_kept_at_the_end_not_dropped():
+    rows = [shot("no_time"), shot("timed", start_utc="2024-05-01T10:00:00")]
+    got = assemble.chronological(rows)
+    assert [s["shot_id"] for s in got] == ["timed", "no_time"]
+
+
+def test_a_place_cannot_take_more_than_its_share_of_an_act():
+    chosen = [shot("a", place_name="Namche"), shot("b", place_name="Namche")]
+    assert assemble.place_count_ok(shot("c", place_name="Namche"), chosen, limit=3)
+    chosen.append(shot("c", place_name="Namche"))
+    assert not assemble.place_count_ok(shot("d", place_name="Namche"), chosen, limit=3)
+
+
+def test_an_unnamed_place_never_blocks_a_shot():
+    chosen = [shot(str(i)) for i in range(9)]
+    assert assemble.place_count_ok(shot("x"), chosen, limit=3)
+
+
+def test_the_subject_quota_tracks_runtime():
+    chosen = [shot("a", has_face=1)]
+    assert not assemble.needs_subject(chosen, runtime_s=40, every_s=40)
+    assert assemble.needs_subject(chosen, runtime_s=120, every_s=40)
+
+
+def test_levity_is_owed_until_it_is_present():
+    assert assemble.missing_levity([], minimum=1) == 1
+    assert assemble.missing_levity([shot("a", tag_levity=1)], minimum=1) == 0
+
+
+# -- speech is the spine -----------------------------------------------
+
+def test_speech_shots_are_offered_before_silent_ones_even_when_they_score_less():
+    """Section 1.4: speech is a claim on a slot, not a scoring bonus that a
+    prettier silent shot can outweigh."""
+    cands = [shot("pretty", 0.95),
+             shot("talks", 0.40, has_speech=1, transcript="мы идём наверх")]
+    assert [s["shot_id"] for s in assemble.speech_first(cands)] == ["talks", "pretty"]
+
+
+def test_a_speech_flag_with_no_words_is_not_speech():
+    cands = [shot("pretty", 0.9), shot("flagged", 0.4, has_speech=1, transcript="  ")]
+    assert [s["shot_id"] for s in assemble.speech_first(cands)] == ["pretty", "flagged"]
+
+
+# -- layout ------------------------------------------------------------
+
+def test_shots_are_laid_end_to_end_on_the_grid():
+    beats = [i * 0.5 for i in range(40)]
+    out = assemble.lay_out([shot("a", 0.5), shot("b", 0.5)], start_s=0.0,
+                           duration_range=[4.0, 6.0], beats=beats)
+    assert out[0]["t_in"] == 0.0
+    assert out[1]["t_in"] == out[0]["t_out"], "no gap and no overlap"
+    for s in out:
+        assert 3.0 <= s["t_out"] - s["t_in"] <= 7.0
+
+
+def test_a_stronger_shot_is_held_longer_but_stays_inside_the_act_range():
+    beats = [i * 0.1 for i in range(400)]
+    weak = assemble.lay_out([shot("w", 0.0)], start_s=0, duration_range=[4.0, 6.0], beats=beats)
+    strong = assemble.lay_out([shot("s", 1.0)], start_s=0, duration_range=[4.0, 6.0], beats=beats)
+    assert strong[0]["t_out"] > weak[0]["t_out"]
+    assert weak[0]["t_out"] >= 3.9 and strong[0]["t_out"] <= 6.1
+
+
+def test_the_source_window_matches_the_timeline_window():
+    beats = [i * 0.5 for i in range(40)]
+    out = assemble.lay_out([shot("a", 0.5, start_s=12.0)], start_s=0.0,
+                           duration_range=[4.0, 6.0], beats=beats)
+    row = out[0]
+    assert row["src_in"] == 12.0
+    assert row["src_out"] - row["src_in"] == pytest.approx(row["t_out"] - row["t_in"])
+
+
+def test_a_coarse_grid_never_produces_a_zero_length_shot():
+    out = assemble.lay_out([shot("a"), shot("b")], start_s=0.0,
+                           duration_range=[4.0, 6.0], beats=[0.0])
+    assert all(s["t_out"] > s["t_in"] for s in out)
