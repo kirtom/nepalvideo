@@ -242,6 +242,33 @@ process:
   asr_beam_size: 5
   asr_cpu_threads: 0
 
+  # -- S03.6 faces ----------------------------------------------------
+  # Faces are read from rectilinear views, never the equirect: measured on
+  # this corpus, the same face embedded both ways agreed at 0.87-0.96 cosine
+  # except for one pair at 0.50 -- far enough apart that the face would not
+  # cluster with itself -- and the equirect seam tears a face in two. It
+  # costs nothing: the detector resizes everything to its own input, so four
+  # yaw views took 16.0 s against the equirect frame's 16.5 s.
+  face_yaws: [0, 90, 180, 270]
+  face_view_fov_deg: 90
+  face_view_px: 640
+  # Fewer sample points than the metrics use. A face is a fact about the shot,
+  # not a distribution over it -- if someone is in frame, two looks find them,
+  # and this stage is the most expensive per frame in the pipeline.
+  face_samples_per_shot: 2
+  # Below this the detector is usually finding a rucksack buckle or lichen.
+  # Low, because this corpus is faces at distance under hoods.
+  face_min_det_score: 0.55
+  # Cosine above which two embeddings are the same person. Generous on
+  # purpose: a face that fails to cluster costs a shot its subject, while a
+  # cluster that merges two people is visible at Gate 2 and fixable there.
+  face_same_person_cos: 0.42
+  face_model: buffalo_l
+  # Set true only where a CUDA device exists; the account this ran on had no
+  # GPU quota at all and an 8-core CPU box was enough.
+  face_gpu: false
+  face_workers: 0
+
 # S03.7 quality gate -- one curve per source class (spec section S03.7).
 #
 # max_exposure_pen is far above the spec's 0.15 / 0.20 / 0.35. Those were

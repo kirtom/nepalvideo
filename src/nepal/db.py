@@ -209,6 +209,10 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("shots", "speech_s", "REAL"),
     ("shots", "wind_lf_share", "REAL"),
     ("shots", "wind", "INTEGER"),
+    # S03.6: which yaw view the face was found in, so S04.2 can prefer the
+    # view that actually holds the subject rather than re-deriving it.
+    ("shots", "face_yaw", "REAL"),
+    ("shots", "face_score", "REAL"),
 )
 
 

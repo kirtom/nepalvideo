@@ -187,19 +187,37 @@ def build_lens_pair_graph(fov_deg: float, *,
 
 def build_flat_graph_clamped(*, proxy_size: tuple[int, int] = (960, 540)
                              ) -> tuple[str, list[str]]:
-    """Flat video scaled down to the proxy size -- and never up.
+    """Flat video fitted inside the proxy box -- never up, never distorted.
 
     An .lrv is already a 640x360 proxy. Enlarging it to 960x540 and re-encoding
     costs the full pass to produce something worse than the input.
+
+    ``force_original_aspect_ratio=decrease`` is the whole point of this
+    filter and was missing from the first version, which set width and height
+    independently. That is correct only for 16:9 input, and 367 of this
+    corpus's 458 flat recordings are not: a phone shooting portrait writes
+    720x1280, and an iPhone writes 1080x1920 behind a rotation flag that
+    ffmpeg applies on decode. Both were being squashed into a 16:9 box --
+    stretched 2.4x and 3.2x horizontally. Nothing downstream noticed, because
+    every metric still computes happily on a distorted frame; it took
+    InsightFace failing to find a face that filled the frame to surface it.
+    S07 renders the draft from these proxies, so the film itself would have
+    had stretched people in it.
     """
     pw, ph = proxy_size
-    return (f"[0:v]scale=w='min(iw,{pw})':h='min(ih,{ph})'[eqout]"), ["eqout"]
+    return (f"[0:v]scale=w='min(iw,{pw})':h='min(ih,{ph})'"
+            f":force_original_aspect_ratio=decrease:force_divisible_by=2[eqout]"), ["eqout"]
 
 
 def build_flat_graph(*, proxy_size: tuple[int, int] = (960, 540)) -> tuple[str, list[str]]:
-    """Flat or wide-mode footage skips v360 entirely -- a single proxy."""
+    """Flat or wide-mode footage skips v360 entirely -- a single proxy.
+
+    Fits inside the box rather than filling it, for the reason spelled out in
+    :func:`build_flat_graph_clamped`: this corpus is mostly not 16:9.
+    """
     w, h = proxy_size
-    return f"[0:v]scale={w}:{h}[eqout]", ["eqout"]
+    return (f"[0:v]scale=w={w}:h={h}:force_original_aspect_ratio=decrease"
+            f":force_divisible_by=2[eqout]"), ["eqout"]
 
 
 def plan_for_mode(sources: Sequence[Path], recording_id: str, work: Path, *,

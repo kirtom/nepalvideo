@@ -20,11 +20,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from nepal import db, freshness
 from nepal.config import Config
 from nepal.process import (asr as asr_mod, audio as audio_mod,
-                           gate as gate_mod, metrics as metrics_mod,
-                           reproject, shots as shots_mod, stills)
+                           faces as faces_mod, gate as gate_mod,
+                           metrics as metrics_mod, reproject,
+                           shots as shots_mod, stills)
 from nepal.spine import acts as acts_mod, gps as gps_mod
 from nepal.util import proc
 from nepal.util.progress import Progress, heartbeat
@@ -642,6 +645,160 @@ def transcribe_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any
             "n_empty": empty, "chars": chars}
 
 
+def detect_faces(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
+    """S03.6 -- who is in each shot.
+
+    Two passes. The first reads every candidate shot and collects face
+    embeddings; the second clusters them across the whole corpus at once,
+    because "the same person" cannot be decided one shot at a time. Only then
+    are ``has_face`` and ``face_cluster`` written.
+
+    360 shots are read through four rectilinear yaw views; flat shots are
+    already rectilinear and are read directly. Embeddings are kept in memory
+    between the passes -- a few thousand 512-float vectors is a few megabytes
+    -- and the shot keeps the strongest face it showed, with the yaw it was
+    facing, which is what S04.2 needs to pick a framing.
+
+    Resumable through the data: a shot with ``has_face`` set has been looked
+    at. Note that the clustering is global, so a partial re-run relabels
+    against only what it re-reads; ``--redo faces`` re-reads everything.
+    """
+    proxies = cfg.work_root / "proxies"
+    where = "" if force else " AND s.has_face IS NULL"
+    rows = [dict(r) for r in conn.execute(
+        "SELECT s.shot_id, s.recording_id, s.start_s, s.end_s, r.is_360 "
+        "FROM shots s JOIN recordings r ON r.recording_id = s.recording_id "
+        f"WHERE s.media_kind = 'video' AND s.status = 'candidate'{where} "
+        "ORDER BY s.recording_id, s.start_s")]
+    if not rows:
+        return {"n_shots": 0, "note": "every candidate shot already looked at"}
+
+    yaws = [int(y) for y in cfg.get("process.face_yaws", list(faces_mod.YAWS))]
+    fov = float(cfg.get("process.face_view_fov_deg", faces_mod.VIEW_FOV_DEG))
+    px = int(cfg.get("process.face_view_px", faces_mod.VIEW_SIZE[0]))
+    n_samples = int(cfg.get("process.face_samples_per_shot", 2))
+    min_score = float(cfg.get("process.face_min_det_score", faces_mod.MIN_DET_SCORE))
+    thresh = float(cfg.get("process.face_same_person_cos", faces_mod.SAME_PERSON_COS))
+    model = str(cfg.get("process.face_model", "buffalo_l"))
+    gpu = bool(cfg.get("process.face_gpu", False))
+
+    log.info("S03.6 %d candidate shot(s), %d sample(s) each, %s on %s",
+             len(rows), n_samples, model, "GPU" if gpu else "CPU")
+    try:
+        app = faces_mod.load_model(model, gpu=gpu, det_size=(px, px))
+    except ImportError:
+        log.warning("S03.6 insightface not installed -- skipping "
+                    "(pip install '.[faces]')")
+        return {"skipped": "insightface not installed"}
+
+    by_rec: dict[str, list[dict]] = {}
+    for r in rows:
+        by_rec.setdefault(r["recording_id"], []).append(r)
+    missing = [rid for rid in by_rec if not (proxies / f"{rid}_eq.mp4").exists()]
+    for rid in missing:
+        by_rec.pop(rid, None)
+    if missing:
+        log.warning("S03.6 %d recording(s) have no proxy and are skipped", len(missing))
+
+    # pass one: look at every shot
+    per_shot: list[dict[str, Any]] = []
+    embeddings: list[np.ndarray] = []
+    owners: list[int] = []                 # index into per_shot, per embedding
+    views_for: dict[tuple[int, int], faces_mod.YawViews] = {}
+    failed: dict[str, int] = {}
+    t0 = time.monotonic()
+    bar = Progress("S03.6 reading faces", len(rows))
+    for rid, shots in by_rec.items():
+        cap = None
+        try:
+            import cv2
+            cap = cv2.VideoCapture(str(proxies / f"{rid}_eq.mp4"))
+            for sh in shots:
+                bar.step(note=sh["shot_id"][-24:])
+                try:
+                    times = metrics_mod.sample_times(sh["start_s"], sh["end_s"], n_samples)
+                    groups = metrics_mod.read_samples(
+                        proxies / f"{rid}_eq.mp4", times,
+                        frames_per_sample=1, cap=cap)
+                except Exception as exc:               # a bad proxy, not a bug
+                    log.debug("S03.6 %s: %s", sh["shot_id"], exc)
+                    failed[type(exc).__name__] = failed.get(type(exc).__name__, 0) + 1
+                    continue
+                found: list[dict[str, Any]] = []
+                for frames in groups:
+                    for frame in frames:
+                        if frame is None or not getattr(frame, "size", 0):
+                            continue
+                        if sh["is_360"]:
+                            key = frame.shape[:2]
+                            views = views_for.get(key)
+                            if views is None:
+                                views = faces_mod.YawViews(key, yaws, fov_deg=fov,
+                                                           out=(px, px))
+                                views_for[key] = views
+                            for yaw in yaws:
+                                for f in faces_mod.detect(app, views.render(frame, yaw),
+                                                          min_score=min_score):
+                                    found.append({**f, "yaw": float(yaw)})
+                        else:
+                            for f in faces_mod.detect(app, frame, min_score=min_score):
+                                found.append({**f, "yaw": None})
+                idx = len(per_shot)
+                best = max(found, key=lambda f: f["score"]) if found else None
+                per_shot.append({"shot_id": sh["shot_id"], "n": len(found),
+                                 "score": best["score"] if best else None,
+                                 "yaw": best["yaw"] if best else None,
+                                 "cluster": None})
+                for f in found:
+                    embeddings.append(f["embedding"])
+                    owners.append(idx)
+        finally:
+            if cap is not None:
+                cap.release()
+    bar.close(f"{len(per_shot)} shot(s), {len(embeddings)} face(s)")
+    took = time.monotonic() - t0
+
+    # pass two: one clustering over the whole corpus
+    labels = faces_mod.cluster(embeddings, threshold=thresh)
+    named = faces_mod.name_clusters(labels)
+    # a shot is attributed to the person it shows most often
+    votes: dict[int, dict[int, int]] = {}
+    for label, owner in zip(labels, owners):
+        votes.setdefault(owner, {})[label] = votes.setdefault(owner, {}).get(label, 0) + 1
+    for owner, tally in votes.items():
+        per_shot[owner]["cluster"] = max(tally, key=lambda c: (tally[c], -c))
+
+    conn.executemany(
+        "UPDATE shots SET has_face=?, face_cluster=?, face_yaw=?, face_score=? "
+        "WHERE shot_id=?",
+        [(1 if r["n"] else 0,
+          named.get(r["cluster"]) if r["cluster"] is not None else None,
+          r["yaw"], r["score"], r["shot_id"]) for r in per_shot])
+    conn.commit()
+
+    sizes: dict[int, int] = {}
+    for c in labels:
+        sizes[c] = sizes.get(c, 0) + 1
+    with_face = sum(1 for r in per_shot if r["n"])
+    log.info("S03.6 %d of %d shot(s) show a face; %d face(s) in %d cluster(s), "
+             "%.1f min (%.1f s/shot)",
+             with_face, len(per_shot), len(embeddings), len(sizes),
+             took / 60, took / max(len(per_shot), 1))
+    for c, name in named.items():
+        log.info("S03.6 cluster %d -> %s: %d face(s) -- confirm at Gate 2",
+                 c, name, sizes.get(c, 0))
+    biggest = sorted(sizes.values(), reverse=True)[:6]
+    log.info("S03.6 cluster sizes, largest first: %s%s", biggest,
+             " (a long tail of ones is normal: strangers, and profiles that "
+             "did not match)" if len(sizes) > len(named) else "")
+    if failed:
+        log.warning("S03.6 %d shot(s) failed: %s", sum(failed.values()), failed)
+    return {"n_shots": len(per_shot), "n_faces": len(embeddings),
+            "n_with_face": with_face, "n_clusters": len(sizes),
+            "named": {str(k): v for k, v in named.items()},
+            "cluster_sizes": biggest, "seconds": round(took, 1), "failed": failed}
+
+
 def apply_gate(cfg: Config, conn) -> dict[str, Any]:
     """S03.7 -- reject what is not worth a caption, a transcription or a human.
 
@@ -848,6 +1005,8 @@ def run(cfg: Config, *, force: bool = False,
                  cfg, conn, force=force or "audio" in (redo or ()))),
              ("asr", lambda: transcribe_shots(
                  cfg, conn, force=force or "asr" in (redo or ()))),
+             ("faces", lambda: detect_faces(
+                 cfg, conn, force=force or "faces" in (redo or ()))),
              # The gate is re-run every time: it is pure, it is cheap, and a
              # rejection left over from an older threshold is invisible.
              ("gate", lambda: apply_gate(cfg, conn))]

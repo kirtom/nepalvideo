@@ -4,6 +4,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 import pytest
 
 from nepal.process.reproject import (normalise_yaw, build_360_graph, build_flat_graph,
+                                     build_flat_graph_clamped,
                                      plan, build_command,
                                      detect_hwaccel, detect_encoder, reset_detection_cache)
 
@@ -75,7 +76,8 @@ def test_sizes_are_honoured():
 def test_flat_graph_skips_v360_entirely():
     fc, labels = build_flat_graph(proxy_size=(960, 540))
     assert "v360" not in fc
-    assert fc == "[0:v]scale=960:540[eqout]"
+    assert fc.startswith("[0:v]scale=") and fc.endswith("[eqout]")
+    assert "w=960" in fc and "h=540" in fc
     assert labels == ["eqout"]
 
 
@@ -481,3 +483,55 @@ def test_the_preset_is_applied_only_where_something_is_encoded(tmp_path):
     remux = plan_for_mode([pathlib.Path("a.lrv")], "r", tmp_path, mode="flat",
                           passthrough=True)
     assert "-preset" not in build_command(remux, preset="veryfast")
+
+
+# -- aspect ratio ------------------------------------------------------
+# 367 of this corpus's 458 flat recordings are not 16:9 -- phones shooting
+# portrait, and iPhones writing 1080x1920 behind a rotation flag. The first
+# version of these graphs set width and height independently, which squashed
+# every one of them into the 16:9 box. Nothing downstream noticed: metrics
+# compute happily on a distorted frame, and S07 renders the draft from these
+# proxies, so the film would have had stretched people in it.
+
+@pytest.mark.parametrize("build", [build_flat_graph, build_flat_graph_clamped])
+def test_flat_graphs_preserve_aspect_ratio(build):
+    fc, _ = build(proxy_size=(960, 540))
+    assert "force_original_aspect_ratio=decrease" in fc
+    assert "force_divisible_by=2" in fc, "h264 needs even dimensions"
+
+
+def test_the_clamped_graph_still_refuses_to_enlarge():
+    fc, _ = build_flat_graph_clamped(proxy_size=(960, 540))
+    assert "min(iw,960)" in fc and "min(ih,540)" in fc
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("w,h", [(1080, 1920), (720, 1280), (1920, 1080), (640, 360)])
+def test_ffmpeg_keeps_the_shape_of_real_footage(tmp_path, w, h):
+    """Run the real filter over real frames. A unit test on the string would
+    have passed the broken version too -- it was well-formed, just wrong."""
+    import json
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        pytest.skip("needs ffmpeg")
+    src = tmp_path / f"src_{w}x{h}.mp4"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", f"testsrc=size={w}x{h}:rate=5:duration=1",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(src)], check=True)
+    fc, labels = build_flat_graph_clamped(proxy_size=(960, 540))
+    out = tmp_path / "proxy.mp4"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(src), "-filter_complex", fc,
+                    "-map", f"[{labels[0]}]", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", str(out)], check=True)
+    probe = json.loads(subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "json", str(out)],
+        capture_output=True, text=True, check=True).stdout)["streams"][0]
+    got_w, got_h = probe["width"], probe["height"]
+    assert got_w <= 960 and got_h <= 540, "must fit inside the proxy box"
+    assert abs((got_w / got_h) - (w / h)) / (w / h) < 0.02, (
+        f"{w}x{h} came back as {got_w}x{got_h}: aspect ratio changed")
+    if w <= 960 and h <= 540:
+        assert (got_w, got_h) == (w, h), "small input must pass through untouched"
