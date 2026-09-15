@@ -263,6 +263,13 @@ process:
   # purpose: a face that fails to cluster costs a shot its subject, while a
   # cluster that merges two people is visible at Gate 2 and fixable there.
   face_same_person_cos: 0.42
+  # Cosine between two cluster MEANS above which they are one person. The
+  # greedy pass splits a person whose pose changes -- on this corpus keller
+  # came back as 376 + 65 + 25 faces and kulikov as 200 + 33, with means
+  # 0.48-0.78 apart while strangers sat at 0.00-0.12. Merging at 0.40 put
+  # them back together (482 and 264) and left every other pair below 0.12.
+  # The gap is wide, so anything from 0.35 to 0.45 gives the same answer.
+  face_merge_cos: 0.40
   face_model: buffalo_l
   # Set true only where a CUDA device exists; the account this ran on had no
   # GPU quota at all and an 8-core CPU box was enough.

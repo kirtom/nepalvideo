@@ -775,8 +775,10 @@ def detect_faces(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
         log.info("S03.6 %d embedding(s) saved to %s", len(embeddings),
                  emb_dir / "embeddings.npy")
 
-    # pass two: one clustering over the whole corpus
-    labels = faces_mod.cluster(embeddings, threshold=thresh)
+    # pass two: one clustering over the whole corpus, then a merge
+    labels = faces_mod.merge_clusters(
+        embeddings, faces_mod.cluster(embeddings, threshold=thresh),
+        merge_cos=float(cfg.get("process.face_merge_cos", faces_mod.MERGE_COS)))
     named = faces_mod.name_clusters(labels)
     # a shot is attributed to the person it shows most often
     votes: dict[int, dict[int, int]] = {}
@@ -818,6 +820,50 @@ def detect_faces(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
             "n_with_face": with_face, "n_clusters": len(sizes),
             "named": {str(k): v for k, v in named.items()},
             "cluster_sizes": biggest, "seconds": round(took, 1), "failed": failed}
+
+
+def recluster_faces(cfg: Config, conn) -> dict[str, Any]:
+    """Redo S03.6's clustering from the stored embeddings.
+
+    Seconds against sixteen minutes, because the thresholds it depends on --
+    ``face_same_person_cos`` and ``face_merge_cos`` -- are exactly the kind of
+    value this corpus keeps moving. Nothing is detected again.
+    """
+    emb_path = cfg.work_root / "faces" / "embeddings.npy"
+    idx_path = cfg.work_root / "faces" / "embeddings_index.json"
+    if not emb_path.exists() or not idx_path.exists():
+        return {"skipped": "no stored embeddings; run `nepal s03 --redo faces`"}
+    E = np.load(emb_path)
+    shot_ids = json.loads(idx_path.read_text())["shot_ids"]
+    if len(shot_ids) != len(E):
+        return {"error": f"index has {len(shot_ids)} ids for {len(E)} embeddings"}
+
+    thresh = float(cfg.get("process.face_same_person_cos", faces_mod.SAME_PERSON_COS))
+    merge = float(cfg.get("process.face_merge_cos", faces_mod.MERGE_COS))
+    labels = faces_mod.merge_clusters(
+        E, faces_mod.cluster(E, threshold=thresh), merge_cos=merge)
+    named = faces_mod.name_clusters(labels)
+
+    votes: dict[str, dict[int, int]] = {}
+    for label, sid in zip(labels, shot_ids):
+        votes.setdefault(sid, {})[label] = votes.setdefault(sid, {}).get(label, 0) + 1
+    conn.executemany(
+        "UPDATE shots SET face_cluster=? WHERE shot_id=?",
+        [(named.get(max(t, key=lambda c: (t[c], -c))), sid) for sid, t in votes.items()])
+    conn.commit()
+
+    sizes: dict[int, int] = {}
+    for c in labels:
+        sizes[c] = sizes.get(c, 0) + 1
+    log.info("S03.6 re-clustered %d face(s) at same=%.2f merge=%.2f: %d cluster(s), "
+             "largest %s", len(E), thresh, merge, len(sizes),
+             sorted(sizes.values(), reverse=True)[:6])
+    for c, name in named.items():
+        log.info("S03.6 cluster %d -> %s: %d face(s) -- confirm at Gate 2",
+                 c, name, sizes.get(c, 0))
+    return {"n_faces": len(E), "n_clusters": len(sizes),
+            "named": {str(k): v for k, v in named.items()},
+            "cluster_sizes": sorted(sizes.values(), reverse=True)[:6]}
 
 
 def apply_gate(cfg: Config, conn) -> dict[str, Any]:
@@ -1028,12 +1074,17 @@ def run(cfg: Config, *, force: bool = False,
                  cfg, conn, force=force or "asr" in (redo or ()))),
              ("faces", lambda: detect_faces(
                  cfg, conn, force=force or "faces" in (redo or ()))),
+             # Cheap, and depends on two thresholds that move, so it is re-run
+             # whenever asked rather than remembered as done.
+             ("recluster", lambda: recluster_faces(cfg, conn)),
              # The gate is re-run every time: it is pure, it is cheap, and a
              # rejection left over from an older threshold is invisible.
              ("gate", lambda: apply_gate(cfg, conn))]
     # The gate is a pure function of metrics and thresholds, both of which move
     # while the film is being tuned, so it is never skipped as already done.
     always = {"gate"} | set(redo or ())
+    if "faces" in always:
+        always.add("recluster")          # a fresh detection pass re-clusters itself
     unknown = (redo or set()) - {name for name, _ in steps}
     if unknown:
         raise SystemExit(f"unknown --redo step(s): {', '.join(sorted(unknown))}")

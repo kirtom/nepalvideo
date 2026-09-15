@@ -37,6 +37,11 @@ SAME_PERSON_COS = 0.42
 # A detection this weak is usually a rock, a rucksack buckle or a patch of
 # lichen. Kept low: the corpus is faces at distance under hoods.
 MIN_DET_SCORE = 0.55
+# Cosine between two cluster *means* above which they are the same person.
+# See merge_clusters: measured on this corpus, fragments of one person sit at
+# 0.48-0.78 and different people at 0.00-0.12, so anything in the middle
+# works and 0.40 is the middle.
+MERGE_COS = 0.40
 
 
 # -- projection --------------------------------------------------------
@@ -165,6 +170,63 @@ def cluster(embeddings: Sequence[np.ndarray], *,
             counts[best] = n + 1
             labels.append(best)
     return labels
+
+
+def merge_clusters(embeddings: Sequence[np.ndarray], labels: Sequence[int], *,
+                   merge_cos: float = MERGE_COS) -> list[int]:
+    """Merge clusters whose means are the same person, repeatedly.
+
+    :func:`cluster` is a single greedy pass against running means, and that
+    fails in one specific way on this corpus: once a cluster's mean has drifted
+    toward the frontal views it accumulated first, a later profile of the same
+    person no longer matches it and starts a cluster of its own. Measured on
+    the real embeddings, the two trekkers had split into five clusters --
+    keller across 376 + 65 + 25, kulikov across 200 + 33 -- whose means sat at
+    0.48 to 0.78 cosine from one another while genuine strangers sat at 0.00
+    to 0.12. That gap is what this pass closes, and it is wide enough that the
+    threshold is not delicate: anything from 0.35 to 0.45 gives the same
+    answer.
+
+    Lowering the *detection* threshold instead does not work; it was tried.
+    The fragments survive because the failure is in the order faces arrive,
+    not in how similar they are.
+
+    Average linkage over means, closest pair first, until nothing is close
+    enough. Cheap: a few hundred clusters, not a few thousand faces.
+    """
+    if not len(embeddings):
+        return []
+    E = np.asarray(embeddings, dtype=np.float32)
+    groups: dict[int, list[int]] = {}
+    for i, l in enumerate(labels):
+        groups.setdefault(int(l), []).append(i)
+
+    def mean_of(idxs: list[int]) -> np.ndarray:
+        m = E[idxs].mean(axis=0)
+        n = float(np.linalg.norm(m))
+        return m / n if n else m
+
+    means = {k: mean_of(v) for k, v in groups.items()}
+    while True:
+        best: tuple[float, int, int] | None = None
+        keys = sorted(groups, key=lambda k: -len(groups[k]))
+        for i, a in enumerate(keys):
+            for b in keys[i + 1:]:
+                sim = float(means[a] @ means[b])
+                if sim >= merge_cos and (best is None or sim > best[0]):
+                    best = (sim, a, b)
+        if best is None:
+            break
+        _, a, b = best
+        groups[a].extend(groups[b])
+        del groups[b], means[b]
+        means[a] = mean_of(groups[a])
+
+    out = [0] * len(labels)
+    for k, idxs in groups.items():
+        for i in idxs:
+            out[i] = k
+    return out
 
 
 def name_clusters(labels: Sequence[int], names: Sequence[str] = ("keller", "kulikov")

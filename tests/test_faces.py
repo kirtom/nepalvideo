@@ -82,6 +82,61 @@ def test_nothing_in_is_no_clusters_not_a_crash():
     assert faces.cluster([]) == []
 
 
+def _pose(seed: int, n: int, *, toward: int, cos_to_base: float = 0.65,
+          jitter: float = 0.05) -> list[np.ndarray]:
+    """The same person as ``_person(seed, ...)`` seen in a different pose.
+
+    A pose change rotates the embedding toward some other direction; it does
+    not randomise it. Adding large isotropic noise instead would model a
+    stranger: at 512 dimensions a jitter of 0.35 has norm ~7.9 against a unit
+    vector, which swamps the identity entirely -- a first draft of this test
+    did exactly that and asserted the algorithm was broken.
+    """
+    rng = np.random.default_rng(seed)
+    base = rng.normal(size=512).astype(np.float32); base /= np.linalg.norm(base)
+    d = np.random.default_rng(toward).normal(size=512).astype(np.float32)
+    d -= d @ base * base                       # orthogonal to base
+    d /= np.linalg.norm(d)
+    centre = cos_to_base * base + np.sqrt(1 - cos_to_base ** 2) * d
+    out = []
+    for _ in range(n):
+        e = centre + rng.normal(scale=jitter, size=512).astype(np.float32)
+        out.append(e / np.linalg.norm(e))
+    return out
+
+
+def test_a_person_split_by_the_greedy_pass_is_merged_back():
+    """The real failure this fixes: one person's frontal views form a cluster
+    whose mean drifts, and their profiles then start a second cluster. On the
+    corpus, keller was split 376 + 65 + 25 with the means 0.58-0.78 apart
+    while strangers sat below 0.12."""
+    a1, a2 = _person(11, 6), _pose(11, 4, toward=99, cos_to_base=0.65)
+    b = _person(22, 5)
+    embs = a1 + b + a2
+    greedy = faces.cluster(embs)
+    assert len(set(greedy)) > 2, "precondition: the greedy pass must split them"
+    merged = faces.merge_clusters(embs, greedy)
+    assert len(set(merged)) == 2
+    assert len(set(merged[:6]) | set(merged[11:])) == 1, "one person, one cluster"
+    assert set(merged[:6]).isdisjoint(set(merged[6:11])), "two people stay apart"
+
+
+def test_merging_never_joins_two_different_people():
+    embs = _person(31, 5) + _person(32, 5) + _person(33, 5)
+    merged = faces.merge_clusters(embs, faces.cluster(embs))
+    assert len(set(merged)) == 3
+
+
+def test_merging_nothing_is_not_a_crash():
+    assert faces.merge_clusters([], []) == []
+
+
+def test_a_merge_threshold_of_one_changes_nothing():
+    embs = _person(41, 4) + _person(42, 4)
+    greedy = faces.cluster(embs)
+    assert faces.merge_clusters(embs, greedy, merge_cos=1.01) == greedy
+
+
 def test_the_two_largest_clusters_get_the_names():
     labels = [0, 0, 0, 1, 1, 1, 1, 2]          # cluster 1 is the largest
     named = faces.name_clusters(labels)
