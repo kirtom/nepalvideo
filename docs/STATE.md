@@ -9,7 +9,7 @@ changes, edit this file in the same commit.
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | S01 Probe + S02 Spine | **done**, validated end to end |
-| 2 | S03 per-clip processing | **S03.0–.4 and .7 done and calibrated on the corpus**; .5 built and running on EC2; .6 .8 remain |
+| 2 | S03 per-clip processing | **S03.0–.5 and .7 done**, calibrated and run on the corpus; .6 remains (.8 dropped) |
 | 5 | S04 Semantic + S05 Score | not started |
 | 7 | S06 Assemble + S07 Draft render | not started |
 | 3, 4, 6, 8, 9 | containerise, Batch, gates, conform, Step Functions | not started |
@@ -71,6 +71,14 @@ invalidate parts of them, noted inline.
   telegram 5 (61%). Not wind heard as speech: speech share falls with wind
   share (48 → 26 → 16 → 0%) and the wind-flagged shots have none. The VAD is
   faster-whisper's bundled silero ONNX model, ~65× realtime on this CPU.
+- **S03.5** (2026-09-15, on the EC2 box) — **537 shots, 66.2 min of speech,
+  in 47:55** at 0.4× realtime, i.e. faster than the audio it is reading.
+  45,235 characters of transcript; 2 speech shots came back empty. Locally
+  the same work was measured at 27 h. Per source: camera 298 shots /
+  27.5k chars, keller 86 / 6.4k, kulikov 132 / 7.5k, telegram 23 / 3.8k —
+  telegram densest at 166 chars/shot, which is what a round video is.
+  Spot-checked: coherent Russian, gear talk and reflection, not wind
+  artefacts. `large-v3`, beam 5, `ru` forced.
 - **S03.7** after calibration (below) — **1,626 of 1,856 survive** (12%
   rejected): soft 219 (214 black + 5), too short 7, shaky 4, exposure 0.
   Camera 429 of 433 real shots, phone 1,109 of 1,121, telegram 88 of 88.
@@ -110,17 +118,18 @@ invalidate parts of them, noted inline.
      time**, so moving `jerk_ref` is a `nepal s03` re-run (seconds), not a
      38-minute re-measure. The 1,152 existing rows were backfilled by the
      exact inverse, checked against fresh OpenCV measurements to 4 decimals.
-5. ~~S03.4~~ — **done 2026-09-15.** Stores `audio_lufs`, `wind_lf_share`,
-   `speech_s`; `has_speech` and `wind` are derived at gate time from
-   `process.speech_min_s` / `process.wind_lf_ratio`, so both thresholds move
-   without a re-measure. Then **S03.5** transcription — §1.4 makes speech the
-   spine, so this is not optional. **70 minutes of speech to transcribe.** At
-   this machine's measured `large-v3` rate (6–17× realtime, memory-bound)
-   that is 7–20 hours; on a `g4dn.xlarge` it is minutes. See the cloud
-   assessment (2026-09-15) — this is the number it said to wait for.
-6. **S03.6** faces, then M5 (S04 semantic + S05 scoring), then M7 (S06 assemble
-   + S07 draft render). S03.6 and S04.1 both want a GPU; the G-instance quota
-   request below has to land first, or they run on CPU on the same box.
+5. ~~S03.4~~ and ~~S03.5~~ — **both done 2026-09-15.** S03.4 stores
+   `audio_lufs`, `wind_lf_share`, `speech_s`; `has_speech` and `wind` are
+   derived at gate time from `process.speech_min_s` /
+   `process.wind_lf_ratio`, so both thresholds move without a re-measure.
+   S03.5 ran on the EC2 box in 48 minutes — see the run record above. The
+   film now has its spine: 45k characters of Russian across 537 shots.
+6. **S03.6** faces — the last piece of M2, and the next thing to build. Then
+   M5 (S04 semantic + S05 scoring), then M7 (S06 assemble + S07 draft
+   render). S03.6 and S04.1 both want a GPU, but S03.5 is evidence the box
+   may not need one: 8 cores and 30 GB beat the local machine 32× with no
+   vector hardware at all. Try CPU first and measure before waiting on the
+   quota case.
 
 ## The cloud move
 
@@ -159,9 +168,12 @@ Recorded as a deviation in the README.
   bootstrap deliberately does not start a stage: the DB is synced last, after
   the local run has stopped.
 
-**The DB is now authoritative on the instance.** Anything written locally
-after the 2026-09-15 07:3x cutover will be lost. Sync it back before working
-locally again.
+**Where the database is authoritative moves with the work.** It went up at
+the 2026-09-15 07:3x cutover, and came back down after S03.5 finished
+(`nepal.sqlite.pre-cloud-*` next to it is the pre-sync local copy). Sync
+before and after any remote stage, and check
+`select count(*) from shots where transcript is not null` on both ends —
+539 is the number as of now.
 
 ## Open, and waiting on a person
 

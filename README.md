@@ -41,7 +41,7 @@ moving. Act 4 is one swell into a hard cut to silence.
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | S01 Probe + S02 Spine | **done**, validated end to end on the real corpus |
-| 2 | S03 per-clip processing | **S03.0–.5 and .7 built**; .5 running on EC2; .6 and .8 remain |
+| 2 | S03 per-clip processing | **S03.0–.5 and .7 done and run on the corpus**; .6 remains (.8 dropped) |
 | 5 | S04 Semantic + S05 Score | not started |
 | 7 | S06 Assemble + S07 Draft render | not started |
 | 3, 4, 6, 8, 9 | containerise, Batch, gates, conform, Step Functions | not started / partly dropped |
@@ -185,7 +185,7 @@ on a 4-core, 11 GB machine:
 | S03.0 photos | 7 min | decode-bound, scales nearly linearly with cores |
 | S03.3 metrics | 38 min | 5 sample points × 3 frames per shot |
 | S03.4 audio | 3 min | loudness per shot, VAD once per recording |
-| S03.5 speech | **7–20 h locally, ~50 min on EC2** | 70 min of speech; the 32× is RAM and cores, not a GPU |
+| S03.5 speech | **48 min on EC2** (est. 7–20 h locally) | 537 shots, 66 min of speech, 0.4× realtime |
 | S03.7 gate | seconds | pure function of stored metrics and thresholds |
 
 ---
