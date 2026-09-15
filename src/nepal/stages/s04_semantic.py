@@ -26,12 +26,36 @@ log = logging.getLogger(__name__)
 STAGE = "S04"
 
 
+def surviving_shots(conn) -> list[dict[str, Any]]:
+    """Every shot the gate did not reject, with what it takes to find a frame.
+
+    The predicate is the complement of the gate's verdict rather than a list of
+    the statuses that happen to exist today. S05 promotes its picks to
+    'shortlisted', so a status whitelist of 'candidate' silently stops matching
+    the shots the film is made of the moment a cut has been built once.
+    """
+    return [dict(r) for r in conn.execute(
+        "SELECT s.shot_id, s.recording_id, s.asset_id, s.media_kind, "
+        "s.start_s, s.end_s, a.s3_key, r.is_360 "
+        "FROM shots s "
+        "LEFT JOIN assets a ON a.asset_id = s.asset_id "
+        "LEFT JOIN recordings r ON r.recording_id = s.recording_id "
+        "WHERE s.status <> 'rejected' ORDER BY s.shot_id")]
+
+
 def embed_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
     """S04.1 -- CLIP embedding of the sharpest frame of every surviving shot.
 
     Photographs are embedded from their own file; video shots from the proxy.
     Only shots that survived the gate: the point of the gate is that nothing
     past it should pay for what it rejected.
+
+    "Survived" is ``status <> 'rejected'``, not ``status = 'candidate'``. S05
+    promotes its picks to 'shortlisted', so once a cut exists the 400 shots the
+    film is actually made of no longer match 'candidate' -- and those are
+    precisely the rows MMR needs an embedding for. Asking for the complement of
+    the gate's verdict says what is meant and cannot drift as statuses are
+    added.
     """
     out_dir = cfg.workdir("semantic")
     emb_path = out_dir / "clip.npy"
@@ -40,13 +64,7 @@ def embed_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
     if emb_path.exists() and idx_path.exists() and not force:
         done = set(json.loads(idx_path.read_text())["shot_ids"])
 
-    rows = [dict(r) for r in conn.execute(
-        "SELECT s.shot_id, s.recording_id, s.asset_id, s.media_kind, "
-        "s.start_s, s.end_s, a.s3_key, r.is_360 "
-        "FROM shots s "
-        "LEFT JOIN assets a ON a.asset_id = s.asset_id "
-        "LEFT JOIN recordings r ON r.recording_id = s.recording_id "
-        "WHERE s.status = 'candidate' ORDER BY s.shot_id")]
+    rows = surviving_shots(conn)
     todo = [r for r in rows if r["shot_id"] not in done]
     if not todo:
         return {"n_shots": len(rows), "note": "every surviving shot already embedded"}

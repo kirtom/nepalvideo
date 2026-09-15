@@ -1,6 +1,6 @@
 # Where the project stands
 
-**As of 2026-09-15.** Keep this current: it is what a new session reads to
+**As of 2026-09-16.** Keep this current: it is what a new session reads to
 avoid re-deriving a fortnight of findings. When a stage lands or a number
 changes, edit this file in the same commit.
 
@@ -10,12 +10,16 @@ changes, edit this file in the same commit.
 |---|---|---|
 | 1 | S01 Probe + S02 Spine | **done**, validated end to end |
 | 2 | S03 per-clip processing | **done** — S03.0–.7 all run on the corpus (.8 dropped) |
-| 5 | S04 Semantic + S05 Score | not started |
-| 7 | S06 Assemble + S07 Draft render | not started |
+| 5 | S04 Semantic + S05 Score | S05 **done**; S04.1 built, not yet run; S04.2/.3 blocked on Bedrock |
+| 7 | S06 Assemble + S07 Draft render | **done** — a first draft cut exists |
 | 3, 4, 6, 8, 9 | containerise, Batch, gates, conform, Step Functions | not started |
 
-S01–S03.4 ran locally. **S03.5 runs on a rented EC2 box** — see "The cloud
-move" below. The account is live and the Budgets alarm is set (spec §8.1).
+S01–S03.4 ran locally. S03.5 ran on a rented EC2 box — see "The cloud move"
+below. **That account is now suspended pending document verification**, so
+everything since has run on this machine, and everything the film needs up to
+Gate 3 has turned out to run here. Nothing of value is trapped in AWS: the
+originals never left, and the DB, transcripts, face embeddings and proxies are
+all local.
 
 ## The last full run
 
@@ -106,6 +110,64 @@ invalidate parts of them, noted inline.
   Insta360's single-lens mode and both phones stabilise in camera, so almost
   nothing is shaky, and the black recordings account for the rest.
 
+### S05 + S06 + S07 — the first draft cut (2026-09-16)
+
+`nepal cut` scores, assembles and renders in one driver.
+
+- **S05** scored all 1,632 surviving shots. `score_sem` is **absent for every
+  one of them** — captions are S04.3 and Bedrock is blocked — so `weighted`
+  dropped the term and renormalised across tech and context. The ranking is
+  therefore correct on what is known rather than distorted by a zero, but it
+  has not been informed by what is *in* the shots.
+- **Shortlist: 400** (199 video, 201 photo), of 1,632.
+- **S06** laid out **220 slots, 19.8 min** — acts {1: 21 slots/1.4 min,
+  2: 40/3.4, 3: 74/7.6, 4: 37/2.0, 5: 48/5.5}, 126 video and 94 photographs.
+  `timeline.otio` and `timeline.fcpxml` are written beside the draft.
+  **MMR ran without its diversity term** (no CLIP embeddings yet), so it
+  degenerated to score order and the cut repeats itself in places.
+- **S07** rendered `gates/gate3/draft.mp4` — **960×540, 203.5 MB, 8:18 wall
+  clock**. Frames sampled across the runtime confirm real, varied material.
+
+Three render defects were found by watching the output rather than by reading
+ffprobe, and each is now covered by a test that runs the real binary:
+
+- **`trim` after the decoder** produced *no output frames at all* in 2:46. A
+  `trim` filter runs post-decode, so a shot 20 minutes into a recording costs
+  20 minutes of decoding. Seeking moved to input `-ss`/`-t`.
+- **94 photograph slots were silently dropped** — 8.7 min of a 19.8 min cut.
+  The first "successful" draft was 9.9 min and looked fine. A slot with no
+  media is now a loud warning.
+- **`-loop` is private to the image2 demuxer** and fourteen of the stills are
+  HEIC, which the ISO-BMFF demuxer reads: "Option loop not found". The slow
+  test used `.jpg` and passed. The hold moved into the filter graph.
+
+**No `drawtext`.** This ffmpeg is built without libfreetype, so the draft
+carries no shot_id/timecode overlay and Gate 3 notes must cite wall-clock
+times. The stage says so and renders anyway.
+
+### The 1.1 minutes that were missing, and why (2026-09-16)
+
+The render came out 18.7 min against a 19.8 min timeline. It was not ffmpeg
+truncating arbitrarily. Measured against the recording durations: the 126
+video slots asked for **664.9 s and only 593.3 s exists** — 71.6 s, which is
+the whole discrepancy.
+
+`assemble.lay_out` set each slot from the act's duration range scaled by the
+shot's score and **never checked the shot's own length**. Two ways it bites:
+a 1.87 s phone clip handed a 6.85 s slot in Act 5's 5–8 s regime, and a shot
+starting 37.6 s into a 40.8 s recording asked for 6.9 s of the 3.1 s left.
+The gate admits shots at `min_shot_s` **1.5 s** while acts ask for 2–8 s, so
+the mismatch is structural, not a stray row.
+
+Fixed: a slot is now `min(what the act wants, what the shot has)`, preferring
+the latest beat that fits so the cut stays on the grid. A photograph is not
+clamped — a still holds for as long as it is asked to.
+
+**Consequence to decide at Gate 2/3:** the acts now come up ~1.2 min short of
+their budget rather than claiming footage that does not exist. Refilling them
+means selecting more shots, which is a shot-selection question and therefore
+the operator's.
+
 ## Do these next, in order
 
 1. ~~Editable reinstall~~ — **done 2026-09-15.** `nepal doctor` says
@@ -161,7 +223,41 @@ invalidate parts of them, noted inline.
      `work/faces/embeddings.npy`, and `nepal s03 --redo recluster` re-labels
      from them in seconds if a threshold moves.
 
+7. ~~S05 + S06 + S07~~ — **done 2026-09-16**, see the run record above.
+   **Milestone 7 is complete** and a draft cut exists.
+8. **Gate 3 is open.** `work/gates/gate3/draft.mp4` is waiting on the
+   operator. It is picture-only: no music bed, no mix, no overlay.
+9. **S04.1 CLIP embeddings — run locally.** `torch 2.14.0+cpu` and
+   `open_clip 3.3.0` are installed in `.venv`; measure before renting
+   anything. This unlocks MMR's diversity term, which is the single biggest
+   improvement available without Bedrock: the current cut repeats itself
+   because MMR had nothing to compare shots with.
+   - **Predicate fixed 2026-09-16.** S04.1 asked for `status = 'candidate'`,
+     but S05 promotes its picks to `'shortlisted'` — so once a cut existed,
+     the stage would embed 1,232 rows and skip the 400 the film is made of.
+     It now asks for `status <> 'rejected'`, the complement of the gate's
+     verdict, which cannot drift as statuses are added.
+10. **Wire the music bed and the mix into S07.** The render is picture-only;
+    `build_command` already takes `music_path` and normalises it, but S05's
+    driver does not pass one, and the §7 ducking rules and music-out windows
+    are not built.
+11. **Add `-progress` to the ffmpeg invocation** so S07 reports a real
+    percentage instead of the operator inferring one from file growth.
+
 ## The cloud move
+
+**The AWS account is suspended** (2026-09-15) pending document verification;
+the operator has submitted them. While it is down, Bedrock is unreachable, so
+S04.2 framing, S04.3 captioning and S06's ordering refinement are all blocked.
+Nothing else is: every remaining stage runs on this machine.
+
+**Yandex Cloud is available as an alternative compute source** (operator,
+2026-09-16). It is a real option for anything that is *just CPU or GPU* — it
+has instances and S3-compatible object storage. It is **not** a substitute for
+Bedrock: there is no Claude there, so captioning would need either the
+Anthropic API directly (a spend decision, and the operator's) or an
+open-weight VLM run on a rented GPU. Measure locally before renting either
+way; that is how the G-instance quota turned out not to matter.
 
 Done 2026-09-15, because S03.5 at 7–20 h locally was not worth waiting for.
 **One rented box running the same `nepal` CLI, not the spec's Batch/ECR/Step
@@ -206,6 +302,12 @@ before and after any remote stage, and check
 539 is the number as of now.
 
 ## Open, and waiting on a person
+
+- **Gate 3: the draft cut.** `work/gates/gate3/draft.mp4`, 18.7 min. This is
+  a creative judgement and it is the operator's. What it is missing, and why,
+  is in the run record above — none of it is a defect to fix before watching.
+- **AWS account suspended**, documents submitted, waiting. This blocks S04.2,
+  S04.3 and S06 ordering refinement and nothing else.
 
 - **Gate 1 FOV.** `fov_deg` = 193 in `decisions` is a **carried-over
   fallback**: `work/reports/s01_probe.json` shows the last S01 ran with

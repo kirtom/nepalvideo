@@ -175,3 +175,60 @@ def test_a_coarse_grid_never_produces_a_zero_length_shot():
     out = assemble.lay_out([shot("a"), shot("b")], start_s=0.0,
                            duration_range=[4.0, 6.0], beats=[0.0])
     assert all(s["t_out"] > s["t_in"] for s in out)
+
+
+# -- a slot may never be longer than its shot --------------------------
+
+def test_a_slot_never_claims_more_footage_than_the_shot_has():
+    """The first draft's 126 video slots asked for 664.9 s and the render
+    delivered 593.3 s: ffmpeg simply stops at the end of the source. Every
+    act-length and runtime number is computed from the claim, so the claim
+    has to be true."""
+    shots = [{"shot_id": "short", "start_s": 0.0, "end_s": 1.87,
+              "media_kind": "video", "score_total": 1.0}]
+    row = assemble.lay_out(shots, start_s=0.0, duration_range=[5.0, 8.0], beats=[])[0]
+    assert row["t_out"] - row["t_in"] <= 1.87 + 1e-6
+    assert row["src_out"] <= 1.87 + 1e-6
+
+
+def test_a_shot_near_the_end_of_its_recording_is_clamped_too():
+    """src_in + duration is what the render seeks to; the limit is the shot's
+    own end, not zero-plus-the-act-range."""
+    shots = [{"shot_id": "tail", "start_s": 37.64, "end_s": 40.77,
+              "media_kind": "video", "score_total": 1.0}]
+    row = assemble.lay_out(shots, start_s=0.0, duration_range=[5.0, 8.0], beats=[])[0]
+    assert row["t_out"] - row["t_in"] == pytest.approx(3.13, abs=0.01)
+    assert row["src_out"] == pytest.approx(40.77, abs=0.01)
+
+
+def test_a_photograph_is_not_clamped_because_a_still_has_no_end():
+    shots = [{"shot_id": "p", "media_kind": "photo", "score_total": 1.0}]
+    row = assemble.lay_out(shots, start_s=0.0, duration_range=[5.0, 8.0], beats=[])[0]
+    assert row["t_out"] - row["t_in"] == pytest.approx(8.0)
+
+
+def test_clamping_still_prefers_a_beat_when_one_fits():
+    """Dropping off the grid is a worse cut than a slightly shorter one."""
+    shots = [{"shot_id": "s", "start_s": 0.0, "end_s": 2.0,
+              "media_kind": "video", "score_total": 1.0}]
+    row = assemble.lay_out(shots, start_s=0.0, duration_range=[5.0, 8.0],
+                      beats=[0.5, 1.0, 1.5, 1.8, 2.5, 3.0])[0]
+    assert row["t_out"] == pytest.approx(1.8), "the latest beat that fits"
+
+
+def test_a_shot_shorter_than_the_beat_gap_falls_back_to_its_own_length():
+    shots = [{"shot_id": "s", "start_s": 0.0, "end_s": 0.4,
+              "media_kind": "video", "score_total": 1.0}]
+    row = assemble.lay_out(shots, start_s=0.0, duration_range=[5.0, 8.0],
+                      beats=[2.0, 4.0, 6.0])[0]
+    assert row["t_out"] == pytest.approx(0.4)
+
+
+def test_the_timeline_stays_contiguous_after_clamping():
+    """A clamp must shorten the slot, not leave a hole where the rest of it was."""
+    shots = [{"shot_id": "a", "start_s": 0.0, "end_s": 1.5, "media_kind": "video",
+              "score_total": 1.0},
+             {"shot_id": "b", "start_s": 0.0, "end_s": 30.0, "media_kind": "video",
+              "score_total": 0.5}]
+    rows = assemble.lay_out(shots, start_s=0.0, duration_range=[4.0, 6.0], beats=[])
+    assert rows[1]["t_in"] == pytest.approx(rows[0]["t_out"])

@@ -21,6 +21,7 @@ backwards in time reads as broken; one that lingers in a place reads as slow.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -147,6 +148,36 @@ def speech_first(candidates: Sequence[Mapping[str, Any]]) -> list[Mapping[str, A
     return sorted(candidates, key=key)
 
 
+def shot_available_s(shot: Mapping[str, Any]) -> float:
+    """How many seconds of source the shot actually has.
+
+    A photograph has no limit: a still is held for as long as the slot asks.
+    A video shot has exactly ``end_s - start_s``, and asking for more does not
+    produce more -- ffmpeg simply stops, which is how 126 video slots wanted
+    664.9 s of footage and the render delivered 593.3 s. The timeline must not
+    claim material that does not exist, because every downstream number (act
+    length, total runtime, the music layout) is computed from the claim.
+    """
+    if str(shot.get("media_kind") or "video") == "photo":
+        return math.inf
+    end = shot.get("end_s")
+    if end is None:
+        return math.inf
+    return max(0.0, float(end) - float(shot.get("start_s") or 0.0))
+
+
+def snap_within(t: float, ceiling: float, beats: Sequence[float]) -> float:
+    """The latest beat strictly after ``t`` and no later than ``ceiling``.
+
+    Used when the nearest beat would overrun the footage. Falling back to the
+    raw ceiling would drop the cut off the grid entirely, so a beat that fits
+    is preferred and the ceiling is only used when the shot is shorter than
+    the gap between beats.
+    """
+    fits = [b for b in beats if t < b <= ceiling]
+    return max(fits) if fits else float(ceiling)
+
+
 def lay_out(shots: Sequence[Mapping[str, Any]], *, start_s: float,
             duration_range: Sequence[float], beats: Sequence[float],
             downbeats: Sequence[float] | None = None) -> list[dict[str, Any]]:
@@ -162,10 +193,16 @@ def lay_out(shots: Sequence[Mapping[str, Any]], *, start_s: float,
     for i, s in enumerate(shots):
         score = float(s.get("score_total") or 0.5)
         want = lo + (hi - lo) * max(0.0, min(1.0, score))
+        # The act's range says how long this shot deserves; the shot says how
+        # long it can be. The shorter of the two wins, always.
+        avail = shot_available_s(s)
+        want = min(want, avail)
         end = snap_to_beat(t + want, beats,
                            downbeats=downbeats if i == 0 else None)
         if end <= t:                    # the grid was too coarse to advance
             end = t + want
+        if end - t > avail:             # the nearest beat overran the footage
+            end = snap_within(t, t + avail, beats)
         src_in = float(s.get("start_s") or 0.0)
         out.append({"shot_id": s["shot_id"], "act": s.get("act"),
                     "t_in": round(t, 3), "t_out": round(end, 3),
