@@ -761,6 +761,20 @@ def detect_faces(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
     bar.close(f"{len(per_shot)} shot(s), {len(embeddings)} face(s)")
     took = time.monotonic() - t0
 
+    # The embeddings are kept on disk next to the database, indexed by the
+    # shot they came from. Clustering is a threshold decision over them, and
+    # this project has twice paid to re-measure something because only the
+    # verdict was stored (jerk_ref, then the wind and speech flags). Moving
+    # face_same_person_cos is now a re-cluster of a 2 MB array, not a
+    # sixteen-minute second look at every frame.
+    if embeddings:
+        emb_dir = cfg.workdir("faces")
+        np.save(emb_dir / "embeddings.npy", np.vstack(embeddings))
+        (emb_dir / "embeddings_index.json").write_text(json.dumps(
+            {"shot_ids": [per_shot[o]["shot_id"] for o in owners]}))
+        log.info("S03.6 %d embedding(s) saved to %s", len(embeddings),
+                 emb_dir / "embeddings.npy")
+
     # pass two: one clustering over the whole corpus
     labels = faces_mod.cluster(embeddings, threshold=thresh)
     named = faces_mod.name_clusters(labels)
