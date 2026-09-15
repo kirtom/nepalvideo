@@ -1,0 +1,635 @@
+# Film v2 — voice spine, two-track timeline, motion, and a real ending
+
+**Status:** design, awaiting operator review
+**Amends:** `docs/spec.md` §1, §5, §6 (S02.7–S02.8, S04–S09), §8
+**Date:** 2026-09-16
+
+---
+
+## 0. Why this document exists
+
+The first draft cut (`work/gates/gate3/draft.mp4`, 18.7 min) was inspected on
+2026-09-16 against the code, the corpus and the database. The finding was not
+"the Claude stages are blocked", it was that the parts of the design that make a
+film out of a montage are either unbuilt or built and never called, and that the
+unit of selection is wrong for the material.
+
+What was measured, in the order it costs the film:
+
+| Finding | Evidence |
+|---|---|
+| The draft is silent | one video stream, no audio; encoded at 120 fps |
+| No title, cold open, cards, map, silence beat or credits | every `timeline` row has `transition = NULL`, `msg_id = NULL` |
+| Speech is chopped mid-sentence and often not even inside the slot | slots take the first 4–7 s of a 20 s chunk; 11 runs of 3–9 consecutive slots from one recording |
+| Whisper hallucinations counted as speech and placed first | "Субтитры сделал DimaTorzok" on 33 shots, "Продолжение следует" on 23 |
+| Faces never reach selection | `has_face = 0` on all 1,856 rows although 347 carry a `face_cluster` |
+| Video has no place, altitude or day | 0 of 930 surviving video shots positioned; photos are — so `score_ctx` favours stills |
+| Stills then videos | Act 2 is 35 stills of 40 slots; the photo budget (`select.py`) is never called |
+| Trek footage in the Planning act | a ghost recording `phone_kulikov_IMG` (302 clips merged, 26 min) survives `db.upsert`; 9 of its slots sit in Act 1 |
+| Portrait clips pillarboxed, 360 shown as raw equirect, stills static | 367 of 458 flat recordings are portrait; S04.2 framing unbuilt |
+| Flat rhythm | slot length is score-scaled inside a 2–3 s band; scores span 0.52–0.66 |
+| Music assigned blind | the feature solve put *Born Slippy* on "sparse solo piano, a city in winter" |
+| Subject, levity and effort constraints exist and are never invoked | `assemble.needs_subject`, `missing_levity`, `spine/effort.py` have no callers |
+
+Captions and CLIP embeddings would fix repetition and ranking. They would not
+fix the unit, the rhythm, or what is on screen. This design does.
+
+---
+
+## 1. The film (amended brief)
+
+Everything in spec §1 stands except where restated here.
+
+### 1.1 Six acts, not five
+
+"Walked down" was already rejected as an ending; the return through Kathmandu,
+the Delhi layover and the flight home was folded into Act 5 and then starved:
+the descent alone took the budget. The corpus has two days of descent, three in
+Kathmandu (11 to 13 May, including 36 minutes of camera on the 13th), a day in
+Delhi, and the operator is adding Delhi footage. That is two acts.
+
+| Act | Name | Target | Boundary | Musical character |
+|---|---|---|---|---|
+| 0 | Cold open | 20 s | 15–25 s from Act 3 or 4, hard cut to black, title | the summit cue, cut dead |
+| 1 | Planning | 80 s | first planning message → departure | small, domestic, wistful |
+| 2 | Approach | 240 s | arrival → where the ascent steepens | warmth entering |
+| 3 | The climb | 360 s | → summit push | the build; costs something |
+| 4 | Highest point | 110 s | the contiguous summit band | peak swell → **5 s silence** |
+| 5 | Descent | 170 s | summit → first fix inside `spine.return_radius_km` of Kathmandu | release; the Act 1 theme returning |
+| 6 | Return | 200 s | Kathmandu → last message in the "after" phase | fuller callback; the last words are a message sent after everyone got home |
+
+Sum 1,180 s plus credits (60–120 s, outside the runtime). `acts` in
+`config/pipeline.yaml` gains the sixth row; `spine/acts.py` gains the return
+boundary, found as the first GPS fix after the summit within
+`spine.return_radius_km` (default 30) of the geocoded `spine.return_place`
+(default `Kathmandu`). Act 6 grows when the Delhi material lands; its `max_s`
+allows 400.
+
+### 1.2 The unit is a moment, not a chunk
+
+The spec's shot is whatever PySceneDetect or the 20 s cap produced. That stays
+as the unit of *measurement*. The unit of *selection and assembly* becomes:
+
+- **a beat**: one complete utterance (or a run of them) with its own in/out
+  points on the recording's clock, taken from whisper segment times, not from
+  the chunk boundary;
+- **a picture slot**: a span of one source, any length the rhythm asks for,
+  which may sit under a beat's audio or carry its own.
+
+Audio and picture are separate tracks with separate sources. This is the change
+that makes everything else possible.
+
+### 1.3 Speech is chosen by reading, not by scoring
+
+`speech_first` ordering plus `has_speech` weight is replaced by a **beat
+sheet**: Claude reads every transcript with timing, the whole Telegram thread,
+and the day table, and returns the 10–16 spoken moments that carry the story,
+the Act 1 quotes, the closing line, and the title. Selection builds around
+those. Section 4 has the contract.
+
+### 1.4 Rhythm comes from the music
+
+Slot length follows the section energy of the cue under it, not the shot's
+score. Quiet passages hold; swells cut on downbeats; each act's peak gets one
+burst montage. Section 5.4.
+
+### 1.5 Everything moves
+
+No static frame is delivered: stills get a Ken Burns move, 360 shots get a yaw
+drift, portrait clips get a blurred fill or a face-tracked crop, and two phones
+that filmed the same minute share the frame. Section 6.
+
+### 1.6 Altitude and time are always visible
+
+Two corner widgets run for the whole trek: a route map with the track filling
+in and the current altitude, and a day counter. Place cards at every new place,
+an elevation-profile motif at act transitions, and one statistics card per act.
+Section 6.4.
+
+### 1.7 The chat is on screen, anonymised
+
+Telegram text may be laid over media as chat bubbles with typing animation.
+**No author names.** Two bubble sides (left/right) distinguish the two voices
+without naming them. This is understood by the audience as a chat export.
+
+### 1.8 Upscale at conform, never at draft
+
+Delivery is 1080p (4K optional, `deliver.resolution`). Sources below delivery
+resolution — Telegram media, and any 360 recording where only the `.lrv`
+exists — are upscaled with a learned upscaler on the GPU, capped at delivery
+resolution, and sharpened no further than `deliver.max_upscale_factor` (2.0)
+allows; beyond that the frame is padded rather than invented. Phone originals
+at 1080p/4K are conformed, not upscaled.
+
+---
+
+## 2. Architecture changes
+
+### 2.1 Stage map (what moves)
+
+```
+S01 Probe            unchanged + prune step + ignore list
+S02 Spine            + Act 6 boundary, + hallucination filter, + music by character (Gate 1)
+S03 Process          unchanged; bugs fixed (has_face, video geotag, day_index)
+S04 Semantic         S04.1 CLIP (remote GPU) · S04.2 framing (Claude, 2x2 sheet) · S04.3 captions (Claude)
+S04.5 Beat sheet     NEW: Claude reads transcripts + chat → beats.json           [remote, API]
+S05 Score            unchanged formula; terms now actually populated
+S06 Assemble v2      beats first, then picture fill; rhythm from music; constraints live
+S06.5 Overlays       NEW: HUD frames, cards, map, profile, credits — PNG/MOV assets [remote CPU]
+S07 Draft render v2  two-track audio graph, motion filters, overlays          [remote CPU]
+S08 Conform          originals, proper stitch, upscaling                      [remote GPU]
+S09 Deliver          both cuts + credits
+```
+
+Every new stage is a `stage_units` unit, resumable, and pure where it decides.
+
+### 2.2 Execution model: local decides, remote works
+
+The local machine runs only what finishes in seconds to a few minutes: S05
+scoring, S06 assembly, overlay *layout*, and tests. Everything else runs on a
+remote box through one command:
+
+```bash
+nepal remote up                       # create or resume the box, sync work_root subset
+nepal remote run s04 --redo clip      # run a stage there, stream the log, sync the DB back
+nepal remote down
+```
+
+`tools/cloud/` already holds `launch.sh`/`bootstrap.sh` for AWS; `remote`
+generalises it behind a provider setting (`cloud.provider: gcp | aws | ssh`).
+`ssh` means "a box the operator already has" and is the escape hatch.
+
+Provider recommendation, in order:
+
+1. **GCP** — the operator already leaned this way. `e2-standard-8` spot
+   (~$0.10/h) for CPU stages and API loops; `g2-standard-4` (one L4) spot
+   (~$0.30/h) for CLIP, faces re-runs and upscaling. Vertex AI carries Claude
+   if the operator later prefers one bill. Account and quota are the
+   operator's to create.
+2. **Serverless GPU** (Modal or equivalent) for the GPU minutes only, if the
+   GCP GPU quota is slow to arrive. Per-second billing, no VM.
+
+Claude calls go **directly to the Anthropic API** from the remote box
+(`ANTHROPIC_API_KEY` in the box's environment, never in the repo), using the
+Batch API wherever the stage is not interactive. Estimated spend for the whole
+v2 run, at published rates:
+
+| Item | Estimate |
+|---|---|
+| Beat sheet (one long-context call, text only, Sonnet 5) | < $1 |
+| S04.2 framing, 22 dual-fisheye recordings' shots, Haiku 4.5 | < $1 |
+| S04.3 captions, 1,632 shots × 4 frames, Haiku 4.5 (Batch) | ~$1.5 |
+| Music assignment proposal + Gate 1 | < $0.1 |
+| Remote CPU, ~6 h over the project | ~$1 |
+| Remote GPU, ~1 h total (CLIP minutes, upscaling at conform) | ~$0.5 |
+| **Total** | **~$5, ceiling $15** |
+
+Every paid stage logs `usage` to `work/reports/` and refuses to start if the
+running total in `decisions('spend_usd')` would exceed `cloud.spend_ceiling_usd`
+(15).
+
+What travels: nothing before S08 reads the originals. `nepal remote up` syncs
+proxies, audio, transcripts, faces, the database and the stills (~9 GB) once,
+then only the database and new artefacts. S08 syncs the originals of the
+selected recordings only (~120 files).
+
+---
+
+## 3. Data model changes
+
+### 3.1 `shots` (fixes, no new semantics)
+
+- `has_face` set from `face_score > 0` at recluster time as well as at
+  detection, so re-detecting shots cannot leave it at the default.
+- `lat`, `lon`, `alt_dem_m`, `place_name`, `day_index` populated for video
+  shots by S03.2 (interpolate → DEM → gazetteer, same functions S03.0 uses for
+  stills). `day_index` is the trek day (Act 2 day 1 = 1); planning and after
+  material carry NULL.
+- `transcript_json` (new, TEXT): whisper segments `[{start, end, text}]` on the
+  recording's clock, so a beat can be cut at an utterance. Today they exist
+  only as files under `work/transcripts/`.
+- `hallucinated` (new, INTEGER DEFAULT 0): set by the S02/S03 filter (§4.1);
+  a hallucinated shot has `has_speech = 0` for every downstream purpose.
+
+### 3.2 `beats` (new)
+
+```sql
+CREATE TABLE beats (
+  beat_id     TEXT PRIMARY KEY,
+  kind        TEXT NOT NULL,      -- speech | quote | closing | title
+  act         INTEGER,
+  shot_id     TEXT REFERENCES shots(shot_id),   -- speech: the recording it comes from
+  msg_id      TEXT REFERENCES messages(msg_id), -- quote/closing: the message
+  src_in      REAL, src_out REAL,               -- on the recording's clock
+  text        TEXT,                              -- what is said or shown
+  levity      INTEGER DEFAULT 0,
+  effect      TEXT,                              -- optional: freeze | burst | ramp | none
+  rationale   TEXT,                              -- why Claude picked it, for Gate 2
+  rank        INTEGER                            -- Claude's order of importance
+);
+```
+
+### 3.3 `timeline` becomes picture slots; `audio_cues` and `overlays` are new
+
+```sql
+-- picture track
+CREATE TABLE timeline (
+  slot_index  INTEGER PRIMARY KEY,
+  act         INTEGER,
+  t_in REAL, t_out REAL,
+  kind        TEXT NOT NULL,      -- video | photo | card | title | map | credits | black
+  shot_id     TEXT REFERENCES shots(shot_id),
+  src_in REAL, src_out REAL,
+  secondary_shot_id TEXT,         -- split screen: the other phone's clip
+  secondary_src_in REAL,
+  motion      TEXT,               -- JSON: {"type":"yaw_drift","from":..,"to":..} | {"type":"ken_burns",...} | {"type":"crop_face",...} | {"type":"blur_fill"}
+  speed       REAL DEFAULT 1.0,   -- speed ramp; 1.0 is real time
+  transition  TEXT,               -- cut | dissolve | dip_black
+  beat_id     TEXT REFERENCES beats(beat_id)     -- the beat this picture serves, if any
+);
+
+-- audio track(s)
+CREATE TABLE audio_cues (
+  cue_id      TEXT PRIMARY KEY,
+  track       TEXT NOT NULL,      -- speech | location | music
+  t_in REAL, t_out REAL,
+  source      TEXT,               -- recording_id or track_id
+  src_in REAL, src_out REAL,
+  gain_lufs   REAL,               -- target integrated loudness for this cue
+  fade_in_s REAL DEFAULT 0, fade_out_s REAL DEFAULT 0,
+  beat_id     TEXT REFERENCES beats(beat_id)
+);
+
+-- generated pictures laid over the picture track
+CREATE TABLE overlays (
+  overlay_id  TEXT PRIMARY KEY,
+  kind        TEXT NOT NULL,      -- hud_map | hud_day | place_card | profile | chat_card | stat_card | subtitle
+  t_in REAL, t_out REAL,
+  payload     TEXT,               -- JSON the renderer needs (text, lat/lon, altitude, day, bubble side …)
+  asset_path  TEXT                -- rendered PNG/MOV under work/overlays/, filled by S06.5
+);
+```
+
+`timeline.otio` and `.fcpxml` are still written: picture slots as one video
+track, `audio_cues` as three audio tracks, overlays as a fourth video track
+referencing the rendered PNG/MOV assets. The cut stays refinable by hand.
+
+---
+
+## 4. The voice spine
+
+### 4.1 Hallucination filter (deterministic, before anything reads a transcript)
+
+A transcript segment is marked hallucinated when any of:
+
+- its text matches `asr.hallucination_phrases` (config; seeded with "Субтитры
+  сделал", "DimaTorzok", "Продолжение следует", "Редактор субтитров", "Спасибо
+  за просмотр", "Подписывайтесь");
+- the same 3-gram repeats ≥ 3 times inside the segment;
+- whisper's `no_speech_prob` > `asr.max_no_speech_prob` (0.6) or
+  `compression_ratio` > `asr.max_compression_ratio` (2.4) — both are already in
+  the JSON faster-whisper writes;
+- the segment lies inside a window where the VAD measured < `process.speech_min_s`
+  of voice.
+
+A shot whose every segment is hallucinated gets `hallucinated = 1`. Re-running
+the filter is seconds; the transcripts are not re-made. Applied in S03 next to
+the gate, and reported.
+
+### 4.2 The beat-sheet call (S04.5)
+
+**Input** (one request, text only, ~60–80k tokens):
+
+- every non-hallucinated transcript with segment times, tagged with recording,
+  day, place, altitude, source, who is on screen (face cluster) and whether the
+  picture is a piece-to-camera (face fills the frame) or a walking shot;
+- the Telegram thread, both phases, with timestamps and an anonymous speaker
+  tag (A/B);
+- the day table (`nepal report`): date, place, altitude, km, gain, shots,
+  photos, messages;
+- the six-act structure and the brief (§1 of the spec, verbatim);
+- the vocabulary (`work/vocab/`).
+
+**Output** — strict JSON validated against a schema, retried once on failure:
+
+```json
+{
+  "title": "…",
+  "beats": [
+    {"kind": "speech", "shot_id": "camera_…#0003", "src_in": 41.2, "src_out": 52.8,
+     "act": 3, "text": "Я вот на этом курумнике прям сдох…", "levity": true,
+     "effect": "none", "rank": 2, "rationale": "the first admission of cost"},
+    {"kind": "quote", "msg_id": "…", "act": 1, "text": "…", "rank": 7, "rationale": "…"}
+  ],
+  "closing": {"msg_id": "…", "text": "…"},
+  "act_notes": {"3": "the climb should feel slower after the bridge…"},
+  "stat_card_ideas": ["…"]
+}
+```
+
+**Rules the prompt states and the validator enforces:**
+
+- 10–16 speech beats, chronological, ≥ 1 per act from Act 2 on, ≥ 1 levity per
+  act from Act 2 on, none longer than `beats.max_speech_s` (25) — a beat may
+  join adjacent segments of one recording;
+- `src_in`/`src_out` must lie on segment boundaries that exist in the input;
+- 4–8 Act 1 quotes and 1 closing line, each ≤ `spine.card_max_chars`;
+- Act 4 gets at most one beat, and the summit words ("Покорена", the pass
+  altitude) are candidates the prompt names explicitly;
+- the model is told what it must **not** do: invent text, choose hallucinated
+  segments, or exceed the count.
+
+The result is written to `beats` and `work/beats.json`, and shown at **Gate 2**
+with the shortlist: the operator can drop, re-rank or retime a beat. The
+beat sheet is re-run only on `--force`; it costs a dollar and the answer should
+be stable.
+
+### 4.3 What happens to `speech_first` and `has_speech` weight
+
+`speech_first` is removed. `score.ctx.has_speech` stays but applies only to
+non-hallucinated speech and is no longer a claim on a slot: the beats are.
+
+---
+
+## 5. Assembly v2
+
+Pure functions in `process/assemble.py`, driven by `stages/s05_cut.py`. Order of
+operations per act:
+
+### 5.1 Anchors first
+
+Each beat becomes an **audio cue** on the `speech` track at the position the
+act's chronology puts it, with its full utterance. Under it, picture slots:
+
+- the first `beats.face_hold_s` (2.5) seconds show the speaker's own shot when
+  the beat's recording is a piece-to-camera (`face_score` high, face fills the
+  frame), cut at the utterance's `src_in` minus `beats.pre_roll_s` (0.4);
+- the remainder is **B-roll**: picture slots chosen by MMR from shots within
+  ±`beats.broll_window_s` (7,200) of the beat's timestamp, same act, excluding
+  the beat's recording — the voice continues (an L-cut);
+- if the beat is a walking shot rather than a piece-to-camera, the picture stays
+  on the beat's own recording for the whole utterance (people talking while
+  walking is the trek).
+
+Quote beats become `chat_card` overlays over the picture fill of Act 1 (and,
+sparingly, elsewhere when Claude placed one); the closing beat becomes the
+final card before credits.
+
+### 5.2 Picture fill between anchors
+
+The gaps between anchors are filled chronologically. Candidates are the
+shortlisted shots whose timestamp falls in the gap's window. Selection is MMR
+(`score_total − λ·max cosine`) with CLIP embeddings; **without embeddings the
+fallback similarity is deterministic**, not zero: 1.0 for the same recording
+within 60 s, 0.6 for the same recording, 0.3 for the same place and hour. That
+alone removes the runs of one recording the first draft shows.
+
+Constraints, applied as admissibility filters at every step (all exist in code
+today; now they are called):
+
+| Constraint | Value | Where |
+|---|---|---|
+| stills share per act | `film.photo_share` 0.10, via `select.plan_photo_slots` | never two stills adjacent unless in a burst |
+| subject | ≥ 1 shot with a face per `assemble.subject_shot_every_s` (40) | `needs_subject` |
+| levity | ≥ 1 per act from Act 2, from beats or `tag_levity` | `missing_levity` |
+| place | ≤ 3 per place per act | `place_count_ok` |
+| recording | ≤ 2 consecutive slots from one recording outside a beat | new |
+| source alternation | after 3 consecutive slots from one source, prefer another | new, soft |
+| chronology | non-decreasing within act; relax diversity before chronology | existing |
+
+### 5.3 Two phones, one moment
+
+Before the fill, S06 finds **pairs**: a `phone_keller` and a `phone_kulikov`
+clip (or a phone clip and a camera shot) whose corrected timestamps overlap
+within `assemble.pair_window_s` (60), both portrait or one portrait. A pair is
+one slot of `kind = video` with `secondary_shot_id` set and
+`motion = {"type":"split"}`; both halves run in sync from the same instant.
+At most `assemble.pairs_per_act` (2). Pairs are ranked by the sum of scores
+and by whether both faces are different people — the point is to see both of
+them at once.
+
+### 5.4 Rhythm from the music
+
+`music_sections.energy` is percentile-ranked within the act's cue. A slot's
+target length comes from the section under its start:
+
+| section energy percentile | target length | cut point |
+|---|---|---|
+| < 33 | 5–8 s | nearest beat |
+| 33–66 | 3–5 s | nearest beat |
+| > 66 | 1.5–2.5 s | nearest downbeat |
+| the act's highest swell | **burst**: 8–12 slots of 1 beat each | every downbeat |
+
+Beats' audio is never cut by this; only picture under it changes at the rhythm
+the music asks. Act 4's peak: the burst lands on the swell, then one held shot
+(`act4_held_shot_s`, 6–10 s) as the music cuts to the 5 s silence window with
+location sound at full.
+
+Natural-sound windows (`assemble.natural_sound_windows`, 4): chosen by
+`effort.hardest_windows` from the GPS profile; music fades out over 1 s,
+location audio at full, picture stays on the recording that has the sound.
+
+### 5.5 Act 0 and credits
+
+Cold open: the highest-ranked Act 3/4 beat or, absent one, the highest-scoring
+Act 4 shot; 15–25 s; music is the Act 4 cue from its swell; hard cut to black;
+title card (`beats.title`), then the card "three months earlier" (config
+`film.cold_open_card`), then Act 1.
+
+Credits per spec §1.8 and §S09.1, generated from the database at render time;
+`decisions.credits_track` under them. Rendered with the draft so Gate 3 sees
+them.
+
+### 5.6 Music assignment by character
+
+`spine/music.py` keeps the analysis (beats, sections, swells) and drops the
+Hungarian act assignment as the default. Assignment becomes a `decisions`
+value proposed by Claude from the track list (title, artist, duration, tempo,
+energy shape) and the six acts' characters, and **confirmed by the operator at
+Gate 1**. The feature vectors remain a sanity check: a proposal whose energy
+ordering contradicts the acts is flagged, never rejected. Draft proposal to
+put in front of the operator:
+
+| Act | Cue |
+|---|---|
+| 0 cold open | *Outro* (M83), from its swell, cut dead |
+| 1 Planning | *Cornfield Chase* (Zimmer) |
+| 2 Approach | *Send Me on My Way* → *Lovely Day* |
+| 3 Climb | *Time* (Zimmer) → *The Grid* → *Mind Heist* |
+| 4 Highest | *Outro* (M83), swell into silence |
+| 5 Descent | *Heartbeats* (José González) |
+| 6 Return | *Home* (Edward Sharpe), *Sita Ram* under Kathmandu |
+| credits | *Somewhere over the Rainbow* (Marusha), as configured |
+
+---
+
+## 6. Picture treatment and overlays
+
+### 6.1 Motion for every slot (`timeline.motion`)
+
+| Source | Default motion | Notes |
+|---|---|---|
+| still | `ken_burns`: 1.00→1.08 zoom, pan direction alternating per slot, eased | `render.ken_burns_zoom` |
+| portrait video, no face | `blur_fill`: the clip centred over its own blurred, scaled copy | standard vertical-in-horizontal |
+| portrait video, face | `crop_face`: 16:9 crop tracking the face box from S03.6 samples, smoothed | falls back to `blur_fill` if the face leaves |
+| 360 video | `yaw_drift`: rectilinear 100°×70° view from the equirect, yaw moving 8–15° over the slot toward the chosen yaw | chosen yaw from S04.2, else `face_yaw`, else the yaw with the highest Laplacian variance among four |
+| 360, summit reveal | `tiny_planet` once, on the Act 4 held shot | `render.tiny_planet: true` |
+| walking shot in Act 3, no speech | `speed = 2.0` ramp when the slot is > 4 s | `render.ramp_acts: [3]` |
+| long static camera runs (> 3 min, low motion) | `speed = 30` timelapse slot | candidates from `motion_mag` p10 |
+
+Effects are a vocabulary the assembler chooses from with caps per act
+(`render.effects_per_act`: 3), plus what the beat sheet suggested per beat. A
+freeze-frame with a stat card is the one effect allowed to stop time: at most
+once per act.
+
+### 6.2 Where the yaw comes from (S04.2 built cheaply)
+
+For each shortlisted 360 shot, a 2×2 contact sheet of the four yaw views goes
+to Claude (Haiku 4.5) with the question the spec asks: best composition, and
+whether a person is the subject. Fewer than 200 shots; under a dollar. Where
+`has_face = 1`, the subject view competes as a second candidate, as the spec
+says.
+
+### 6.3 Draft versus conform
+
+The draft renders from the proxies at 960×540, 30 fps, with every motion and
+overlay in place, so Gate 3 judges the real film small. Conform (S08) applies
+the same `timeline`, `audio_cues` and `overlays` to the originals: proper
+stitching for 360 shots where a stitcher exists, `v360` at full resolution
+where not, upscaling per §1.8, one LUT per source class.
+
+### 6.4 Overlays (S06.5, generated; S07 composites)
+
+All overlays are rendered to PNG sequences or ProRes-alpha MOVs under
+`work/overlays/` by a pure layout function plus PIL/matplotlib, on the remote
+CPU box, then composited by ffmpeg `overlay`. Nothing is drawn with `drawtext`.
+
+| Overlay | When | Content |
+|---|---|---|
+| `hud_map` (bottom-left, ~180 px) | whole trek, Acts 2–5 | route from the GPX on a muted OSM basemap (tiles fetched once by `nepal fetch-reference`), the walked part filling in, a dot at the current position, current altitude in a monospace readout |
+| `hud_day` (top-right) | whole trek | `Day 6` — from `day_index`; Acts 1 and 6 show the date instead |
+| `place_card` | first slot at a new `place_name` | `Day 6 · Syalagaun · 4,068 m`, 3 s, lower third |
+| `profile` | each act transition, 3 s | the elevation profile, filled to the current day, the pass marked |
+| `chat_card` | Act 1 quotes, sparingly elsewhere | chat bubble, left/right by speaker, typing animation, timestamp, **no name** |
+| `stat_card` | once per act, on a freeze or a hold | generated from the DB: km, gain, hours walked, highest point, photos taken, messages sent, coldest morning |
+| `subtitle` | under every speech beat | the transcript text, bottom centre, since the audience may not be Russian speakers — `render.subtitles: true` |
+| `credits` | after the last slot | the four blocks of spec §1.8 |
+
+Anything a widget shows is computed from `gps_points`, `shots`, `messages` and
+`assets` at layout time; nothing is typed.
+
+---
+
+## 7. Audio graph (S07/S08)
+
+One ffmpeg filter graph, built as data:
+
+- **speech track**: each `audio_cues.track = 'speech'` cue from the recording's
+  extracted `.wav` (draft) or original (conform), `loudnorm` to
+  `render.speech_lufs` (−16), fades of 0.15 s;
+- **location track**: every picture slot's own audio at `render.duck_lufs`
+  (−28) under music, at `render.location_full_lufs` (−18) inside natural-sound
+  windows and the silence window, at −24 under speech; a still or a card
+  contributes the previous slot's ambience, held;
+- **music track**: the act's segments with `render.music_xfade_s` (2.0)
+  crossfades, at −14, ducked to −22 under speech cues by an explicit volume
+  envelope from the cues (no sidechain — the timing is known), faded out over
+  1 s into windows and the Act 4 silence, dead for the 5 s;
+- mixed with `amix` (normalize=0), final `loudnorm` to −14 LUFS, true peak
+  −1.5 dB; encoded AAC 192k.
+
+`process/mix.py` becomes the pure function that turns `audio_cues` plus
+windows into the per-track volume envelopes; it stops being dead code because
+`render.build_command` consumes it.
+
+---
+
+## 8. Bugs and hygiene folded into this work
+
+Each is a unit test plus, where a tool boundary is touched, a slow test.
+
+1. **Prune step** (`nepal prune`, also run by S01): delete `recordings`,
+   `shots`, proxies, audio and transcripts for anything the manifest no longer
+   produces; delete recordings whose grouping method the current code would
+   not produce (the `phone_*_IMG` ghosts and their 230 MB proxy). Report what
+   went.
+2. **Manifest ignore list** (`probe.ignore_globs`: `*.zip`, `aws/**`, `*_thumb.jpg`).
+3. **`has_face`** derived from `face_score` at gate time, like stability.
+4. **Video shot position**: lat/lon/alt/place/day for video shots in S03.2;
+   `nepal diagnose` reports positioned counts per kind so a regression is
+   visible.
+5. **`day_index`** computed from the act-2 start for every shot and asset.
+6. **Whisper segment times** stored (`transcript_json`) and used for beats.
+7. **Hallucination filter** (§4.1).
+8. **Output frame rate** fixed at `render.fps` (30); every input `fps=`-filtered.
+9. **Photo budget** and the four constraints actually invoked (§5.2).
+10. **FOV re-solve** on the 22 dual-fisheye recordings (`nepal s01 --redo fov`
+    is added so it does not need `--force`); `fov-check` sheets at Gate 1.
+11. **The 3 undated `phone_kulikov` clips**: a `decisions` override
+    `capture_time_overrides` the operator can fill; otherwise they stay out.
+12. **`usable_as_card`** is dropped as a selector (it marks 79% of messages);
+    quotes come from the beat sheet.
+
+---
+
+## 9. Gates (what the operator sees)
+
+- **Gate 1** gains: the music proposal with 20 s previews per act and an
+  override; the six act boundaries; the FOV sheets; the Delhi footage check
+  ("Act 6 has N minutes of material").
+- **Gate 2** gains: the beat sheet (text, rationale, play button on the
+  utterance), drop/retime/re-rank; the pairs; the 360 framing choices.
+- **Gate 3**: the draft with everything in it, credits included, and the shot
+  list keyed by wall-clock time and slot index (the burned overlay is replaced
+  by a generated `subtitle`-style slot label in draft mode only).
+
+Gates stay static pages written under `work/gates/` and opened locally; the
+Step Functions machinery remains out of scope.
+
+---
+
+## 10. Testing
+
+- Pure: beat validation against the schema and the rules; MMR fallback
+  similarity; rhythm mapping from section energy; pair finding; envelope
+  generation from cues; overlay layout (payloads, positions, no name in any
+  chat card).
+- Slow, real tools: a two-track render of a synthetic timeline with speech,
+  music and a silence window, checked by `ebur128` per window; a `yaw_drift`
+  render of the fixture dual-fisheye clip; `crop_face` on a synthetic portrait
+  clip with a moving rectangle; an overlay composite with alpha; the prune step
+  on a fixture tree from which a file was removed.
+- Contract: the Claude calls are behind thin wrappers with recorded responses
+  in tests; one opt-in live test (`NEPAL_LIVE_API=1`) that costs cents.
+
+---
+
+## 11. Order of work
+
+1. Bugs and hygiene (§8) — independent of every creative decision; re-cut and
+   re-render locally-cheap parts to confirm the stills/videos balance and the
+   ghost removal.
+2. Remote execution (`nepal remote`) and the spend guard — everything after
+   this runs there.
+3. Hallucination filter, segment times, beat sheet (S04.5) → Gate 2 review of
+   the beats.
+4. Schema v2 (`beats`, `timeline`, `audio_cues`, `overlays`) and assembly v2
+   (§5) with the deterministic similarity fallback; audio graph (§7).
+5. CLIP on the remote GPU; S04.2 and S04.3 via the API.
+6. Motion (§6.1) and overlays (§6.4); credits; cold open.
+7. Six acts, music by character, Gate 1 page.
+8. Conform with upscaling (§1.8) once the Delhi footage is in and Gate 3 has
+   passed.
+
+Each step ends with a draft the operator can watch.
+
+---
+
+## 12. Open items for the operator
+
+- **Delhi footage**: add it under `nepal_data/` (any folder; the manifest walks
+  the tree). Say when it is there; the prune-then-resume path handles the rest.
+- **Provider**: GCP account and a GPU quota request, or a serverless-GPU
+  account, or an SSH box you already have. Credentials stay with you.
+- **Music proposal** in §5.6: confirm or change at Gate 1.
+- **Subtitles**: on by default; say if the audience is Russian-only.
