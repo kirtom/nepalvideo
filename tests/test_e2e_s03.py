@@ -196,6 +196,24 @@ def test_s03_7_gives_every_shot_a_status(project):
 
 
 @needs_tools
+def test_moving_jerk_ref_changes_stability_at_the_gate_without_a_remeasure(project):
+    """The reference is tuned against the corpus. Re-deriving stability from
+    the stored jerk makes that a gate re-run, not the better part of an hour."""
+    from nepal.stages.s03_process import apply_gate
+    cfg, conn = project
+    conn.execute("UPDATE shots SET jerk_px = 1.0 WHERE media_kind='video'")
+    conn.commit()
+    cfg._data.setdefault("process", {})["metric_jerk_ref_px"] = 1.0
+    apply_gate(cfg, conn)
+    assert {r[0] for r in conn.execute(
+        "SELECT stability FROM shots WHERE media_kind='video'")} == {0.5}
+    cfg._data["process"]["metric_jerk_ref_px"] = 3.0
+    apply_gate(cfg, conn)
+    assert {r[0] for r in conn.execute(
+        "SELECT stability FROM shots WHERE media_kind='video'")} == {0.75}
+
+
+@needs_tools
 def test_the_gate_judges_a_shot_on_its_own_sources_curve(project):
     """The camera curve would reject this material; the telegram curve is the
     one that keeps Act 1 alive, and it must be the asset's curve that decides."""

@@ -222,6 +222,7 @@ def detect_shots(cfg: Config, conn) -> dict[str, Any]:
 
     out: list[dict[str, Any]] = []
     no_cuts = 0
+    single_scene: set[str] = set()
     bar = Progress("S03.2 detecting shots", len(pending))
     for r in pending:
         rid = r["recording_id"]
@@ -235,6 +236,7 @@ def detect_shots(cfg: Config, conn) -> dict[str, Any]:
             continue
         if len(scenes) <= 1:
             no_cuts += 1
+            single_scene.add(rid)
         rows = shots_mod.shots_for_recording(scenes, rid, min_len_s=min_len,
                                              max_len_s=max_len)
         rec_start = _dt(r["start_utc"])
@@ -265,8 +267,10 @@ def detect_shots(cfg: Config, conn) -> dict[str, Any]:
              len(out), len(pending), {k: by_act[k] for k in sorted(
                  by_act, key=lambda x: (x is None, x))}, placed)
     if no_cuts:
-        log.info("S03.2 %d recording(s) had no detected cut and became one shot each",
-                 no_cuts)
+        # One scene is not one shot any more: process.max_shot_s divides it.
+        from_single = sum(1 for row in out if row["recording_id"] in single_scene)
+        log.info("S03.2 %d recording(s) had no detected cut; the %.0f s cap "
+                 "divided those into %d shot(s)", no_cuts, max_len, from_single)
     return {"n_recordings": len(recs), "n_with_proxy": len(pending),
             "n_shots": len(out), "per_act": {str(k): v for k, v in by_act.items()},
             "n_positioned": placed, "n_single_shot": no_cuts}
@@ -412,14 +416,15 @@ def measure_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
     bar.close(f"{len(results)} measured")
 
     conn.executemany(
-        "UPDATE shots SET sharpness=?, exposure_pen=?, motion_mag=?, stability=? "
-        "WHERE shot_id=?",
+        "UPDATE shots SET sharpness=?, exposure_pen=?, motion_mag=?, stability=?, "
+        "jerk_px=? WHERE shot_id=?",
         [(r["sharpness"], r["exposure_pen"], r["motion_mag"], r["stability"],
-          r["shot_id"]) for r in results])
+          r.get("jerk_px"), r["shot_id"]) for r in results])
     conn.commit()
 
     dist = {k: metrics_mod.percentiles([r[k] for r in results])
-            for k in ("sharpness", "exposure_pen", "motion_mag", "stability")}
+            for k in ("sharpness", "exposure_pen", "motion_mag", "jerk_px",
+                      "stability")}
     for k, v in dist.items():
         log.info("S03.3 %-13s %s", k, v)
     if missing:
@@ -441,7 +446,7 @@ def apply_gate(cfg: Config, conn) -> dict[str, Any]:
     """
     rows = [dict(r) for r in conn.execute(
         "SELECT s.shot_id, s.media_kind, s.start_s, s.end_s, s.sharpness, "
-        "s.exposure_pen, s.stability, s.has_speech, s.act, "
+        "s.exposure_pen, s.stability, s.jerk_px, s.has_speech, s.act, "
         "COALESCE(a.quality_curve, ra.quality_curve, 'camera') AS curve "
         "FROM shots s "
         "LEFT JOIN assets a ON a.asset_id = s.asset_id "
@@ -450,6 +455,20 @@ def apply_gate(cfg: Config, conn) -> dict[str, Any]:
         "  ORDER BY chapter_index LIMIT 1)")]
     if not rows:
         return {"n_shots": 0}
+
+    # Stability is a function of the measured jerk and a reference that is
+    # tuned against the corpus, so it is re-derived here from the stored jerk
+    # rather than trusted from measure time: moving the reference is then a
+    # gate re-run (seconds), not a re-measure (the better part of an hour).
+    jerk_ref = float(cfg.get("process.metric_jerk_ref_px", metrics_mod.JERK_REF_PX))
+    restab: list[tuple[float, str]] = []
+    for r in rows:
+        if r["jerk_px"] is not None:
+            r["stability"] = round(metrics_mod.stability_from_jerk(
+                r["jerk_px"], ref=jerk_ref), 4)
+            restab.append((r["stability"], r["shot_id"]))
+    if restab:
+        conn.executemany("UPDATE shots SET stability=? WHERE shot_id=?", restab)
 
     speech_factor = float(cfg.get("gate.speech_sharpness_factor",
                                   gate_mod.SPEECH_SHARPNESS_FACTOR))

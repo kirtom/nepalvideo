@@ -118,6 +118,24 @@ def test_measure_samples_reports_all_four_metrics():
     assert 0.0 <= m["stability"] <= 1.0
 
 
+def test_measure_samples_keeps_the_jerk_it_derived_stability_from():
+    """jerk_ref is a calibration point that moves against real material. If
+    only stability is stored, every move costs a re-measure of the corpus."""
+    base = noisy((128, 256))
+    groups = [[base, shifted(base, 2), shifted(base, 6)] for _ in range(3)]
+    m = metrics.measure_samples(groups, width=256, jerk_ref=2.0)
+    assert "jerk_px" in m and m["jerk_px"] >= 0.0
+    assert m["stability"] == pytest.approx(
+        metrics.stability_from_jerk(m["jerk_px"], ref=2.0), abs=1e-3)
+
+
+@pytest.mark.parametrize("jerk", [0.0, 0.07, 0.83, 3.49, 8.4])
+def test_jerk_round_trips_through_stability(jerk):
+    """Rows measured before jerk was stored are backfilled by this inverse."""
+    s = metrics.stability_from_jerk(jerk, ref=4.0)
+    assert metrics.jerk_from_stability(s, ref=4.0) == pytest.approx(jerk, abs=1e-6)
+
+
 def test_one_bad_sample_does_not_decide_a_shot():
     """Medians, not means: one frame of lens flare should not reject a shot."""
     good = noisy((64, 128))

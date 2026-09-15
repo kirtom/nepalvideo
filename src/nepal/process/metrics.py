@@ -146,6 +146,14 @@ def stability_from_jerk(jerk: float, *, ref: float = JERK_REF_PX) -> float:
     return float(1.0 / (1.0 + max(0.0, jerk) / max(ref, 1e-6)))
 
 
+def jerk_from_stability(stability: float, *, ref: float) -> float:
+    """Exact inverse of :func:`stability_from_jerk`, for rows measured before
+    jerk was stored. ``ref`` must be the reference those rows were measured
+    with, not the current one."""
+    s = min(max(float(stability), 1e-6), 1.0)
+    return float(max(ref, 1e-6) * (1.0 / s - 1.0))
+
+
 def measure_samples(samples: Iterable[Sequence[np.ndarray]], *,
                     equirect: bool = False, width: int = FLOW_WIDTH,
                     jerk_ref: float = JERK_REF_PX) -> dict[str, Any] | None:
@@ -177,6 +185,8 @@ def measure_samples(samples: Iterable[Sequence[np.ndarray]], *,
         "exposure_pen": round(float(np.median(pens)), 4),
         "motion_mag": round(float(np.median(mags)) if mags else 0.0, 4),
         "stability": round(stability_from_jerk(jerk, ref=jerk_ref), 4),
+        # kept alongside stability so the reference can move without a re-measure
+        "jerk_px": round(jerk, 4),
         "n_samples": len(sharps),
     }
 

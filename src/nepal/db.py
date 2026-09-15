@@ -199,6 +199,11 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 # that already carries a column no longer in SCHEMA keeps it, harmlessly.
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("assets", "frame_shape", "TEXT"),
+    # The measured jerk itself, so that `stability` can be re-derived at gate
+    # time when metric_jerk_ref_px moves. Without it, every calibration of a
+    # value the spec calls "a calibration point, not a constant of nature"
+    # cost a full re-measure of the corpus.
+    ("shots", "jerk_px", "REAL"),
 )
 
 

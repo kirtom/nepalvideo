@@ -9,7 +9,7 @@ changes, edit this file in the same commit.
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | S01 Probe + S02 Spine | **done**, validated end to end |
-| 2 | S03 per-clip processing | **S03.0–.3 and .7 done**; .4 .5 .6 .8 remain |
+| 2 | S03 per-clip processing | **S03.0–.3 and .7 done and calibrated on the corpus**; .4 .5 .6 .8 remain |
 | 5 | S04 Semantic + S05 Score | not started |
 | 7 | S06 Assemble + S07 Draft render | not started |
 | 3, 4, 6, 8, 9 | containerise, Batch, gates, conform, Step Functions | not started |
@@ -51,15 +51,25 @@ invalidate parts of them, noted inline.
   would be 2–4× faster but is not worth 3.5 hours.
   The 3 failures were stale recordings from the pre-fix grouping; S01.2 now
   deletes those.
-- **S03.2** — 794 shots in 41:39. Per act {1:89, 2:102, 3:261, 4:138, 5:194,
-  None:10}; 606 positioned; **395 recordings had no detected cut**.
-  *Invalidated:* `process.max_shot_s` (20 s) now divides long scenes. Expect
-  roughly 900–1000 video shots on the next run.
-- **S03.0** — 623 photo shots from 651 dated photos in 8:46. Per act
-  {1:11, 2:127, 3:262, 4:56, 5:167}; 28 below the gate; zero unreadable.
-  *Invalidated:* stills were measured on raw Laplacian variance against
-  log-scale thresholds, so the gate passed almost everything and `score_tech`
-  saturated. Both measures now come from the S03.3 functions.
+- **S03.2** (2026-09-15, `--redo shots`) — **1,152 shots** from 480
+  recordings in 47 min (the 20 s cap divided the 395 cut-less recordings).
+  Per act {1:111, 2:112, 3:335, 4:162, 5:422, None:10}; 774 positioned.
+- **S03.0** (same run) — **704 photo shots** from 706 dated photos in 7:17
+  (pillow-heif is core now, so HEIC counts). Per act {1:62, 2:131, 3:277,
+  4:58, 5:176}; 2 outside every act.
+- **S03.3** (same run) — 1,152 shots measured in 37:48. Percentiles
+  (p5/p25/p50/p75/p95): sharpness 0 / 4.96 / 6.30 / 7.17 / 8.01 · exposure_pen
+  0 / .001 / .006 / .11 / 1.0 · motion 0 / .12 / .53 / 1.47 / 4.51 · jerk (px at
+  320 wide) camera p50 .24 p90 .83 p99 1.87, phones p50 .07 p95 .49. The p5 =
+  0 / p95 = 1.0 tails are **five recordings that are black at source** (63
+  min, camera in a bag), not a measurement problem.
+- **S03.7** after calibration (below) — **1,626 of 1,856 survive** (12%
+  rejected): soft 219 (214 black + 5), too short 7, shaky 4, exposure 0.
+  Camera 429 of 433 real shots, phone 1,109 of 1,121, telegram 88 of 88.
+  Survivors per act {1:173, 2:239, 3:578, 4:219, 5:408}. The spec's "expect
+  ~70% rejection on camera material" does not describe this corpus: the
+  Insta360's single-lens mode and both phones stabilise in camera, so almost
+  nothing is shaky, and the black recordings account for the rest.
 
 ## Do these next, in order
 
@@ -67,14 +77,29 @@ invalidate parts of them, noted inline.
    `(editable -- this checkout is what runs)`. `nepal` is not on PATH unless
    `.venv` is activated; use `.venv/bin/nepal`.
 2. ~~`nepal s02 --force`~~ — **done 2026-09-15**, see the run notes above.
-3. **`nepal s03 --redo shots,photos`** — **running as of 2026-09-15 04:12.** Re-detects with the 20 s shot cap,
-   re-measure photographs on the corrected scale, then S03.3 metrics and S03.7
-   gate run for the first time. Roughly an hour; proxies are untouched.
-4. **Read the S03.3 percentile lines** it logs for sharpness, exposure,
-   motion and stability, and calibrate against them: the `quality_curves`
-   thresholds are the spec's, written before anyone had seen this corpus, and
-   `process.metric_jerk_ref_px` is a guess. The spec expects roughly 70%
-   rejection on camera material; check what the gate actually does.
+3. ~~`nepal s03 --redo shots,photos`~~ — **done 2026-09-15**, 1:32 wall
+   clock on this machine. Numbers above.
+4. ~~Calibrate the gate~~ — **done 2026-09-15.** What the percentiles and the
+   frames showed, and what moved (all in `config/pipeline.yaml` with the
+   evidence in the comments):
+   - `metric_jerk_ref_px` 4.0 → **1.2**. The guess was an order of magnitude
+     high; with it, stability never fell below 0.84 and the rule was inert.
+     Frame strips of the extremes: 3.5 px is a camera swinging at knee height
+     pointed at boots; 1.9 px is a tilted, drifting, usable frame. The floor
+     now cuts at ~2.2 px. The jerk here is not oscillation — the mean-flow
+     series of the worst shots is smooth — it is the camera being swung.
+   - `max_exposure_pen` 0.15/0.20/0.35 → **0.60/0.60/off**. At the spec's
+     values the rule rejected 30 video shots and **22 of them were Keller's
+     talking-to-camera diary selfies** with a white sky behind a correctly
+     exposed face — the §1.4 spine — plus a teahouse at night and two round
+     videos. Its 11 photo rejections were all Act 1 screenshots (the
+     itinerary, the e-visa, the KTM–DEL flight). `exposure_pen` measures a
+     scene's contrast range, not an exposure failure; genuinely blank frames
+     sit at 1.0 and are caught by the sharpness floor anyway.
+   - `shots.jerk_px` is now stored and **stability is re-derived at gate
+     time**, so moving `jerk_ref` is a `nepal s03` re-run (seconds), not a
+     38-minute re-measure. The 1,152 existing rows were backfilled by the
+     exact inverse, checked against fresh OpenCV measurements to 4 decimals.
 5. **S03.4** (LUFS, wind, silero-VAD), then **S03.5** transcription — §1.4
    makes speech the spine of the film, so this is not optional. `has_speech`
    also switches on the gate's speech reprieve, which is inert until then.
@@ -97,6 +122,13 @@ invalidate parts of them, noted inline.
   provisioned.
 
 ## Known data notes
+
+- **Five camera recordings are black at source** — `LRV_20240413_124619`,
+  `…0424_013819`, `…0425_164006`, `…0425_170919`, `…0427_095106`, 63 minutes
+  together, mean luma ~3/255 in the `.lrv` itself. The camera was recording
+  inside a bag. Their 214 shots are rejected as soft; they cost 47 minutes of
+  shot detection and metrics that a luma check at S01 would have saved, but
+  the pipeline runs once and they are already processed.
 
 - **Three `phone_kulikov` clips are stamped 2025-11-22** (`video_1_902aaa…`,
   `4F9001FC…`, `5822EE80…`; 720×1280, 9–32 s). Every embedded time tag agrees
