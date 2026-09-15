@@ -227,9 +227,12 @@ before and after any remote stage, and check
   often-cited "Bedrock blocks root" — that hypothesis was tested and wrong.
   `bedrock:InvokeModel` is already on the `nepal-pipeline-ec2` role, which is
   the credential S04.3 should use.
-- **G-instance quota** requests (Spot `L-3819A6DF`, On-Demand `L-DB2E81BA`,
-  4 vCPU each, eu-north-1) are open with AWS support. Until one lands, S03.6
-  faces and S04.1 CLIP embeddings have no GPU to run on.
+- **G-instance quota: declined, and it does not matter.** AWS refused both
+  requests (Spot `L-3819A6DF`, On-Demand `L-DB2E81BA`) as routine new-account
+  ramping and offered an appeal. **Do not appeal.** Every stage that was
+  supposed to need a GPU ran on the 8-core CPU box instead: S03.5 at 32x the
+  local machine, S03.6 at 1.0 s/shot, S04.1 CLIP likewise. The spec's
+  `g4dn.xlarge` was a reasonable guess that measurement retired.
 
 ## Known data notes
 
