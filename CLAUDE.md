@@ -74,6 +74,18 @@ Each of these cost a wrong diagnosis or a wasted multi-hour run.
   assets, recordings, shots — survives unless it is explicitly deleted.
 - **Do not optimise speculatively.** This pipeline runs once. A measured 3x is
   worth taking; a plausible one is not worth the turn.
+- **A status whitelist stops matching the moment a later stage promotes a
+  row.** S04.1 selected `status = 'candidate'`; S05 promotes its picks to
+  `'shortlisted'`, so once a cut existed the stage skipped exactly the shots
+  the film was made of. Ask for the complement of the verdict you mean
+  (`<> 'rejected'`), which cannot drift as statuses are added.
+- **A slot must never claim more footage than its shot has.** The act's
+  duration range says what a shot deserves; the shot says what it can give.
+  ffmpeg simply stops at the end of the source, so the timeline silently
+  over-reports and every number derived from it is wrong.
+- **A run measured in hours must checkpoint.** Accumulating in memory and
+  writing once at the end means a kill at hour five costs five hours and
+  leaves nothing to resume from. Write through a temporary name and rename.
 
 ## Decisions that are not yours
 

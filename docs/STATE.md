@@ -21,6 +21,91 @@ Gate 3 has turned out to run here. Nothing of value is trapped in AWS: the
 originals never left, and the DB, transcripts, face embeddings and proxies are
 all local.
 
+## Where the product actually is
+
+A **complete film exists end to end**: 65 GB of unsorted holiday media in,
+an 18.7-minute cut out, every stage automated and resumable. The funnel, all
+measured:
+
+| | Count |
+|---|---:|
+| Raw assets ingested | 1,364 |
+| Recordings (chapters rejoined) | 480 |
+| Shots detected | 1,856 |
+| Survived the quality gate | 1,632 |
+| Shortlisted by S05 | 400 |
+| Placed in the timeline | 220 (126 video, 94 photographs) |
+| Rendered draft | 18.7 min, 960×540, 203.5 MB |
+
+826 tests pass (1 skipped, 69 slow deselected). See
+`docs/DATA_AND_PIPELINE.md` for the full catalogue of what arrives and what
+is done to it.
+
+**What the draft is missing is all one cause**: the AWS account is suspended,
+so no stage that needs Claude has ever run. That is not a defect list, it is
+a single blocked dependency.
+
+## Current issues
+
+Ordered by what they cost the film.
+
+### Blocking the film's quality
+
+1. **No captions — `score_sem` is absent for all 1,632 shots.** S04.3 needs
+   Claude. `weighted` drops the missing term and renormalises, so the ranking
+   is correct on what it knows rather than distorted — but nothing has been
+   ranked on *what is in the shot*. This is the single largest quality gap.
+2. **No CLIP embeddings — MMR ran with no diversity term.** S04.1 is built
+   and measured (~6 h on this CPU) but has not completed a run. Without it
+   MMR degenerates to score order, and the cut visibly repeats itself.
+3. **The draft on disk is pre-fix.** It was rendered before the slot-clamping
+   fix, so it contains slots that claim footage that does not exist. Re-run
+   `nepal cut` before judging Gate 3.
+
+### Built but not wired
+
+4. **`process/mix.py` is dead code.** It implements the spec's §7 mix — the
+   −14 LUFS bed, the speech ducking — and **no stage imports it**. The draft
+   is picture-only: no music, no location audio, no ducking. `build_command`
+   already accepts a `music_path` and normalises it; S05's driver never
+   passes one.
+5. **No `drawtext`.** This ffmpeg is built without libfreetype, so the draft
+   carries no shot_id/timecode overlay and Gate 3 notes must cite wall-clock
+   times. The stage warns and renders anyway.
+
+### Correctness traps still open
+
+6. **`db.upsert` never removes, and there is no prune step.** If any source
+   media is deleted, a re-run leaves ghost rows — recordings, shots,
+   transcripts, face clusters — for media that no longer exists, and those
+   ghosts remain eligible for selection. **A pruned-corpus re-run needs
+   either a fresh database or a prune step. Neither exists yet.**
+7. **Gate 1 FOV is unconfirmed.** `fov_deg = 193` is a carried-over fallback:
+   the last S01 ran `--skip-fov`, so the value predates frame-shape
+   classification and was measured on flat proxies that are not fisheye at
+   all. Re-solving needs `nepal s01 --force`, and a materially different
+   answer means rebuilding the 22 dual-fisheye proxies.
+8. **`spine.whisper_language: ru` is still marked "confirm".**
+9. **`awscliv2.zip` was ingested as an asset** (71 MB, `unknown / other /
+   zip`). The manifest walks `data_root` and the AWS CLI installer was in it.
+   Harmless, but it means the manifest has no ignore list.
+
+### Consequences to decide, not bugs
+
+10. **The acts now come up ~1.2 min short of their budget.** That is the
+    slot-clamping fix telling the truth instead of claiming footage that does
+    not exist. Refilling means selecting more shots — a shot-selection
+    question, and therefore the operator's.
+11. **Three `phone_kulikov` clips have unrecoverable capture times** and sit
+    outside every act.
+
+### Environment
+
+12. **This machine is the bottleneck, more than any cloud would be.** 4 cores,
+    11 GB RAM, and measured **6.3 GB into swap** — which is why loading a
+    1.7 GB checkpoint took 455 s. Closing browsers tripled S02.6's speed and
+    is worth as much again.
+
 ## The last full run
 
 S01 + S03.0/.1/.2 on the real corpus, 4.5 hours wall clock. These numbers are

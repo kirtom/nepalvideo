@@ -5,8 +5,10 @@ phones, a Telegram export and a music library — into a ~20-minute documentary
 plus a 3-minute short cut, with three human approval gates.
 
 `docs/spec.md` is the specification this is built to. `docs/STATE.md` is where
-the project actually stands right now, with the numbers from the last real run.
-`CLAUDE.md` is how to work in this repository. This file is the tour.
+the project actually stands right now, with the numbers from the last real run
+and the current issue list. `docs/DATA_AND_PIPELINE.md` catalogues every kind
+of raw material and every transformation applied to it. `CLAUDE.md` is how to
+work in this repository. This file is the tour.
 
 ---
 
@@ -42,14 +44,19 @@ moving. Act 4 is one swell into a hard cut to silence.
 |---|---|---|
 | 1 | S01 Probe + S02 Spine | **done**, validated end to end on the real corpus |
 | 2 | S03 per-clip processing | **done** — S03.0–.7 all run on the corpus (.8 dropped) |
-| 5 | S04 Semantic + S05 Score | not started |
-| 7 | S06 Assemble + S07 Draft render | not started |
+| 5 | S04 Semantic + S05 Score | S05 **done**; S04.1 built, not yet run; S04.2/.3 need Claude |
+| 7 | S06 Assemble + S07 Draft render | **done** — a draft cut exists |
 | 3, 4, 6, 8, 9 | containerise, Batch, gates, conform, Step Functions | not started / partly dropped |
 
-Everything so far runs locally. The one thing that forces a cloud machine is
-S03.5 transcription: 70 minutes of speech at 6–17× realtime on a 2011-era
-4-core box is 7–20 hours, and S04 captioning needs Bedrock regardless. See
-[Running it in the cloud](#running-it-in-the-cloud).
+**A complete film exists end to end**: 1,364 raw assets → 1,856 shots → 1,632
+past the gate → 400 shortlisted → 220 slots → an 18.7-minute draft.
+
+Everything runs locally today. S03.5 transcription was the one stage that
+justified renting a machine (7–20 h locally against 48 min on 8 cloud cores);
+it has since run. The remaining cloud dependency is **Claude, for S04.2
+framing, S04.3 captioning and S06 ordering** — which is what the draft is
+missing. See [Running it in the cloud](#running-it-in-the-cloud) and the
+current issue list in `docs/STATE.md`.
 
 ---
 
@@ -188,6 +195,10 @@ on a 4-core, 11 GB machine:
 | S03.5 speech | **48 min on EC2** (est. 7–20 h locally) | 537 shots, 66 min of speech, 0.4× realtime |
 | S03.6 faces | 16 min on EC2 | 930 shots at 1.0 s/shot, CPU; no GPU needed |
 | S03.7 gate | seconds | pure function of stored metrics and thresholds |
+| S04.1 CLIP | **~6 h measured, not yet run** | ViT-L-14 at 13.1 s/shot on 4 cores; frame decode is only 0.64 s/shot |
+| S05 score | seconds | pure function of stored metrics |
+| S06 assemble | seconds | MMR plus the beat grid, both pure |
+| S07 draft render | 8:18 | 220 slots to 18.7 min of 960×540 |
 
 ---
 
@@ -275,9 +286,46 @@ altitude curve exists).
 - **S03.5 Transcription** — faster-whisper over only the shots carrying speech,
   on the shot's own window, with segment times put back on the recording's
   clock. Writes each transcript as it goes, so a killed run keeps its work.
-- **S03.6 Faces** — *not built.* InsightFace over the yaw views, clustered
-  across the corpus.
+- **S03.6 Faces** — InsightFace `buffalo_l` over rectilinear views sampled
+  out of the equirect frame at several yaws, 512-d ArcFace embeddings, then
+  one greedy agglomerative pass plus an average-linkage merge over the whole
+  corpus. 1,168 faces, 202 clusters. The embeddings are stored, so moving a
+  threshold re-labels in seconds instead of re-detecting for hours.
 - **S03.7 Quality gate** — see below.
+
+### S04 — Semantic
+
+- **S04.1 CLIP** — one embedding of the sharpest sampled frame of every
+  surviving shot, through ViT-L-14, stored as a plain `.npy` with a JSON
+  index rather than database rows: the spec asks for this artefact to outlive
+  the film as a searchable index of a personal video library. Built and
+  measured (~6 h on 4 CPU cores); not yet run to completion.
+- **S04.2 Framing / S04.3 Captions** — *not built.* Both need Claude.
+
+### S05 — Score
+
+Three scores combined: `score_tech` (sharpness, exposure, stability, duration
+fit), `score_sem` (VLM interest, CLIP–act similarity) and `score_ctx` (faces,
+speech, a new maximum altitude, first-at-place, proximity to a chat message).
+**A term with no data is dropped and the rest renormalised**, never counted as
+zero — which is why the ranking survives having no captions.
+
+### S06 — Assemble
+
+Greedy MMR — `argmax(score − λ · max similarity to what is already chosen)` —
+under hard constraints, laid onto the music's beat grid. Slot duration is
+`min(what the act's range asks for, what the shot actually has)`. Exports
+OpenTimelineIO and FCPXML 1.9, both written by hand with times quantised to
+frame boundaries, so the cut is refinable in Resolve or Final Cut rather than
+only re-runnable.
+
+### S07 — Draft render
+
+One ffmpeg invocation, conformed **from the proxies, never the originals** —
+re-reading 5.7K H.265 for a 960×540 preview would cost hours to look identical
+at that size. Video seeks at the input; photographs are held in the filter
+graph. The mix (`process/mix.py`) is written but **not yet wired in**, so the
+draft is currently picture-only.
 
 ---
 
@@ -434,9 +482,19 @@ then they are manual checkpoints.
 
 ## Running it in the cloud
 
-The pipeline runs locally end to end except for two things: S03.5 transcription
-is memory-bound and slow on an old CPU, and S04 captioning is Bedrock, so it
-needs AWS regardless.
+**The AWS account is currently suspended** pending document verification, so
+nothing below runs today. Everything the film needs up to Gate 3 has turned
+out to run on the local machine; the one thing a cloud is still required for
+is **Claude**, for S04.2 framing, S04.3 captioning and S06 ordering.
+
+If that account does not come back, the replacement is **Google Cloud, not
+Yandex**: Vertex AI carries Anthropic's models, so it unblocks captioning as
+well as compute, and the switching cost is zero — S04.2 and S04.3 were never
+written, so there is a provider to choose rather than a migration to perform.
+Yandex Cloud supplies compute only.
+
+The history below is what was actually done on AWS. S03.5 transcription was
+memory-bound and slow on an old CPU, and S04 captioning needed Bedrock.
 
 The approach taken is **one rented box, not an architecture**. The spec's
 Batch + ECR + Step Functions design was sized for 500 GB and a 2,400-minute
