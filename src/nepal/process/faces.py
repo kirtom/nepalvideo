@@ -206,21 +206,29 @@ def merge_clusters(embeddings: Sequence[np.ndarray], labels: Sequence[int], *,
         n = float(np.linalg.norm(m))
         return m / n if n else m
 
-    means = {k: mean_of(v) for k, v in groups.items()}
+    keys = list(groups)
+    M = np.vstack([mean_of(groups[k]) for k in keys])      # one matrix, not a dict
+    alive = np.ones(len(keys), dtype=bool)
+    # The whole pairwise similarity at once. Looping this in Python was 2M dot
+    # products on the real corpus -- fast enough on a server to go unnoticed
+    # and slow enough on the operator's machine to be killed mid-run.
+    sim = M @ M.T
+    np.fill_diagonal(sim, -np.inf)
     while True:
-        best: tuple[float, int, int] | None = None
-        keys = sorted(groups, key=lambda k: -len(groups[k]))
-        for i, a in enumerate(keys):
-            for b in keys[i + 1:]:
-                sim = float(means[a] @ means[b])
-                if sim >= merge_cos and (best is None or sim > best[0]):
-                    best = (sim, a, b)
-        if best is None:
+        sim_alive = np.where(alive[:, None] & alive[None, :], sim, -np.inf)
+        flat = int(np.argmax(sim_alive))
+        i, j = divmod(flat, len(keys))
+        if sim_alive[i, j] < merge_cos:
             break
-        _, a, b = best
-        groups[a].extend(groups[b])
-        del groups[b], means[b]
-        means[a] = mean_of(groups[a])
+        a, b = (i, j) if len(groups[keys[i]]) >= len(groups[keys[j]]) else (j, i)
+        groups[keys[a]].extend(groups[keys[b]])
+        del groups[keys[b]]
+        alive[b] = False
+        M[a] = mean_of(groups[keys[a]])
+        row = M @ M[a]
+        sim[a, :] = row
+        sim[:, a] = row
+        sim[a, a] = -np.inf
 
     out = [0] * len(labels)
     for k, idxs in groups.items():

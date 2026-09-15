@@ -833,6 +833,14 @@ def recluster_faces(cfg: Config, conn) -> dict[str, Any]:
     idx_path = cfg.work_root / "faces" / "embeddings_index.json"
     if not emb_path.exists() or not idx_path.exists():
         return {"skipped": "no stored embeddings; run `nepal s03 --redo faces`"}
+    # Re-labelling from stored embeddings is seconds; detection is hours. The
+    # two must never be confused, and once were: `--redo recluster` on a
+    # machine where detection had run *elsewhere* found no `faces` stage unit,
+    # decided the expensive step was outstanding, and started a four-hour job
+    # to answer a question the .npy already answered.
+    if "faces" not in db.done_units(conn, STAGE):
+        db.mark_unit(conn, STAGE, "faces",
+                     detail="embeddings present; detection ran on another machine")
     E = np.load(emb_path)
     shot_ids = json.loads(idx_path.read_text())["shot_ids"]
     if len(shot_ids) != len(E):
