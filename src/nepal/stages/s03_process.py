@@ -22,9 +22,9 @@ from typing import Any
 
 from nepal import db, freshness
 from nepal.config import Config
-from nepal.process import (audio as audio_mod, gate as gate_mod,
-                           metrics as metrics_mod, reproject,
-                           shots as shots_mod, stills)
+from nepal.process import (asr as asr_mod, audio as audio_mod,
+                           gate as gate_mod, metrics as metrics_mod,
+                           reproject, shots as shots_mod, stills)
 from nepal.spine import acts as acts_mod, gps as gps_mod
 from nepal.util import proc
 from nepal.util.progress import Progress, heartbeat
@@ -437,6 +437,28 @@ def measure_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
             "samples_per_shot": n_samples, "distribution": dist}
 
 
+def refresh_audio_flags(cfg: Config, conn) -> int:
+    """Derive ``has_speech`` and ``wind`` from what S03.4 stored.
+
+    Seconds of speech and the low-frequency share are measurements; whether
+    they amount to "speech" or "wind" is a threshold, so the flags are
+    re-derived whenever the thresholds could have moved -- after measuring,
+    and again at the gate. Returns how many shots were flagged either way.
+    """
+    speech_min = float(cfg.get("process.speech_min_s", audio_mod.SPEECH_MIN_S))
+    wind_thr = float(cfg.get("process.wind_lf_ratio", audio_mod.WIND_SHARE))
+    flags: list[tuple[int, int, str]] = []
+    for r in conn.execute("SELECT shot_id, speech_s, wind_lf_share FROM shots "
+                          "WHERE speech_s IS NOT NULL OR wind_lf_share IS NOT NULL"):
+        flags.append((int(audio_mod.has_speech(r["speech_s"], min_s=speech_min)),
+                      int(audio_mod.is_wind(r["wind_lf_share"], threshold=wind_thr)),
+                      r["shot_id"]))
+    if flags:
+        conn.executemany("UPDATE shots SET has_speech=?, wind=? WHERE shot_id=?", flags)
+        conn.commit()
+    return len(flags)
+
+
 def measure_audio(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
     """S03.4 -- loudness, wind and speech for every video shot.
 
@@ -514,6 +536,7 @@ def measure_audio(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
         [(r["audio_lufs"], r["wind_lf_share"], r["speech_s"], r["shot_id"])
          for r in results])
     conn.commit()
+    refresh_audio_flags(cfg, conn)
 
     lufs = [r["audio_lufs"] for r in results if r["audio_lufs"] is not None]
     shares = [r["wind_lf_share"] for r in results]
@@ -537,6 +560,86 @@ def measure_audio(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
             "n_missing_audio": len(missing), "failed": failed,
             "speech_total_s": round(total_speech, 1), "n_with_speech": with_speech,
             "footage_s": round(shot_s, 1), "distribution": dist}
+
+
+def transcribe_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
+    """S03.5 -- transcribe every candidate shot that carries speech.
+
+    Resumable through the data: a shot with a transcript (even an empty one)
+    has been done. Only candidates: a rejected shot is not worth a model's
+    time, and if a threshold change brings it back it is picked up then.
+
+    Logs the realtime factor as it goes. On a CPU this stage is the slowest
+    thing in the pipeline by an order of magnitude and the number that
+    decides whether it should be running here at all is only known once it
+    has run for a few minutes.
+    """
+    audio_dir = cfg.work_root / "audio"
+    where = "" if force else " AND s.transcript IS NULL"
+    rows = [dict(r) for r in conn.execute(
+        "SELECT s.shot_id, s.recording_id, s.start_s, s.end_s, s.speech_s "
+        "FROM shots s WHERE s.media_kind = 'video' AND s.has_speech = 1 "
+        f"AND s.status = 'candidate'{where} ORDER BY s.recording_id, s.start_s")]
+    if not rows:
+        return {"n_shots": 0, "note": "every speech shot already transcribed"}
+
+    model_name = cfg.get("spine.whisper_model")
+    language = cfg.get("spine.whisper_language")
+    beam = int(cfg.get("process.asr_beam_size", 5))
+    threads = int(cfg.get("process.asr_cpu_threads", 0))
+    speech_total = sum(float(r["speech_s"] or 0) for r in rows)
+    log.info("S03.5 transcribing %d shot(s), %.1f min of speech, with %s (%s), beam %d",
+             len(rows), speech_total / 60, model_name, language or "auto", beam)
+    try:
+        model = asr_mod.load_model(model_name, cpu_threads=threads)
+    except ImportError:
+        log.warning("S03.5 faster-whisper not installed -- skipping (pip install '.[asr]')")
+        return {"skipped": "faster-whisper not installed"}
+
+    out_dir = cfg.workdir("transcripts", "shots")
+    bar = Progress("S03.5 transcribing", len(rows))
+    done_n = 0
+    failed: dict[str, int] = {}
+    t0 = time.monotonic()
+    audio_done = 0.0
+    for r in rows:
+        bar.step(note=r["shot_id"][-24:])
+        wav = audio_dir / f"{r['recording_id']}.wav"
+        try:
+            x, _sr = audio_mod.read_window(wav, r["start_s"], r["end_s"])
+            res = asr_mod.transcribe_window(model, x, language=language, beam_size=beam,
+                                            offset_s=float(r["start_s"]))
+        except Exception as exc:                       # one shot must not end the stage
+            log.warning("S03.5 %s failed: %s", r["shot_id"], exc)
+            key = type(exc).__name__
+            failed[key] = failed.get(key, 0) + 1
+            continue
+        (out_dir / f"{r['shot_id'].replace('#', '_')}.json").write_text(json.dumps(
+            {"shot_id": r["shot_id"], **res}, ensure_ascii=False, indent=1))
+        conn.execute("UPDATE shots SET transcript=? WHERE shot_id=?",
+                     (res["text"], r["shot_id"]))
+        conn.commit()                                  # each shot survives a kill
+        done_n += 1
+        audio_done += float(r["end_s"]) - float(r["start_s"])
+        if done_n % 25 == 0:
+            el = time.monotonic() - t0
+            log.info("S03.5 %d done: %.1fx realtime on the shot audio; %.0f min left at this rate",
+                     done_n, el / max(audio_done, 1e-6),
+                     (sum(float(q["end_s"]) - float(q["start_s"]) for q in rows) - audio_done)
+                     * (el / max(audio_done, 1e-6)) / 60)
+    el = time.monotonic() - t0
+    bar.close(f"{done_n} transcribed in {el/60:.1f} min")
+    chars = conn.execute("SELECT COALESCE(SUM(LENGTH(transcript)),0) FROM shots "
+                         "WHERE transcript IS NOT NULL").fetchone()[0]
+    empty = conn.execute("SELECT COUNT(*) FROM shots WHERE transcript = ''").fetchone()[0]
+    log.info("S03.5 %d transcribed, %.1fx realtime; %d character(s) of transcript in "
+             "the table, %d speech shot(s) came back empty",
+             done_n, el / max(audio_done, 1e-6), chars, empty)
+    if failed:
+        log.warning("S03.5 %d shot(s) failed: %s", sum(failed.values()), failed)
+    return {"n_shots": len(rows), "n_transcribed": done_n, "failed": failed,
+            "seconds": round(el, 1), "realtime_factor": round(el / max(audio_done, 1e-6), 2),
+            "n_empty": empty, "chars": chars}
 
 
 def apply_gate(cfg: Config, conn) -> dict[str, Any]:
@@ -574,19 +677,12 @@ def apply_gate(cfg: Config, conn) -> dict[str, Any]:
     if restab:
         conn.executemany("UPDATE shots SET stability=? WHERE shot_id=?", restab)
 
-    # Same for the two audio flags: S03.4 stores seconds of speech and the
-    # low-frequency share; whether that is "speech" or "wind" is a threshold.
+    # Same for the two audio flags, which the speech reprieve reads.
     speech_min = float(cfg.get("process.speech_min_s", audio_mod.SPEECH_MIN_S))
-    wind_thr = float(cfg.get("process.wind_lf_ratio", audio_mod.WIND_SHARE))
-    flags: list[tuple[int, int, str]] = []
     for r in rows:
-        if r["speech_s"] is None and r["wind_lf_share"] is None:
-            continue
-        r["has_speech"] = int(audio_mod.has_speech(r["speech_s"], min_s=speech_min))
-        r["wind"] = int(audio_mod.is_wind(r["wind_lf_share"], threshold=wind_thr))
-        flags.append((r["has_speech"], r["wind"], r["shot_id"]))
-    if flags:
-        conn.executemany("UPDATE shots SET has_speech=?, wind=? WHERE shot_id=?", flags)
+        if r["speech_s"] is not None:
+            r["has_speech"] = int(audio_mod.has_speech(r["speech_s"], min_s=speech_min))
+    refresh_audio_flags(cfg, conn)
 
     speech_factor = float(cfg.get("gate.speech_sharpness_factor",
                                   gate_mod.SPEECH_SHARPNESS_FACTOR))
@@ -750,6 +846,8 @@ def run(cfg: Config, *, force: bool = False,
                  cfg, conn, force=force or "metrics" in (redo or ()))),
              ("audio", lambda: measure_audio(
                  cfg, conn, force=force or "audio" in (redo or ()))),
+             ("asr", lambda: transcribe_shots(
+                 cfg, conn, force=force or "asr" in (redo or ()))),
              # The gate is re-run every time: it is pure, it is cheap, and a
              # rejection left over from an older threshold is invisible.
              ("gate", lambda: apply_gate(cfg, conn))]

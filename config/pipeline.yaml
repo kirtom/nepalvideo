@@ -233,6 +233,15 @@ process:
   # one onnxruntime pass per recording. 0 means one per core.
   audio_workers: 0
 
+  # -- S03.5 transcription --------------------------------------------
+  # Model and language are spine.whisper_model / spine.whisper_language, the
+  # same as S02.6. Beam width is the main speed lever on a CPU: 5 is
+  # faster-whisper's default and what S02.6 used; 1 is several times faster
+  # and noticeably worse on wind-blown speech. 0 threads means the library's
+  # own default.
+  asr_beam_size: 5
+  asr_cpu_threads: 0
+
 # S03.7 quality gate -- one curve per source class (spec section S03.7).
 #
 # max_exposure_pen is far above the spec's 0.15 / 0.20 / 0.35. Those were

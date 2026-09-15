@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     # tuned, so they are reachable without paying for the expensive one.
     p3.add_argument("--redo", metavar="STEPS", default="",
                     help="comma-separated sub-steps to recompute: "
-                         "proxies,shots,photos,metrics,audio,gate")
+                         "proxies,shots,photos,metrics,audio,asr,gate")
 
     pfc = sub.add_parser("fov-check",
                          help="render the Gate 1 FOV comparison sheets")
