@@ -93,5 +93,22 @@ def warn_if_stale(log, conn, stage: str, *, force: bool, rerun_hint: str) -> lis
         log.warning(
             "%s %s already completed under an OLDER version of the code and will "
             "be SKIPPED -- this run will not change them. To redo them: %s",
-            stage, ", ".join(stale), rerun_hint)
+            stage, _summarise_units(stale), rerun_hint)
     return stale
+
+
+def _summarise_units(units: list[str], *, max_listed: int = 12) -> str:
+    """Name the top-level units and count the per-item ones.
+
+    S03 records one unit per proxy, so a stale list is 480 entries and the
+    warning became a single 20 KB line nobody reads. The reader wants to
+    know WHICH steps are stale, not which of the 480 recordings.
+    """
+    from collections import Counter
+    plain = [u for u in units if ":" not in u]
+    grouped = Counter(u.split(":", 1)[0] for u in units if ":" in u)
+    parts = sorted(plain)[:max_listed]
+    if len(plain) > max_listed:
+        parts.append(f"and {len(plain) - max_listed} more")
+    parts += [f"{k}:* ({n} units)" for k, n in sorted(grouped.items())]
+    return ", ".join(parts)

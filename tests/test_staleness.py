@@ -100,6 +100,26 @@ def test_a_rerun_without_force_says_it_will_skip_the_stale_work(conn):
     assert "clock" in text and "manifest" in text
 
 
+def test_per_recording_units_are_counted_not_listed(conn):
+    """S03 records one unit per proxy. Listing all 480 made the warning a
+    single 20 KB line; the reader wants to know which STEPS are stale."""
+    code = code_mtime()
+    for unit in ("proxies", "shots", "photos"):
+        mark(conn, "S03", unit, code - timedelta(hours=3))
+    for i in range(480):
+        mark(conn, "S03", f"proxy:camera_{i:04d}", code - timedelta(hours=3))
+    log = _Log()
+
+    got = warn_if_stale(log, conn, "S03", force=False, rerun_hint="nepal s03 --force")
+
+    assert len(got) == 483
+    text = log.messages[0]
+    assert len(text) < 400, len(text)
+    assert "proxy:* (480 units)" in text
+    assert "photos" in text and "proxies" in text and "shots" in text
+    assert "proxy:camera_0001" not in text
+
+
 def test_force_needs_no_warning_because_nothing_is_skipped(conn):
     code = code_mtime()
     mark(conn, "S01", "manifest", code - timedelta(hours=3))
