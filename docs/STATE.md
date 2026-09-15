@@ -9,7 +9,7 @@ changes, edit this file in the same commit.
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | S01 Probe + S02 Spine | **done**, validated end to end |
-| 2 | S03 per-clip processing | **S03.0–.5 and .7 done**, calibrated and run on the corpus; .6 remains (.8 dropped) |
+| 2 | S03 per-clip processing | **done** — S03.0–.7 all run on the corpus (.8 dropped) |
 | 5 | S04 Semantic + S05 Score | not started |
 | 7 | S06 Assemble + S07 Draft render | not started |
 | 3, 4, 6, 8, 9 | containerise, Batch, gates, conform, Step Functions | not started |
@@ -79,6 +79,23 @@ invalidate parts of them, noted inline.
   telegram densest at 166 chars/shot, which is what a round video is.
   Spot-checked: coherent Russian, gear talk and reflection, not wind
   artefacts. `large-v3`, beam 5, `ru` forced.
+- **S03.6** (2026-09-15, on the EC2 box) — **438 of 930 candidate shots show
+  a face**, 1,168 faces, 15:41 at 1.0 s/shot **on CPU**: the G-instance quota
+  never arrived and was never needed. Attribution after the merge pass:
+  keller 256 shots, kulikov 92, 90 showing someone else. Cluster sizes
+  482 / 264 / 88 / 20 / 18 / 12 and a long tail of ones.
+  Two findings, both recorded in the code:
+  - **The proxies were distorted.** 367 of 458 flat recordings are portrait
+    (720x1280, or 1080x1920 behind a rotation flag) and were being squashed
+    into a 16:9 box, stretched 2.4x and 3.2x. Every metric computed happily
+    on them; it surfaced only when the detector returned nothing on a frame
+    filled by a face. S07 renders the draft from these proxies, so the film
+    would have had stretched people in it. Rebuilt, and 475 shots re-measured.
+  - **The greedy clustering split each trekker across several clusters**
+    (keller 376+65+25, kulikov 200+33) because a cluster mean drifts toward
+    the poses it accumulates first. Merging cluster means at 0.40 fixed it;
+    fragments sat 0.48-0.78 apart and strangers 0.00-0.12, so the threshold
+    is not delicate.
 - **S03.7** after calibration (below) — **1,626 of 1,856 survive** (12%
   rejected): soft 219 (214 black + 5), too short 7, shaky 4, exposure 0.
   Camera 429 of 433 real shots, phone 1,109 of 1,121, telegram 88 of 88.
@@ -124,12 +141,19 @@ invalidate parts of them, noted inline.
    `process.wind_lf_ratio`, so both thresholds move without a re-measure.
    S03.5 ran on the EC2 box in 48 minutes — see the run record above. The
    film now has its spine: 45k characters of Russian across 537 shots.
-6. **S03.6** faces — the last piece of M2, and the next thing to build. Then
-   M5 (S04 semantic + S05 scoring), then M7 (S06 assemble + S07 draft
-   render). S03.6 and S04.1 both want a GPU, but S03.5 is evidence the box
-   may not need one: 8 cores and 30 GB beat the local machine 32× with no
-   vector hardware at all. Try CPU first and measure before waiting on the
-   quota case.
+6. ~~S03.6 faces~~ — **done 2026-09-15**, see above. **Milestone 2 is
+   complete.** Next is M5 (S04 semantic + S05 scoring), then M7 (S06 assemble
+   + S07 draft render).
+   - **S04.1 CLIP is the only remaining GPU candidate.** Do not wait on the
+     quota case for it: S03.5 ran 32x faster than the local machine and
+     S03.6 at 1.0 s/shot, both on CPU. Measure first.
+   - **S04.3 captioning is Bedrock** and is the only unbounded cost in the
+     project (`semantic.max_caption_shots`, default 2,500). 1,628 shots
+     survive the gate, so the cap does not bind yet — but check the model is
+     available in eu-north-1 before assuming the region.
+   - Gate 2 needs a representative face per cluster: the embeddings are in
+     `work/faces/embeddings.npy`, and `nepal s03 --redo recluster` re-labels
+     from them in seconds if a threshold moves.
 
 ## The cloud move
 
