@@ -9,13 +9,13 @@ changes, edit this file in the same commit.
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | S01 Probe + S02 Spine | **done**, validated end to end |
-| 2 | S03 per-clip processing | **S03.0–.4 and .7 done and calibrated on the corpus**; .5 .6 .8 remain |
+| 2 | S03 per-clip processing | **S03.0–.4 and .7 done and calibrated on the corpus**; .5 built and running on EC2; .6 .8 remain |
 | 5 | S04 Semantic + S05 Score | not started |
 | 7 | S06 Assemble + S07 Draft render | not started |
 | 3, 4, 6, 8, 9 | containerise, Batch, gates, conform, Step Functions | not started |
 
-Everything so far runs locally. Nothing requires an AWS account yet, and the
-first AWS action when one is needed is the Budgets alarm (spec §8.1).
+S01–S03.4 ran locally. **S03.5 runs on a rented EC2 box** — see "The cloud
+move" below. The account is live and the Budgets alarm is set (spec §8.1).
 
 ## The last full run
 
@@ -119,7 +119,49 @@ invalidate parts of them, noted inline.
    that is 7–20 hours; on a `g4dn.xlarge` it is minutes. See the cloud
    assessment (2026-09-15) — this is the number it said to wait for.
 6. **S03.6** faces, then M5 (S04 semantic + S05 scoring), then M7 (S06 assemble
-   + S07 draft render).
+   + S07 draft render). S03.6 and S04.1 both want a GPU; the G-instance quota
+   request below has to land first, or they run on CPU on the same box.
+
+## The cloud move
+
+Done 2026-09-15, because S03.5 at 7–20 h locally was not worth waiting for.
+**One rented box running the same `nepal` CLI, not the spec's Batch/ECR/Step
+Functions architecture** — that was sized for 500 GB and 2,400 minutes; at
+65 GB it is days of build for nothing the resumable CLI does not already do.
+Recorded as a deviation in the README.
+
+- **Account** eu-north-1, root session via `aws login` (the CLI session
+  expires; re-run it when a call says so).
+- **Budget** `NepalBudget` raised 40 → **60 USD**, alerts at 50% and 80% to
+  the operator's address. Month-to-date spend was 0.
+- **Bucket** `s3://nepalvideo-kk-eun1`, private, SSE-S3, public access
+  blocked. Layout follows spec §2.2 (`raw/`, `work/`).
+- **Instance** `m7i.2xlarge` **on-demand**, 8 vCPU / 30 GB, 250 GB gp3,
+  `nepal-pipeline` SG (SSH from the operator's IP only), instance profile
+  `nepal-pipeline-ec2` (that bucket only, plus SSM).
+- **Not a GPU box.** The account's G/VT quota is **0 vCPU in every region
+  checked** (eu-north-1/west-1/central-1/west-2/west-3, us-east-1/2,
+  us-west-2), so `g4dn.xlarge` cannot launch at all. Increase requests for
+  Spot and On-Demand G/VT are **CASE_OPENED**. Standard-family quota is 8
+  vCPU, which is what `m7i.2xlarge` fits inside — and it is why the box is
+  8 vCPU rather than 16.
+- **On-demand, not Spot**, by the operator's call. Spot is ~4× cheaper
+  ($0.103 vs $0.428/h measured) but the run is short enough that the
+  interruption risk is not worth managing.
+- **Measured: S03.5 ETA ~50 min on the box against ~27 h locally**, a ~32×
+  speedup with no GPU at all — it is the RAM (30 GB, no swap) and 8 cores,
+  not vector hardware. The local machine was swapping 2.6 GB.
+- **Uploaded** `nepal_work` (proxies, audio, DB, transcripts), phones, chat,
+  music — ~9 GB, the whole of what anything before S08 reads. The 60 GB of
+  camera originals are syncing separately at low priority; only S08 conform
+  needs them.
+- **Scripts** `tools/cloud/launch.sh` and `tools/cloud/bootstrap.sh`. The
+  bootstrap deliberately does not start a stage: the DB is synced last, after
+  the local run has stopped.
+
+**The DB is now authoritative on the instance.** Anything written locally
+after the 2026-09-15 07:3x cutover will be lost. Sync it back before working
+locally again.
 
 ## Open, and waiting on a person
 
@@ -133,8 +175,9 @@ invalidate parts of them, noted inline.
   recordings were reprojected at 193; a materially different FOV would mean
   rebuilding those 22.
 - **`spine.whisper_language: ru`** is still marked "confirm".
-- **AWS** is unauthorised in the session that built this. Nothing has been
-  provisioned.
+- **G-instance quota** requests (Spot `L-3819A6DF`, On-Demand `L-DB2E81BA`,
+  4 vCPU each, eu-north-1) are open with AWS support. Until one lands, S03.6
+  faces and S04.1 CLIP embeddings have no GPU to run on.
 
 ## Known data notes
 

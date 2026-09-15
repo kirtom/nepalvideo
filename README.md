@@ -41,7 +41,7 @@ moving. Act 4 is one swell into a hard cut to silence.
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | S01 Probe + S02 Spine | **done**, validated end to end on the real corpus |
-| 2 | S03 per-clip processing | **S03.0–.5 and .7 built**; .5 not yet run at scale; .6 and .8 remain |
+| 2 | S03 per-clip processing | **S03.0–.5 and .7 built**; .5 running on EC2; .6 and .8 remain |
 | 5 | S04 Semantic + S05 Score | not started |
 | 7 | S06 Assemble + S07 Draft render | not started |
 | 3, 4, 6, 8, 9 | containerise, Batch, gates, conform, Step Functions | not started / partly dropped |
@@ -185,7 +185,7 @@ on a 4-core, 11 GB machine:
 | S03.0 photos | 7 min | decode-bound, scales nearly linearly with cores |
 | S03.3 metrics | 38 min | 5 sample points × 3 frames per shot |
 | S03.4 audio | 3 min | loudness per shot, VAD once per recording |
-| S03.5 speech | **7–20 h locally** | 70 min of speech; minutes on a GPU |
+| S03.5 speech | **7–20 h locally, ~50 min on EC2** | 70 min of speech; the 32× is RAM and cores, not a GPU |
 | S03.7 gate | seconds | pure function of stored metrics and thresholds |
 
 ---
@@ -443,9 +443,15 @@ corpus; at the actual 65 GB it is days of build for no benefit the resumable
 CLI does not already provide.
 
 ```bash
-tools/cloud/launch.sh                        # Spot by default
-SPOT=0 TYPE=m7i.2xlarge tools/cloud/launch.sh # On-Demand, if quota or capacity says no
+tools/cloud/launch.sh                         # Spot by default
+SPOT=0 TYPE=m7i.2xlarge tools/cloud/launch.sh # what actually ran
 ```
+
+**It is not a GPU box.** The account's G/VT quota is 0 vCPU in every region
+checked, so `g4dn.xlarge` cannot launch until a support case lands. An
+8-vCPU, 30 GB `m7i.2xlarge` turned out to be enough: S03.5 dropped from ~27
+hours to ~50 minutes. The win is RAM — the local machine was swapping 2.6 GB
+under `large-v3` — and core count, not vector hardware.
 
 `bootstrap.sh` runs as cloud-init user-data: it installs ffmpeg, exiftool and
 the package, then syncs the media subset and work directory from S3 to *the
