@@ -32,9 +32,15 @@ def test_drawtext_escapes_what_ffmpeg_would_eat():
 
 # -- the filter chain ---------------------------------------------------
 
-def test_each_shot_is_trimmed_to_its_own_window():
-    f = render.segment_filters(ROWS[0], 0)
-    assert "trim=start=5.000:duration=3.000" in f
+def test_each_shot_is_trimmed_at_the_input_not_after_the_decoder():
+    """A trim filter runs after decoding, so a shot twenty minutes into a
+    recording costs twenty minutes of decode. Measured: no output frames at
+    all in three minutes over this timeline. Seek at the input instead."""
+    assert "trim=" not in render.segment_filters(ROWS[0], 0)
+    cmd = render.build_command(ROWS, sources=SRC, out_path=pathlib.Path("/o.mp4"))
+    i = cmd.index("-i")
+    assert cmd[i - 4] == "-ss" and cmd[i - 3] == "5.000"
+    assert cmd[i - 2] == "-t" and cmd[i - 1] == "3.000"
 
 
 def test_timestamps_are_reset_after_every_trim():
@@ -103,6 +109,51 @@ def test_a_missing_source_is_an_error_not_a_silent_gap():
 def test_an_empty_timeline_refuses_rather_than_rendering_nothing():
     with pytest.raises(ValueError):
         render.build_command([], sources=SRC, out_path=pathlib.Path("/o.mp4"))
+
+
+# -- photographs --------------------------------------------------------
+
+def test_a_photograph_is_held_for_its_slot_not_shown_for_one_frame():
+    """94 of the first draft's 220 slots were stills, and without -loop each
+    contributed a single frame: the cut lost half its running time."""
+    rows = [{"shot_id": "p1", "media_kind": "photo", "t_in": 0.0, "t_out": 3.0}]
+    cmd = render.build_command(rows, sources={"p1": pathlib.Path("/m/a.jpg")},
+                               out_path=pathlib.Path("/o.mp4"))
+    i = cmd.index("-i")
+    assert "-loop" in cmd[:i] and cmd[cmd.index("-t") + 1] == "3.000"
+    assert "-ss" not in cmd, "a still has nowhere to seek to"
+
+
+def test_video_and_stills_can_share_one_timeline():
+    rows = [{"shot_id": "v1", "media_kind": "video", "t_in": 0.0, "t_out": 2.0, "src_in": 7.0},
+            {"shot_id": "p1", "media_kind": "photo", "t_in": 2.0, "t_out": 5.0}]
+    cmd = render.build_command(rows, sources={"v1": pathlib.Path("/m/v.mp4"),
+                                              "p1": pathlib.Path("/m/a.jpg")},
+                               out_path=pathlib.Path("/o.mp4"))
+    assert "-loop" in cmd and "-ss" in cmd
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "concat=n=2" in fc
+
+
+@pytest.mark.slow
+def test_ffmpeg_holds_a_real_photograph_for_its_full_slot(tmp_path):
+    """At the boundary: a JPEG must become three seconds of video, not one
+    frame. Checked with ffprobe rather than by reading the command back."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("needs ffmpeg")
+    img = tmp_path / "still.jpg"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc=size=1200x900:rate=1:duration=1",
+                    "-frames:v", "1", str(img)], check=True)
+    out = tmp_path / "held.mp4"
+    rows = [{"shot_id": "p1", "media_kind": "photo", "t_in": 0.0, "t_out": 3.0}]
+    subprocess.run(render.build_command(rows, sources={"p1": img}, out_path=out),
+                   check=True)
+    dur = float(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(out)], capture_output=True, text=True,
+        check=True).stdout.strip())
+    assert dur == pytest.approx(3.0, abs=0.3), f"a held still should be 3 s, got {dur}"
 
 
 # -- the real boundary --------------------------------------------------

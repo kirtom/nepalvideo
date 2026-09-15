@@ -74,16 +74,19 @@ def escape_drawtext(text: str) -> str:
 def segment_filters(row: Mapping[str, Any], index: int, *,
                     width: int = DRAFT_W, height: int = DRAFT_H,
                     overlay: bool = True) -> str:
-    """The per-shot video chain: trim, reset timestamps, scale, label.
+    """The per-shot video chain: reset timestamps, scale, label.
 
-    ``setpts=PTS-STARTPTS`` after every trim, because a trimmed stream keeps
-    its original timestamps and concat would otherwise leave the whole cut
-    sitting at the source's time rather than at zero.
+    The trim is NOT here. A ``trim`` filter runs after the decoder, so
+    reaching a shot twenty minutes into a recording means decoding twenty
+    minutes of video to throw away -- measured, that produced no output frames
+    at all in three minutes across this timeline's 220 slots. Seeking is done
+    at the input instead (``-ss`` before ``-i``), which jumps by keyframe.
+
+    ``setpts=PTS-STARTPTS`` still matters: a seeked stream keeps its source
+    timestamps, and concat would otherwise leave the cut sitting at the
+    source's time rather than at zero.
     """
-    src_in = float(row.get("src_in") or 0.0)
-    dur = float(row["t_out"]) - float(row["t_in"])
-    chain = [f"trim=start={src_in:.3f}:duration={dur:.3f}",
-             "setpts=PTS-STARTPTS",
+    chain = ["setpts=PTS-STARTPTS",
              f"scale={width}:{height}:force_original_aspect_ratio=decrease"
              f":force_divisible_by=2",
              f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black",
@@ -94,6 +97,11 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
             f"drawtext=text='{label}':x=8:y=h-24:fontsize=14:fontcolor=white"
             f":box=1:boxcolor=black@0.5:boxborderw=4")
     return ",".join(chain)
+
+
+def is_still(row: Mapping[str, Any]) -> bool:
+    """Whether this slot is a photograph rather than a piece of video."""
+    return str(row.get("media_kind") or "video") == "photo"
 
 
 def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Path],
@@ -124,8 +132,18 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
         if src is None:
             raise KeyError(f"no source for shot {r['shot_id']}")
         inputs.append(str(src))
-    for src in inputs:
-        cmd += ["-i", src]
+    for src, r in zip(inputs, rows):
+        dur = float(r["t_out"]) - float(r["t_in"])
+        if is_still(r):
+            # A photograph is held for its slot. Without -loop it contributes
+            # a single frame, and 94 of this timeline's 220 slots are stills:
+            # dropping them silently cost the draft half its running time.
+            cmd += ["-loop", "1", "-framerate", "25", "-t", f"{dur:.3f}", "-i", src]
+        else:
+            # -ss and -t BEFORE -i: input seeking, so the decoder starts near
+            # the shot instead of at the head of the recording.
+            cmd += ["-ss", f"{float(r.get('src_in') or 0.0):.3f}",
+                    "-t", f"{dur:.3f}", "-i", src]
     music_idx = None
     if music_path is not None:
         music_idx = len(inputs)

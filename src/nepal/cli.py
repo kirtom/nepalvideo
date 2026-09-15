@@ -6,6 +6,7 @@
     nepal s02 [--force] [--skip-asr]
     nepal s03 [--force] [--redo STEPS]   per-clip processing
     nepal s04 [--force] [--redo STEPS]   semantic layer (CLIP embeddings)
+    nepal cut [--redo score,timeline,draft]  score, assemble, render the draft
     nepal fov-check              Gate 1 seam comparison sheets
     nepal report                 the chronological checkpoint table
     nepal decisions              auto-solved values with confidence
@@ -77,6 +78,11 @@ def main(argv: list[str] | None = None) -> int:
     p4.add_argument("--force", action="store_true", help="recompute completed sub-steps")
     p4.add_argument("--redo", metavar="STEPS", default="",
                     help="comma-separated sub-steps to recompute: embeddings")
+
+    pcut = sub.add_parser("cut", help="S05-S07 -- score, assemble and render the draft")
+    pcut.add_argument("--force", action="store_true")
+    pcut.add_argument("--redo", metavar="STEPS", default="score,timeline,draft",
+                      help="comma-separated: score,timeline,draft (default: all)")
 
     pfc = sub.add_parser("fov-check",
                          help="render the Gate 1 FOV comparison sheets")
@@ -152,6 +158,13 @@ def main(argv: list[str] | None = None) -> int:
         redo = {x.strip() for x in args.redo.split(",") if x.strip()}
         rep = s04_semantic.run(cfg, force=args.force, redo=redo)
         print(json.dumps(rep, indent=2, default=str)[:2000])
+        return 0
+
+    if args.cmd == "cut":
+        from nepal.stages import s05_cut
+        redo = {x.strip() for x in args.redo.split(",") if x.strip()}
+        rep = s05_cut.run(cfg, force=args.force, redo=redo)
+        print(json.dumps(rep, indent=2, default=str)[:2500])
         return 0
 
     if args.cmd == "fov-check":
