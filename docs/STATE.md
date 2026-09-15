@@ -9,7 +9,7 @@ changes, edit this file in the same commit.
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | S01 Probe + S02 Spine | **done**, validated end to end |
-| 2 | S03 per-clip processing | **S03.0–.3 and .7 done and calibrated on the corpus**; .4 .5 .6 .8 remain |
+| 2 | S03 per-clip processing | **S03.0–.4 and .7 done and calibrated on the corpus**; .5 .6 .8 remain |
 | 5 | S04 Semantic + S05 Score | not started |
 | 7 | S06 Assemble + S07 Draft render | not started |
 | 3, 4, 6, 8, 9 | containerise, Batch, gates, conform, Step Functions | not started |
@@ -63,10 +63,20 @@ invalidate parts of them, noted inline.
   320 wide) camera p50 .24 p90 .83 p99 1.87, phones p50 .07 p95 .49. The p5 =
   0 / p95 = 1.0 tails are **five recordings that are black at source** (63
   min, camera in a bag), not a measurement problem.
+- **S03.4** (2026-09-15, first run) — 1,151 shots in 3:13 (one kulikov
+  recording has no audio track). audio_lufs p5/p50/p95 −58 / −27 / −17;
+  wind share p50 0.36, p95 0.82, **65 shots flagged wind**; **speech 69.7 min
+  in 555 shots — 32% of 219 min of footage**, against the spec's "typically
+  under 10%". Camera 45 min (32%), kulikov phone 10, keller phone 9,
+  telegram 5 (61%). Not wind heard as speech: speech share falls with wind
+  share (48 → 26 → 16 → 0%) and the wind-flagged shots have none. The VAD is
+  faster-whisper's bundled silero ONNX model, ~65× realtime on this CPU.
 - **S03.7** after calibration (below) — **1,626 of 1,856 survive** (12%
   rejected): soft 219 (214 black + 5), too short 7, shaky 4, exposure 0.
   Camera 429 of 433 real shots, phone 1,109 of 1,121, telegram 88 of 88.
-  Survivors per act {1:173, 2:239, 3:578, 4:219, 5:408}. The spec's "expect
+  Survivors per act {1:173, 2:239, 3:578, 4:219, 5:408}. With S03.4's
+  `has_speech` the reprieve is live: 1,632 survive (soft 217, short 6,
+  shaky 1). The spec's "expect
   ~70% rejection on camera material" does not describe this corpus: the
   Insta360's single-lens mode and both phones stabilise in camera, so almost
   nothing is shaky, and the black recordings account for the rest.
@@ -100,9 +110,14 @@ invalidate parts of them, noted inline.
      time**, so moving `jerk_ref` is a `nepal s03` re-run (seconds), not a
      38-minute re-measure. The 1,152 existing rows were backfilled by the
      exact inverse, checked against fresh OpenCV measurements to 4 decimals.
-5. **S03.4** (LUFS, wind, silero-VAD), then **S03.5** transcription — §1.4
-   makes speech the spine of the film, so this is not optional. `has_speech`
-   also switches on the gate's speech reprieve, which is inert until then.
+5. ~~S03.4~~ — **done 2026-09-15.** Stores `audio_lufs`, `wind_lf_share`,
+   `speech_s`; `has_speech` and `wind` are derived at gate time from
+   `process.speech_min_s` / `process.wind_lf_ratio`, so both thresholds move
+   without a re-measure. Then **S03.5** transcription — §1.4 makes speech the
+   spine, so this is not optional. **70 minutes of speech to transcribe.** At
+   this machine's measured `large-v3` rate (6–17× realtime, memory-bound)
+   that is 7–20 hours; on a `g4dn.xlarge` it is minutes. See the cloud
+   assessment (2026-09-15) — this is the number it said to wait for.
 6. **S03.6** faces, then M5 (S04 semantic + S05 scoring), then M7 (S06 assemble
    + S07 draft render).
 

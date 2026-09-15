@@ -216,9 +216,22 @@ process:
 
   # -- S03.4 audio ----------------------------------------------------
   # Wind: a shot whose energy below the cutoff exceeds this share of the total
-  # is roaring, not recording.
+  # is roaring, not recording. The share is stored per shot and the flag
+  # derived at gate time, so this can move without a re-measure.
   wind_lf_ratio: 0.80
   wind_lf_cutoff_hz: 200
+  # Speech: seconds of silero-VAD speech inside the shot before has_speech is
+  # set. A syllable clipped at a shot boundary is not speech the film can use;
+  # the gate's reprieve and S03.5's transcription both hang on this flag.
+  speech_min_s: 0.6
+  # VAD run once per recording, not per shot, so a sentence survives the shot
+  # detector's boundaries. Silence shorter than this joins the segments either
+  # side; the pad keeps the first and last phoneme.
+  vad_min_silence_ms: 500
+  vad_pad_ms: 200
+  # Threads for S03.4. Each shot is one ffmpeg call for loudness; the VAD is
+  # one onnxruntime pass per recording. 0 means one per core.
+  audio_workers: 0
 
 # S03.7 quality gate -- one curve per source class (spec section S03.7).
 #

@@ -186,6 +186,44 @@ def test_a_static_shot_scores_as_steadier_than_a_moving_one(project):
 
 
 @needs_tools
+def test_s03_4_measures_loudness_wind_and_speech_per_shot(project):
+    """The fixture clip is silent, so the track is planted: a 60 Hz rumble at
+    -20 dBFS under the first shot, digital silence under the second. Loudness
+    must be read per window, the rumble must count as wind, and neither half
+    is speech. The flags are then derived at the gate from what was stored."""
+    import numpy as np
+    import soundfile as sf
+    from nepal.stages.s03_process import apply_gate, measure_audio, run
+    cfg, conn = project
+    if not conn.execute("SELECT 1 FROM shots LIMIT 1").fetchone():
+        run(cfg)                                   # stands alone under -k
+    sr = 16000
+    t = np.arange(sr * 3) / sr
+    rumble = (0.1 * np.sin(2 * np.pi * 60 * t)).astype(np.float32)
+    wav = cfg.work_root / "audio" / "camera_20240506_081200.wav"
+    wav.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(wav, np.concatenate([rumble, np.zeros(sr * 3, np.float32)]), sr, subtype="PCM_16")
+
+    rep = measure_audio(cfg, conn)
+    assert rep["n_measured"] == 2 and not rep["failed"]
+    first, second = conn.execute(
+        "SELECT audio_lufs, wind_lf_share, speech_s FROM shots "
+        "WHERE media_kind='video' ORDER BY start_s").fetchall()
+    assert first["audio_lufs"] is not None and first["audio_lufs"] > -40
+    assert second["audio_lufs"] is None            # digital silence measures nothing
+    assert first["wind_lf_share"] > 0.9 and second["wind_lf_share"] == 0.0
+    assert first["speech_s"] == 0.0 and second["speech_s"] == 0.0
+
+    assert measure_audio(cfg, conn)["n_shots"] == 0    # resumable through the data
+
+    apply_gate(cfg, conn)
+    first, second = conn.execute(
+        "SELECT has_speech, wind FROM shots WHERE media_kind='video' ORDER BY start_s").fetchall()
+    assert (first["has_speech"], first["wind"]) == (0, 1)
+    assert (second["has_speech"], second["wind"]) == (0, 0)
+
+
+@needs_tools
 def test_s03_7_gives_every_shot_a_status(project):
     from nepal.stages.s03_process import apply_gate
     cfg, conn = project

@@ -204,6 +204,11 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # value the spec calls "a calibration point, not a constant of nature"
     # cost a full re-measure of the corpus.
     ("shots", "jerk_px", "REAL"),
+    # S03.4 stores what it measured; has_speech and wind are derived from
+    # these at gate time against process.speech_min_s / process.wind_lf_ratio.
+    ("shots", "speech_s", "REAL"),
+    ("shots", "wind_lf_share", "REAL"),
+    ("shots", "wind", "INTEGER"),
 )
 
 

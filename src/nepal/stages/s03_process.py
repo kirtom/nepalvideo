@@ -22,8 +22,9 @@ from typing import Any
 
 from nepal import db, freshness
 from nepal.config import Config
-from nepal.process import (gate as gate_mod, metrics as metrics_mod,
-                           reproject, shots as shots_mod, stills)
+from nepal.process import (audio as audio_mod, gate as gate_mod,
+                           metrics as metrics_mod, reproject,
+                           shots as shots_mod, stills)
 from nepal.spine import acts as acts_mod, gps as gps_mod
 from nepal.util import proc
 from nepal.util.progress import Progress, heartbeat
@@ -436,6 +437,108 @@ def measure_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
             "samples_per_shot": n_samples, "distribution": dist}
 
 
+def measure_audio(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
+    """S03.4 -- loudness, wind and speech for every video shot.
+
+    From the 16 kHz track S03.1 wrote, so no media is decoded here. The VAD
+    runs once per recording and its spans are cut against each shot's window;
+    loudness and the low-frequency share are per shot. Resumable through the
+    data: a shot with ``speech_s`` has been measured (it is 0.0 when nothing
+    was heard, unlike ``audio_lufs``, which is null for digital silence).
+
+    The total minutes of speech is logged because it is the number that
+    decides where S03.5 runs: transcription cost is proportional to it and
+    nothing else.
+    """
+    audio_dir = cfg.work_root / "audio"
+    where = "" if force else " AND s.speech_s IS NULL"
+    rows = [dict(r) for r in conn.execute(
+        "SELECT s.shot_id, s.recording_id, s.start_s, s.end_s FROM shots s "
+        f"WHERE s.media_kind = 'video'{where} ORDER BY s.recording_id, s.start_s")]
+    if not rows:
+        return {"n_shots": 0, "note": "every video shot already measured"}
+
+    by_rec: dict[str, list[dict]] = {}
+    for r in rows:
+        by_rec.setdefault(r["recording_id"], []).append(r)
+    missing = [rid for rid in by_rec if not (audio_dir / f"{rid}.wav").exists()]
+    for rid in missing:
+        by_rec.pop(rid, None)
+    if missing:
+        log.warning("S03.4 %d recording(s) have no audio track and are skipped: %s",
+                    len(missing), ", ".join(missing[:6]))
+
+    cutoff = float(cfg.get("process.wind_lf_cutoff_hz", audio_mod.WIND_CUTOFF_HZ))
+    min_sil = int(cfg.get("process.vad_min_silence_ms", 500))
+    pad = int(cfg.get("process.vad_pad_ms", 200))
+    workers = int(cfg.get("process.audio_workers", 0)) or (os.cpu_count() or 1)
+
+    results: list[dict[str, Any]] = []
+    failed: dict[str, int] = {}
+    lock = threading.Lock()
+    bar = Progress("S03.4 measuring audio", len(rows))
+
+    def measure_recording(rid: str) -> None:
+        wav = audio_dir / f"{rid}.wav"
+        try:
+            segments = audio_mod.speech_segments_of(wav, min_silence_ms=min_sil, pad_ms=pad)
+        except Exception as exc:                       # a bad track, not a bug
+            log.warning("S03.4 %s: VAD failed (%s); speech unknown", rid, exc)
+            segments = None
+        for sh in by_rec[rid]:
+            try:
+                x, sr = audio_mod.read_window(wav, sh["start_s"], sh["end_s"])
+                share = audio_mod.low_frequency_share(x, sr, cutoff_hz=cutoff)
+                lufs = audio_mod.lufs_of(wav, sh["start_s"], sh["end_s"])
+            except Exception as exc:
+                log.debug("S03.4 %s: %s", sh["shot_id"], exc)
+                with lock:
+                    key = type(exc).__name__
+                    failed[key] = failed.get(key, 0) + 1
+                bar.step()
+                continue
+            speech = (audio_mod.speech_seconds(segments, sh["start_s"], sh["end_s"])
+                      if segments is not None else None)
+            with lock:
+                results.append({"shot_id": sh["shot_id"], "audio_lufs": lufs,
+                                "wind_lf_share": round(share, 4),
+                                "speech_s": None if speech is None else round(speech, 3)})
+            bar.step()
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        list(pool.map(measure_recording, list(by_rec)))
+    bar.close(f"{len(results)} measured")
+
+    conn.executemany(
+        "UPDATE shots SET audio_lufs=?, wind_lf_share=?, speech_s=? WHERE shot_id=?",
+        [(r["audio_lufs"], r["wind_lf_share"], r["speech_s"], r["shot_id"])
+         for r in results])
+    conn.commit()
+
+    lufs = [r["audio_lufs"] for r in results if r["audio_lufs"] is not None]
+    shares = [r["wind_lf_share"] for r in results]
+    speech = [r["speech_s"] for r in results if r["speech_s"] is not None]
+    dist = {"audio_lufs": metrics_mod.percentiles(lufs),
+            "wind_lf_share": metrics_mod.percentiles(shares),
+            "speech_s": metrics_mod.percentiles(speech)}
+    for k, v in dist.items():
+        log.info("S03.4 %-13s %s", k, v)
+    total_speech = sum(speech)
+    with_speech = sum(1 for v in speech if audio_mod.has_speech(
+        v, min_s=float(cfg.get("process.speech_min_s", audio_mod.SPEECH_MIN_S))))
+    shot_s = sum(float(r["end_s"]) - float(r["start_s"]) for r in rows)
+    log.info("S03.4 speech: %.1f min in %d of %d shot(s) (%.0f%% of %.1f min of "
+             "footage) -- this is what S03.5 has to transcribe",
+             total_speech / 60, with_speech, len(results),
+             100.0 * total_speech / max(1.0, shot_s), shot_s / 60)
+    if failed:
+        log.warning("S03.4 %d shot(s) failed: %s", sum(failed.values()), failed)
+    return {"n_shots": len(rows), "n_measured": len(results),
+            "n_missing_audio": len(missing), "failed": failed,
+            "speech_total_s": round(total_speech, 1), "n_with_speech": with_speech,
+            "footage_s": round(shot_s, 1), "distribution": dist}
+
+
 def apply_gate(cfg: Config, conn) -> dict[str, Any]:
     """S03.7 -- reject what is not worth a caption, a transcription or a human.
 
@@ -446,7 +549,8 @@ def apply_gate(cfg: Config, conn) -> dict[str, Any]:
     """
     rows = [dict(r) for r in conn.execute(
         "SELECT s.shot_id, s.media_kind, s.start_s, s.end_s, s.sharpness, "
-        "s.exposure_pen, s.stability, s.jerk_px, s.has_speech, s.act, "
+        "s.exposure_pen, s.stability, s.jerk_px, s.has_speech, s.speech_s, "
+        "s.wind_lf_share, s.act, "
         "COALESCE(a.quality_curve, ra.quality_curve, 'camera') AS curve "
         "FROM shots s "
         "LEFT JOIN assets a ON a.asset_id = s.asset_id "
@@ -469,6 +573,20 @@ def apply_gate(cfg: Config, conn) -> dict[str, Any]:
             restab.append((r["stability"], r["shot_id"]))
     if restab:
         conn.executemany("UPDATE shots SET stability=? WHERE shot_id=?", restab)
+
+    # Same for the two audio flags: S03.4 stores seconds of speech and the
+    # low-frequency share; whether that is "speech" or "wind" is a threshold.
+    speech_min = float(cfg.get("process.speech_min_s", audio_mod.SPEECH_MIN_S))
+    wind_thr = float(cfg.get("process.wind_lf_ratio", audio_mod.WIND_SHARE))
+    flags: list[tuple[int, int, str]] = []
+    for r in rows:
+        if r["speech_s"] is None and r["wind_lf_share"] is None:
+            continue
+        r["has_speech"] = int(audio_mod.has_speech(r["speech_s"], min_s=speech_min))
+        r["wind"] = int(audio_mod.is_wind(r["wind_lf_share"], threshold=wind_thr))
+        flags.append((r["has_speech"], r["wind"], r["shot_id"]))
+    if flags:
+        conn.executemany("UPDATE shots SET has_speech=?, wind=? WHERE shot_id=?", flags)
 
     speech_factor = float(cfg.get("gate.speech_sharpness_factor",
                                   gate_mod.SPEECH_SHARPNESS_FACTOR))
@@ -630,6 +748,8 @@ def run(cfg: Config, *, force: bool = False,
              ("photos", lambda: build_photo_shots(cfg, conn)),
              ("metrics", lambda: measure_shots(
                  cfg, conn, force=force or "metrics" in (redo or ()))),
+             ("audio", lambda: measure_audio(
+                 cfg, conn, force=force or "audio" in (redo or ()))),
              # The gate is re-run every time: it is pure, it is cheap, and a
              # rejection left over from an older threshold is invisible.
              ("gate", lambda: apply_gate(cfg, conn))]
