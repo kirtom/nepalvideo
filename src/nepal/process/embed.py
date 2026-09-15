@@ -48,14 +48,24 @@ def sharpest(frames: Sequence[np.ndarray]) -> int:
 
 
 def load_model(name: str = CLIP_MODEL, pretrained: str = CLIP_PRETRAINED,
-               *, gpu: bool = False):
+               *, gpu: bool = False, threads: int = 0):
     """``(model, preprocess, device)`` ready to encode images.
 
-    CPU is a first-class path here. The account this ran on had no GPU quota
-    at all, and ViT-L on an 8-core box embeds this corpus in minutes.
+    CPU is a first-class path here: the account this ran on had no GPU quota
+    at all.
+
+    ``threads`` because torch does not default to the machine. Measured on the
+    4-core dev box it chose **2**, leaving half the CPU idle through a run
+    counted in hours -- the same class of mistake as reasoning about a
+    slowdown instead of measuring it. 0 means "every core".
     """
     import open_clip
     import torch
+    if threads and threads > 0:
+        torch.set_num_threads(int(threads))
+    else:
+        import os
+        torch.set_num_threads(os.cpu_count() or 1)
     device = "cuda" if (gpu and torch.cuda.is_available()) else "cpu"
     model, _, preprocess = open_clip.create_model_and_transforms(
         name, pretrained=pretrained, device=device)

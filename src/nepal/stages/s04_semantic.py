@@ -77,7 +77,9 @@ def embed_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
     log.info("S04.1 embedding %d shot(s) with %s/%s on %s",
              len(todo), model_name, pretrained, "GPU" if gpu else "CPU")
     try:
-        model, preprocess, device = embed_mod.load_model(model_name, pretrained, gpu=gpu)
+        model, preprocess, device = embed_mod.load_model(
+            model_name, pretrained, gpu=gpu,
+            threads=int(cfg.get("semantic.clip_threads", 0)))
     except ImportError:
         log.warning("S04.1 open_clip not installed -- skipping "
                     "(pip install '.[semantic]')")

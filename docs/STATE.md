@@ -227,11 +227,24 @@ the operator's.
    **Milestone 7 is complete** and a draft cut exists.
 8. **Gate 3 is open.** `work/gates/gate3/draft.mp4` is waiting on the
    operator. It is picture-only: no music bed, no mix, no overlay.
-9. **S04.1 CLIP embeddings — run locally.** `torch 2.14.0+cpu` and
-   `open_clip 3.3.0` are installed in `.venv`; measure before renting
-   anything. This unlocks MMR's diversity term, which is the single biggest
+9. **S04.1 CLIP embeddings.** `torch 2.14.0+cpu` and `open_clip 3.3.0` are
+   installed in `.venv`. This unlocks MMR's diversity term, the single biggest
    improvement available without Bedrock: the current cut repeats itself
    because MMR had nothing to compare shots with.
+   - **Measured, 2026-09-16, and the config's claim was wrong.** "ViT-L embeds
+     this corpus in minutes on eight cores" was never tested. On this 4-core
+     box: frame decode **1.43 s/shot** (39 min for the corpus, fine) and
+     ViT-L-14 encode **14.8 s/shot** — **7 hours**. Two causes found by
+     looking rather than reasoning: torch chose **2 threads** on a 4-core
+     machine, and the box was **6.3 GB into swap**, which is also why loading
+     a 1.7 GB checkpoint took 455 s. `semantic.clip_threads` (0 = all cores)
+     is now set in `load_model`; closing browsers is worth as much again, as
+     it was for S02.6.
+   - **ViT-B-32 is being A/B'd against ViT-L-14** on nearest-neighbour
+     agreement, because MMR never uses an embedding's absolute value — only
+     "max similarity to what is already chosen". If the two agree about which
+     shots are each other's neighbours, B-32 is ~14x fewer FLOPs and the
+     stage is minutes rather than hours.
    - **Predicate fixed 2026-09-16.** S04.1 asked for `status = 'candidate'`,
      but S05 promotes its picks to `'shortlisted'` — so once a cut existed,
      the stage would embed 1,232 rows and skip the 400 the film is made of.

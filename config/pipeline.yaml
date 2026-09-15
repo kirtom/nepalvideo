@@ -309,10 +309,15 @@ semantic:
   bedrock_model: null         # set at deploy time
   clip_model: ViT-L-14
   clip_pretrained: openai
-  # CPU is a first-class path: the account this ran on had no GPU quota at
-  # all, and ViT-L embeds this corpus in minutes on eight cores.
+  # CPU is a first-class path: the account this ran on had no GPU quota at all.
+  # The claim that once stood here -- "ViT-L embeds this corpus in minutes on
+  # eight cores" -- was never measured and is wrong. Measured on 4 cores:
+  # 14.8 s/shot, i.e. 7 hours for 1,632 shots, and that was with torch
+  # silently using 2 threads on a machine 6 GB into swap.
   clip_gpu: false
   clip_batch: 16
+  # torch picks a thread count that is not the machine's core count. 0 = all.
+  clip_threads: 0
 
 score:
   tech:  {sharpness: 0.35, exposure: 0.25, stability: 0.30, duration_fit: 0.10}
