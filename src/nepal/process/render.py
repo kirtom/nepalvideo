@@ -86,7 +86,11 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
     timestamps, and concat would otherwise leave the cut sitting at the
     source's time rather than at zero.
     """
-    chain = ["setpts=PTS-STARTPTS",
+    chain = []
+    if is_still(row):
+        dur = float(row["t_out"]) - float(row["t_in"])
+        chain += [f"loop=loop=-1:size=1:start=0", "fps=25", f"trim=duration={dur:.3f}"]
+    chain += ["setpts=PTS-STARTPTS",
              f"scale={width}:{height}:force_original_aspect_ratio=decrease"
              f":force_divisible_by=2",
              f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black",
@@ -135,10 +139,12 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
     for src, r in zip(inputs, rows):
         dur = float(r["t_out"]) - float(r["t_in"])
         if is_still(r):
-            # A photograph is held for its slot. Without -loop it contributes
-            # a single frame, and 94 of this timeline's 220 slots are stills:
-            # dropping them silently cost the draft half its running time.
-            cmd += ["-loop", "1", "-framerate", "25", "-t", f"{dur:.3f}", "-i", src]
+            # No -loop here: it is a demuxer-private option that image2 has and
+            # the ISO-BMFF demuxer (HEIC) does not, so it fails with "Option
+            # loop not found" on exactly the fourteen iPhone stills in this
+            # timeline. The hold is done in the filter graph instead, which
+            # works on decoded frames whatever read them.
+            cmd += ["-i", src]
         else:
             # -ss and -t BEFORE -i: input seeking, so the decoder starts near
             # the shot instead of at the head of the recording.

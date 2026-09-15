@@ -119,9 +119,12 @@ def test_a_photograph_is_held_for_its_slot_not_shown_for_one_frame():
     rows = [{"shot_id": "p1", "media_kind": "photo", "t_in": 0.0, "t_out": 3.0}]
     cmd = render.build_command(rows, sources={"p1": pathlib.Path("/m/a.jpg")},
                                out_path=pathlib.Path("/o.mp4"))
-    i = cmd.index("-i")
-    assert "-loop" in cmd[:i] and cmd[cmd.index("-t") + 1] == "3.000"
+    # the hold is in the filter graph, not a -loop input option: that option
+    # is private to image2 and absent from the demuxer that reads HEIC
+    assert "-loop" not in cmd
     assert "-ss" not in cmd, "a still has nowhere to seek to"
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "loop=loop=-1:size=1" in fc and "trim=duration=3.000" in fc
 
 
 def test_video_and_stills_can_share_one_timeline():
@@ -130,7 +133,9 @@ def test_video_and_stills_can_share_one_timeline():
     cmd = render.build_command(rows, sources={"v1": pathlib.Path("/m/v.mp4"),
                                               "p1": pathlib.Path("/m/a.jpg")},
                                out_path=pathlib.Path("/o.mp4"))
-    assert "-loop" in cmd and "-ss" in cmd
+    assert "-ss" in cmd
+    fc0 = cmd[cmd.index("-filter_complex") + 1]
+    assert "loop=loop=-1" in fc0, "the still is held"
     fc = cmd[cmd.index("-filter_complex") + 1]
     assert "concat=n=2" in fc
 
