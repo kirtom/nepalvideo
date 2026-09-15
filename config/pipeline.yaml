@@ -309,6 +309,10 @@ semantic:
   bedrock_model: null         # set at deploy time
   clip_model: ViT-L-14
   clip_pretrained: openai
+  # CPU is a first-class path: the account this ran on had no GPU quota at
+  # all, and ViT-L embeds this corpus in minutes on eight cores.
+  clip_gpu: false
+  clip_batch: 16
 
 score:
   tech:  {sharpness: 0.35, exposure: 0.25, stability: 0.30, duration_fit: 0.10}

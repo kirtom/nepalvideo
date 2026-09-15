@@ -5,6 +5,7 @@
     nepal fetch-reference        SRTM tiles + GeoNames gazetteer
     nepal s02 [--force] [--skip-asr]
     nepal s03 [--force] [--redo STEPS]   per-clip processing
+    nepal s04 [--force] [--redo STEPS]   semantic layer (CLIP embeddings)
     nepal fov-check              Gate 1 seam comparison sheets
     nepal report                 the chronological checkpoint table
     nepal decisions              auto-solved values with confidence
@@ -71,6 +72,11 @@ def main(argv: list[str] | None = None) -> int:
     p3.add_argument("--redo", metavar="STEPS", default="",
                     help="comma-separated sub-steps to recompute: "
                          "proxies,shots,photos,metrics,audio,asr,faces,recluster,gate")
+
+    p4 = sub.add_parser("s04", help="S04 -- semantic layer (CLIP embeddings)")
+    p4.add_argument("--force", action="store_true", help="recompute completed sub-steps")
+    p4.add_argument("--redo", metavar="STEPS", default="",
+                    help="comma-separated sub-steps to recompute: embeddings")
 
     pfc = sub.add_parser("fov-check",
                          help="render the Gate 1 FOV comparison sheets")
@@ -139,6 +145,13 @@ def main(argv: list[str] | None = None) -> int:
             for reason, n in sorted((ph.get("rejected") or {}).items(),
                                     key=lambda kv: -kv[1]):
                 print(f"  {n:>5} rejected: {reason}")
+        return 0
+
+    if args.cmd == "s04":
+        from nepal.stages import s04_semantic
+        redo = {x.strip() for x in args.redo.split(",") if x.strip()}
+        rep = s04_semantic.run(cfg, force=args.force, redo=redo)
+        print(json.dumps(rep, indent=2, default=str)[:2000])
         return 0
 
     if args.cmd == "fov-check":

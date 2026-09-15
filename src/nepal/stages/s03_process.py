@@ -25,9 +25,9 @@ import numpy as np
 from nepal import db, freshness
 from nepal.config import Config
 from nepal.process import (asr as asr_mod, audio as audio_mod,
-                           faces as faces_mod, gate as gate_mod,
-                           metrics as metrics_mod, reproject,
-                           shots as shots_mod, stills)
+                           embed as embed_mod, faces as faces_mod,
+                           gate as gate_mod, metrics as metrics_mod,
+                           reproject, shots as shots_mod, stills)
 from nepal.spine import acts as acts_mod, gps as gps_mod
 from nepal.util import proc
 from nepal.util.progress import Progress, heartbeat
