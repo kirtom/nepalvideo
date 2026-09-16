@@ -29,6 +29,12 @@ MAX_WALK_MS = 2.5
 STOPPED_MS = 0.15
 # A day's serious climbing is roughly 500 m; per hour, 300 is very steep.
 STEEP_GAIN_M_PER_H = 300.0
+# The heart-rate band that maps to 0..1 effort. Rest is a fit adult at
+# breakfast; the top is what the watch actually recorded on day one of this
+# trek (160). A calibration point, not a law: the scene targets in S06 read
+# the same two config keys.
+HR_REST_BPM = 60.0
+HR_MAX_BPM = 170.0
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,7 @@ class Effort:
     gain_m_per_h: float
     alt_m: float | None
     stopped_s: float = 0.0
+    hr_bpm: float | None = None
 
     @property
     def is_stopped(self) -> bool:
@@ -70,27 +77,35 @@ def profile(track: Sequence[GpsPoint], *, min_dt_s: float = 60.0,
         if prev.ele is not None and cur.ele is not None:
             gain = (cur.ele - prev.ele) / (dt / 3600.0)
         stopped_run = stopped_run + dt if speed < STOPPED_MS else 0.0
-        out.append(Effort(cur.ts, speed, gain, cur.ele, stopped_run))
+        out.append(Effort(cur.ts, speed, gain, cur.ele, stopped_run, cur.hr))
     return out
 
 
-def exertion(e: Effort) -> float:
+def exertion(e: Effort, *, hr_rest: float = HR_REST_BPM,
+             hr_max: float = HR_MAX_BPM) -> float:
     """How hard this moment was, 0..1.
 
-    Two things count and they are not the same. Climbing steeply is effort even
-    at a reasonable pace. Moving slowly *while* climbing is effort at its
-    limit -- which at altitude is what the last hour to a pass looks like, and
-    is the footage the film most wants.
+    Two things count from the track and they are not the same. Climbing
+    steeply is effort even at a reasonable pace. Moving slowly *while*
+    climbing is effort at its limit -- which at altitude is what the last
+    hour to a pass looks like, and is the footage the film most wants.
 
     A long stop scores too. Nobody stands still for twenty minutes on a cold
     trail because things are going well.
+
+    Where the watch recorded a heart rate, it is half the answer: the track
+    can only infer effort, the pulse measures it.
     """
     gain = max(0.0, e.gain_m_per_h) / STEEP_GAIN_M_PER_H
     climb = min(1.0, gain)
     # slowness only counts while climbing; ambling downhill is not effort
     slow = max(0.0, 1.0 - e.speed_ms / MAX_WALK_MS) if gain > 0.15 else 0.0
     stop = min(1.0, e.stopped_s / 1200.0)          # twenty minutes
-    return float(min(1.0, 0.55 * climb + 0.30 * slow + 0.15 * stop))
+    from_track = float(min(1.0, 0.55 * climb + 0.30 * slow + 0.15 * stop))
+    if e.hr_bpm is None or hr_max <= hr_rest:
+        return from_track
+    pulse = min(1.0, max(0.0, (float(e.hr_bpm) - hr_rest) / (hr_max - hr_rest)))
+    return float(min(1.0, 0.5 * pulse + 0.5 * from_track))
 
 
 def nepal_hour(ts: datetime, utc_offset_h: float = 5.75) -> float:

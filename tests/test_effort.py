@@ -172,3 +172,24 @@ def test_windows_come_back_in_film_order():
 
 def test_no_track_no_windows():
     assert hardest_windows([], count=4) == []
+
+
+# -- heart rate (Film v2 section 13.1) ----------------------------------
+
+def test_profile_carries_heart_rate_from_the_track():
+    pts = [GpsPoint(T0 + timedelta(minutes=i), 28.5 + i * 90 / 111_000.0, 84.6, 4000.0,
+                    "strava", None, 100.0 + i, "A") for i in range(4)]
+    prof = profile(pts)
+    assert [e.hr_bpm for e in prof] == [101.0, 102.0, 103.0]
+
+
+def test_heart_rate_raises_exertion_on_the_same_climb():
+    gps_only = Effort(T0, 0.5, 250.0, 4500.0)
+    hard = Effort(T0, 0.5, 250.0, 4500.0, hr_bpm=160.0)
+    easy = Effort(T0, 0.5, 250.0, 4500.0, hr_bpm=80.0)
+    assert exertion(hard) > exertion(gps_only) > exertion(easy)
+
+
+def test_heart_rate_is_clamped_to_the_configured_band():
+    e = Effort(T0, 0.5, 0.0, 4500.0, hr_bpm=250.0)
+    assert exertion(e, hr_rest=60.0, hr_max=170.0) == pytest.approx(0.5, abs=1e-6)
