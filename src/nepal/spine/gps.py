@@ -5,8 +5,10 @@ location in the project, and every camera recording is placed by interpolating
 against it. That makes this module load-bearing: an error here does not fail
 loudly, it quietly puts shots in the wrong valley.
 
-A real ``.gpx`` shared in the chat outranks photo EXIF where one exists -- a
-route track is sampled every few seconds, photo EXIF every few minutes.
+A Strava track from a watch outranks everything: a fix a second, barometric
+altitude and heart rate. A real ``.gpx`` shared in the chat comes next, then
+photo EXIF -- a route track is sampled every few seconds, photo EXIF every
+few minutes.
 """
 from __future__ import annotations
 
@@ -31,6 +33,10 @@ class GpsPoint:
     ele: float | None = None
     source: str = "unknown"
     accuracy_m: float | None = None
+    # From a watch: heart rate, and which activity the fix belongs to. Both
+    # None for a photo fix.
+    hr: float | None = None
+    activity_id: str | None = None
 
     def key(self) -> str:
         return self.ts.astimezone(timezone.utc).isoformat()
@@ -105,7 +111,7 @@ def write_gpx(points: Sequence[GpsPoint], *, name: str = "trek") -> str:
 
 # -- merging -----------------------------------------------------------
 
-PREFERENCE = ("gpx", "phone_keller", "phone_kulikov")
+PREFERENCE = ("strava", "gpx", "phone_keller", "phone_kulikov")
 
 
 def merge_points(groups: Iterable[Sequence[GpsPoint]]) -> list[GpsPoint]:

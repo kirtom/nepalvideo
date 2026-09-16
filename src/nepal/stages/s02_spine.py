@@ -28,6 +28,7 @@ from nepal.spine import geocode as geo_mod
 from nepal.spine import gps as gps_mod
 from nepal.spine import music as music_mod
 from nepal.spine import playlist as playlist_mod
+from nepal.spine import strava as strava_mod
 from nepal.spine import telegram as tg_mod
 
 log = logging.getLogger(__name__)
@@ -72,12 +73,19 @@ def build_gps_track(cfg: Config, conn) -> dict[str, Any]:
                 gpx_points.extend(pts)
                 gpx_files.append(str(f.relative_to(cfg.data_root)))
 
-    merged = gps_mod.merge_points([gpx_points, photo_points])
+    # The watch outranks everything: a fix a second, barometric altitude,
+    # heart rate. Photo EXIF fills the days it did not run (jeep days, the
+    # cities).
+    strava_dir = cfg.data_root / str(cfg.get("spine.strava_dir", "strava"))
+    activities, strava_points, strava_rep = strava_mod.load_strava(
+        strava_dir, sample_s=float(cfg.get("spine.strava_sample_s", 5.0))) \
+        if strava_dir.exists() else ([], [], {"skipped": f"no {strava_dir}"})
+
+    merged = gps_mod.merge_points([strava_points, gpx_points, photo_points])
     merged = gps_mod.drop_outliers(merged)
 
-    # S02.3 for the track itself. A GPX elevation, where present, is a
-    # barometric or survey reading and outranks the DEM; photo points have
-    # none, so they take the DEM value.
+    # S02.3 for the track itself. A barometric (Strava) or GPX elevation
+    # outranks the DEM; photo points have none, so they take the DEM value.
     srtm = dem_mod.Srtm(cfg.srtm_dir)
     rows = []
     n_alt = 0
@@ -86,8 +94,22 @@ def build_gps_track(cfg: Config, conn) -> dict[str, Any]:
         if alt is not None:
             n_alt += 1
         rows.append({"ts_utc": p.key(), "lat": p.lat, "lon": p.lon,
-                     "alt_dem_m": alt, "source": p.source})
+                     "alt_dem_m": alt, "source": p.source,
+                     "hr_bpm": p.hr,
+                     "alt_baro_m": p.ele if p.source == "strava" else None,
+                     "activity_id": p.activity_id})
+    # A re-run with a different sample spacing must not leave the old
+    # spacing's points behind: the track is rebuilt, not accumulated.
+    conn.execute("DELETE FROM gps_points")
     db.upsert(conn, "gps_points", ["ts_utc"], rows)
+    per = strava_rep.get("points_per_activity", {})
+    db.upsert(conn, "activities", ["activity_id"], [{
+        "activity_id": a.activity_id, "name": a.name, "kind": a.kind,
+        "start_utc": a.start_utc.isoformat(), "end_utc": a.end_utc.isoformat(),
+        "elapsed_s": a.elapsed_s, "moving_s": a.moving_s, "distance_m": a.distance_m,
+        "gain_m": a.gain_m, "hr_max": a.hr_max, "hr_avg": a.hr_avg,
+        "filename": a.filename, "n_points": per.get(a.activity_id, 0),
+    } for a in activities])
     if merged and not n_alt:
         log.warning("S02.3 no altitude for any track point -- SRTM tiles missing from "
                     "%s. Act segmentation will fall back to an even split.", srtm.dir)
@@ -96,15 +118,17 @@ def build_gps_track(cfg: Config, conn) -> dict[str, Any]:
         out = cfg.work("gpx", "trip.gpx")
         out.write_text(gps_mod.write_gpx(merged))
         env = gps_mod.envelope(merged)
-        log.info("S02.1 %d GPS points (%d from photos, %d from GPX), %s .. %s",
-                 len(merged), len(photo_points), len(gpx_points),
-                 env[0].isoformat(), env[1].isoformat())
+        log.info("S02.1 %d GPS points (%d from Strava, %d from photos, %d from GPX), "
+                 "%s .. %s", len(merged), len(strava_points), len(photo_points),
+                 len(gpx_points), env[0].isoformat(), env[1].isoformat())
     else:
         log.error("S02.1 no GPS points at all -- the geolocation spine is empty. "
                   "Nothing downstream can be placed or act-assigned.")
 
     return {"n_points": len(merged), "n_from_photos": len(photo_points),
             "n_from_gpx": len(gpx_points), "gpx_files": gpx_files,
+            "n_from_strava": len(strava_points), "strava": strava_rep,
+            "n_activities": len(activities),
             "envelope": [p.isoformat() for p in gps_mod.envelope(merged)] if merged else None}
 
 

@@ -21,6 +21,10 @@ dependencies = [
   "pillow-heif>=0.15",
   "pyyaml>=6.0",
   "python-dateutil>=2.8",
+  # Strava exports Apple Watch activities as FIT. fitdecode is pure Python
+  # and decodes the record messages (position, altitude, heart rate) with
+  # no native build step, which keeps the remote box's bootstrap trivial.
+  "fitdecode>=0.10",
 ]
 
 [project.optional-dependencies]

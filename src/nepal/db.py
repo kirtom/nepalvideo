@@ -100,6 +100,25 @@ CREATE TABLE IF NOT EXISTS gps_points (
   lat REAL, lon REAL, alt_dem_m REAL, source TEXT
 );
 
+-- ADDITION (Film v2 section 13.1): one row per Strava activity, which is one
+-- row per trekking day. The name is the day's title and the start is the
+-- alpine start nobody wrote down.
+CREATE TABLE IF NOT EXISTS activities (
+  activity_id TEXT PRIMARY KEY,
+  name        TEXT,
+  kind        TEXT,
+  start_utc   TEXT,
+  end_utc     TEXT,
+  elapsed_s   REAL,
+  moving_s    REAL,
+  distance_m  REAL,
+  gain_m      REAL,
+  hr_max      REAL,
+  hr_avg      REAL,
+  filename    TEXT,
+  n_points    INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS messages (
   msg_id      TEXT PRIMARY KEY,
   ts_utc      TEXT NOT NULL,
@@ -219,6 +238,13 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("assets", "heading_ref", "TEXT"),
     ("assets", "pos_error_m", "REAL"),
     ("assets", "focal_35mm", "REAL"),
+    # From the watch: heart rate and barometric altitude per fix, and the
+    # activity the fix belongs to. alt_dem_m keeps holding the *resolved*
+    # altitude (barometric where it exists, DEM otherwise), as it always did
+    # for GPX elevations; alt_baro_m keeps the raw reading beside it.
+    ("gps_points", "hr_bpm", "REAL"),
+    ("gps_points", "alt_baro_m", "REAL"),
+    ("gps_points", "activity_id", "TEXT"),
 )
 
 

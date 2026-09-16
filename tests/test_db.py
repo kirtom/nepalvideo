@@ -28,6 +28,14 @@ def test_upsert_writes_every_column_of_uniform_rows(tmp_path):
     assert got == {"a": 1.0, "b": 0.5}
 
 
+def test_gps_points_and_activities_carry_the_strava_columns(tmp_path):
+    conn = db.init(tmp_path / "t.sqlite")
+    gcols = {r[1] for r in conn.execute("PRAGMA table_info(gps_points)")}
+    assert {"hr_bpm", "alt_baro_m", "activity_id"} <= gcols
+    acols = {r[1] for r in conn.execute("PRAGMA table_info(activities)")}
+    assert {"activity_id", "name", "start_utc", "end_utc", "hr_max", "n_points"} <= acols
+
+
 def test_assets_carry_the_heading_columns(tmp_path):
     conn = db.init(tmp_path / "t.sqlite")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(assets)")}
