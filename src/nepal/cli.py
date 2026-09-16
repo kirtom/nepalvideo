@@ -11,6 +11,7 @@
     nepal report                 the chronological checkpoint table
     nepal decisions              auto-solved values with confidence
     nepal diagnose               when the checkpoint table looks wrong
+    nepal prune [--dry-run]      remove what the pipeline no longer produces
 
 Everything runs through this one entry point on purpose: a console script uses
 the interpreter the package was installed into, so it cannot pick up a
@@ -96,6 +97,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("decisions", help="print the auto-solved decisions table")
     sub.add_parser("report", help="print the chronological table (the Milestone 1 checkpoint)")
     sub.add_parser("doctor", help="check external binaries and optional packages")
+
+    pprune = sub.add_parser("prune", help="remove recordings, shots and work files "
+                                          "the pipeline no longer produces")
+    pprune.add_argument("--dry-run", action="store_true",
+                        help="report what would go without touching anything")
 
     args = ap.parse_args(argv)
     if getattr(args, "no_progress", False):
@@ -201,6 +207,17 @@ def main(argv: list[str] | None = None) -> int:
               "sliced detail, not for sharpness. Then set probe.fov.fallback_deg\n"
               "in the config, or record it with:\n"
               "  nepal decisions   (to see what is stored now)")
+        return 0
+
+    if args.cmd == "prune":
+        from nepal import prune
+        rep = prune.run(cfg, dry_run=args.dry_run)
+        tag = "would remove" if rep["dry_run"] else "removed"
+        print(f"prune: {tag} {rep['n_recordings']} recording(s), {rep['n_shots']} shot(s), "
+              f"{rep['n_files']} file(s), {rep['bytes'] / 1e6:.0f} MB")
+        # reasons cover both pruned recordings and orphan proxies on disk
+        for rid, why in rep["reasons"].items():
+            print(f"  {rid}: {why}")
         return 0
 
     if args.cmd == "decisions":
