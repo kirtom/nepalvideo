@@ -130,7 +130,8 @@ at 1080p/4K are conformed, not upscaled.
 
 ```
 S01 Probe            unchanged + prune step + ignore list
-S02 Spine            + Strava track, + Act 6 boundary, + hallucination filter; music unchanged
+S02 Spine            + Strava track, + Act 6 boundary, + hallucination filter; music analysis unchanged
+S06 Assemble v2      … then music chosen per scene from its attributes (§5.6)
 S03 Process          unchanged; bugs fixed (has_face, video geotag, day_index)
 S04 Semantic         S04.1 CLIP (remote GPU) · S04.2 framing (Claude, 2x2 sheet) · S04.3 captions (Claude)
 S04.5 Beat sheet     NEW: Claude reads transcripts + chat → beats.json           [remote, API]
@@ -449,14 +450,67 @@ Credits per spec §1.8 and §S09.1, generated from the database at render time;
 `decisions.credits_track` under them. Rendered with the draft so Gate 3 sees
 them.
 
-### 5.6 Music stays as assigned
+### 5.6 Music chosen by the scene
 
-The music is pre-defined: `spine/music.py` keeps its analysis (beats,
-sections, swells) and its automatic act assignment, extended to six acts and
-the opening. Nobody is asked about it at a gate, and no track title is ever
-shown during the film; the credits list the pieces once, as the spec's §1.8
-already does. The Act 0 opening and cold open take the Act 4 cue from its
-swell so the summit music is heard first and recognised when it returns.
+The library is pre-defined (the tracks in `music/`), nobody is asked about it
+at a gate, and no track title is shown during the film. What changes is
+*how* a piece gets chosen: not one track per act from five averaged features,
+but a section of a track per **scene**, from what the scene is.
+
+**Scenes.** After the picture fill, consecutive slots are grouped into scenes
+while they share an act and an activity class and their speed and heart rate
+stay within one band. A scene is at least `music.min_scene_s` (45) and at
+most `music.max_segment_s` (150) long, so the music neither flickers nor
+swallows an act. Scene boundaries are where the music may change; a change
+never lands inside a beat's audio.
+
+**Scene attributes**, all already in the database or derivable from it:
+
+| Attribute | Source |
+|---|---|
+| part of the trek | act, `day_index`, the Strava stage name |
+| speed | Strava fix at the slot's time, else GPS-derived (`effort.profile`) |
+| effort | heart rate (§13.1) blended with gain rate and slowness |
+| activity class | `walking · climbing · descending · resting · crossing · village · summit · city · transport`, from speed, gain sign, altitude band, place name, act and caption keywords |
+| altitude and time of day | `alt_dem_m`, `effort.light_quality` |
+| voice | share of the scene under speech beats |
+| levity | any `tag_levity` or beat-sheet levity inside the scene |
+| picture energy | mean `motion_mag`, the rhythm class of §5.4 |
+
+**Track attributes**, from S02.7's analysis, per section rather than per
+track: energy (percentile within the library), tempo, onset rate, spectral
+centroid, dynamic range, and the section's role in its piece (intro, build,
+swell, outro) from `is_swell` and the energy trend. `music.tag_with_llm`
+(off) lets Claude add mood tags per track from title and artist for a few
+cents; the matcher works without them.
+
+**Targets.** A pure function `scene_target(scene) → {energy, tempo,
+dynamics, brightness}` in `spine/music.py`, weights in `music.scene_targets`:
+energy rises with effort and with the act's place in the climb and falls in
+villages, at rest and in the city; tempo follows the walking cadence (Strava
+cadence where present, else from speed), accepting half and double time;
+dynamics are wide for climbing and narrow under speech; brightness follows
+time of day and altitude (pre-dawn and the pass are dark, villages and
+Kathmandu bright). Act 1 and Act 6 bias toward the same piece so the
+callback happens by construction.
+
+**Assignment.** A Viterbi pass over the scenes with track sections as
+states. The cost of a (scene, section) pair is the weighted distance between
+the scene's target and the section's features, plus a switching cost when
+the section's piece differs from the previous scene's, minus a continuity
+bonus when it is the section that follows in the same piece, plus a
+repetition penalty for a piece heard within `music.reuse_gap_s` (300).
+Hard rules: the credits piece is excluded; Act 4's last scene must end on a
+swell, followed by the silence window; the long take (§13.5) and the
+natural-sound windows carry no music; Act 0 takes the section chosen for
+Act 4 from its swell so the summit music is heard first and recognised when
+it returns. The result is written to `music_map.json` in the existing shape
+(segments with `src_in`/`src_out` per act) so §5.4 and the audio graph read
+it unchanged; `assignment_note` records the per-scene reasoning for the run
+report, never for the screen.
+
+The per-act Hungarian solve stays available as `music.assignment: act` for
+comparison; `scene` is the default.
 
 ---
 
