@@ -26,3 +26,9 @@ def test_upsert_writes_every_column_of_uniform_rows(tmp_path):
     assert db.upsert(conn, "decisions", ["key"], rows) == 2
     got = {r["key"]: r["confidence"] for r in conn.execute("SELECT key, confidence FROM decisions")}
     assert got == {"a": 1.0, "b": 0.5}
+
+
+def test_assets_carry_the_heading_columns(tmp_path):
+    conn = db.init(tmp_path / "t.sqlite")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(assets)")}
+    assert {"heading_deg", "heading_ref", "pos_error_m", "focal_35mm"} <= cols

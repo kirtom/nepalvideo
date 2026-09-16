@@ -52,7 +52,11 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
             f"media_from_camera/ and media_from_phones/."
         )
 
-    files = manifest.walk_media(root)
+    files = manifest.walk_media(
+        root,
+        exclude_dirs=set(manifest.DEFAULT_EXCLUDE_DIRS)
+        | {str(d) for d in (cfg.get("probe.exclude_dirs", []) or [])},
+        ignore_globs=tuple(cfg.get("probe.ignore_globs", []) or []))
     log.info("S01.1 walking %s: %d files", root, len(files))
 
     exif_rows: dict[str, dict[str, Any]] = {}
@@ -164,6 +168,7 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
             "quality_curve": cls["quality_curve"],
             "frame_shape": shape,
             "probe_json": probe_json,
+            **manifest.parse_heading(exif),
         })
 
     walk.close()

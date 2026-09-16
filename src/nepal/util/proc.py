@@ -161,8 +161,10 @@ def _capture_tag_args() -> list[str]:
     CAPTURE_TAGS is what stops it happening a third time -- the reader and the
     request cannot drift apart if only one of them is written by hand.
     """
-    from nepal.probe.manifest import CAPTURE_TAGS
-    return [f"-{tag}" for tag in CAPTURE_TAGS]
+    from nepal.probe.manifest import CAPTURE_TAGS, HEADING_TAGS
+    # The heading and lens tags ride the same derivation: parse_heading()
+    # reads them, so the request must carry them.
+    return [f"-{tag}" for tag in (*CAPTURE_TAGS, *HEADING_TAGS)]
 
 
 EXIF_TAGS = [
@@ -174,7 +176,6 @@ EXIF_TAGS = [
     # from the request makes asset_datetime()'s timezone handling dead code and
     # silently shifts every Nepal photo by 5h45m onto the wrong day.
     "-OffsetTimeOriginal", "-OffsetTime", "-OffsetTimeDigitized",
-    "-GPSHPositioningError",
 ]
 
 

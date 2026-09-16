@@ -213,6 +213,12 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # view that actually holds the subject rather than re-deriving it.
     ("shots", "face_yaw", "REAL"),
     ("shots", "face_score", "REAL"),
+    # Where the phone was pointing and how wide the lens was, for placing a
+    # named summit in the frame (Film v2 section 13.3).
+    ("assets", "heading_deg", "REAL"),
+    ("assets", "heading_ref", "TEXT"),
+    ("assets", "pos_error_m", "REAL"),
+    ("assets", "focal_35mm", "REAL"),
 )
 
 

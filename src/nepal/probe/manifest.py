@@ -190,6 +190,28 @@ def parse_offset(value: Any) -> timezone | None:
 CAPTURE_TAGS = ("CreationDate", "DateTimeOriginal", "CreateDate",
                 "MediaCreateDate", "GPSDateTime")
 
+# The camera's heading and lens, where the device recorded them. An iPhone
+# still carries GPSImgDirection against true north and a 35 mm-equivalent
+# focal length, which together say where the frame was pointing and how wide
+# it is -- enough to compute where a named summit falls in the picture
+# (spec section 13.3). Requested from exiftool by the same derivation as
+# CAPTURE_TAGS: a tag that is not asked for does not exist.
+HEADING_TAGS = ("GPSImgDirection", "GPSImgDirectionRef",
+                "GPSHPositioningError", "FocalLengthIn35mmFormat")
+
+
+def parse_heading(row: dict[str, Any]) -> dict[str, Any]:
+    """Heading in degrees, its reference ('T' true / 'M' magnetic), the
+    horizontal positioning error in metres, and the 35 mm-equivalent focal
+    length. None wherever the device wrote nothing."""
+    ref = exif_get(row, "GPSImgDirectionRef")
+    return {
+        "heading_deg": _num(exif_get(row, "GPSImgDirection")),
+        "heading_ref": str(ref).strip()[:1].upper() if ref is not None else None,
+        "pos_error_m": _num(exif_get(row, "GPSHPositioningError")),
+        "focal_35mm": _num(exif_get(row, "FocalLengthIn35mmFormat")),
+    }
+
 
 def asset_datetime(row: dict[str, Any], *,
                    assume_tz: timezone | None = None) -> datetime | None:
@@ -355,20 +377,28 @@ DEFAULT_EXCLUDE_DIRS = frozenset({
 
 
 def walk_media(root: Path, *, skip_hidden: bool = True,
-               exclude_dirs: frozenset[str] | set[str] | None = None) -> list[Path]:
+               exclude_dirs: frozenset[str] | set[str] | None = None,
+               ignore_globs: Sequence[str] = ()) -> list[Path]:
     """Every regular media-bearing file under root, sorted for deterministic
     asset ordering. Excluded directories are pruned rather than filtered, so a
-    large tree of irrelevant files costs nothing to skip."""
+    large tree of irrelevant files costs nothing to skip. ``ignore_globs``
+    match the file name or the relative path: an installer zip, the PDF
+    thumbnail Telegram writes next to every PDF, a spreadsheet lock file."""
+    import fnmatch
     excluded = {d.lower() for d in
                 (DEFAULT_EXCLUDE_DIRS if exclude_dirs is None else exclude_dirs)}
     out: list[Path] = []
     for p in sorted(root.rglob("*")):
         if not p.is_file():
             continue
-        parts = p.relative_to(root).parts
+        rel = p.relative_to(root)
+        parts = rel.parts
         if skip_hidden and any(part.startswith(".") for part in parts):
             continue
         if any(part.lower() in excluded for part in parts[:-1]):
+            continue
+        if any(fnmatch.fnmatch(p.name, g) or fnmatch.fnmatch(rel.as_posix(), g)
+               for g in ignore_globs):
             continue
         out.append(p)
     return out

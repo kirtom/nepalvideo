@@ -348,3 +348,47 @@ def test_an_mp4_is_never_promoted_to_360_by_its_aspect():
 
 def test_an_unprobed_360_file_keeps_the_benefit_of_the_doubt():
     assert refine_kind("video360", None, None) == ("video360", None)
+
+
+# -- heading tags and the ignore list (Film v2 step 1) ------------------
+
+from nepal.probe.manifest import HEADING_TAGS, parse_heading
+
+
+def test_heading_tags_are_requested_from_exiftool():
+    """A tag that is ranked but never requested does not exist."""
+    from nepal.util.proc import EXIF_TAGS
+    for tag in HEADING_TAGS:
+        assert f"-{tag}" in EXIF_TAGS
+
+
+def test_parse_heading_reads_iphone_fields():
+    row = {"GPS:GPSImgDirection": 34.23838045, "GPS:GPSImgDirectionRef": "T",
+           "GPS:GPSHPositioningError": 6.460409194,
+           "ExifIFD:FocalLengthIn35mmFormat": 26}
+    h = parse_heading(row)
+    assert h["heading_deg"] == pytest.approx(34.238, abs=1e-3)
+    assert h["heading_ref"] == "T"
+    assert h["pos_error_m"] == pytest.approx(6.46, abs=1e-2)
+    assert h["focal_35mm"] == 26.0
+
+
+def test_parse_heading_is_all_none_without_the_tags():
+    assert parse_heading({}) == {"heading_deg": None, "heading_ref": None,
+                                 "pos_error_m": None, "focal_35mm": None}
+
+
+def test_walk_media_skips_ignored_globs_and_dirs(tmp_path):
+    (tmp_path / "media_from_phones" / "keller").mkdir(parents=True)
+    (tmp_path / "media_from_phones" / "keller" / "IMG_1.HEIC").write_bytes(b"x")
+    (tmp_path / "aws").mkdir()
+    (tmp_path / "awscliv2.zip").write_bytes(b"x")
+    (tmp_path / "strava").mkdir()
+    (tmp_path / "strava" / "activities.csv").write_text("a")
+    (tmp_path / "chat_export" / "files").mkdir(parents=True)
+    (tmp_path / "chat_export" / "files" / "KTM_Hotel.pdf_thumb.jpg").write_bytes(b"x")
+    (tmp_path / "chat_export" / "files" / "KTM_Hotel.pdf").write_bytes(b"x")
+    got = {p.relative_to(tmp_path).as_posix() for p in walk_media(
+        tmp_path, exclude_dirs={"aws", "strava"},
+        ignore_globs=("*.zip", "*_thumb.jpg"))}
+    assert got == {"media_from_phones/keller/IMG_1.HEIC", "chat_export/files/KTM_Hotel.pdf"}
