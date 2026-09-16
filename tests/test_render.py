@@ -188,3 +188,20 @@ def test_ffmpeg_renders_a_cut_of_the_expected_length(tmp_path):
     assert "width=960" in probe and "height=540" in probe
     dur = float([l for l in probe.splitlines() if l.startswith("duration=")][0].split("=")[1])
     assert dur == pytest.approx(7.0, abs=0.3), f"expected 7 s of cut, got {dur}"
+
+
+# -- one frame rate (Film v2 step 1) ------------------------------------
+
+def test_every_segment_is_resampled_and_the_output_rate_is_fixed():
+    """15 fps proxies, 25 fps stills and 60 fps phone clips concatenated
+    without a rate came out as a 120 fps file."""
+    rows = [{"shot_id": "v1", "media_kind": "video", "t_in": 0.0, "t_out": 2.0,
+             "src_in": 5.0, "src_out": 7.0},
+            {"shot_id": "p1", "media_kind": "photo", "t_in": 2.0, "t_out": 5.0}]
+    cmd = render.build_command(rows, sources={"v1": pathlib.Path("/m/v.mp4"),
+                                              "p1": pathlib.Path("/m/a.jpg")},
+                               out_path=pathlib.Path("/o.mp4"), fps=30)
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert fc.count("fps=30") == 2
+    assert cmd[cmd.index("-r") + 1] == "30"
+    assert "fps=25" not in fc

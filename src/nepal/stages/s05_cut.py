@@ -221,7 +221,8 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
     d = cfg.get("render.draft")
     cmd = render_mod.build_command(
         usable, sources=sources, out_path=out,
-        width=int(d["width"]), height=int(d["height"]), crf=int(d["crf"]))
+        width=int(d["width"]), height=int(d["height"]), crf=int(d["crf"]),
+        fps=int(cfg.get("render.fps", render_mod.DRAFT_FPS)))
     log.info("S07 rendering %d of %d slot(s) to %s", len(usable), len(rows), out)
     log.debug("S07 %s", render_mod.describe(cmd))
     import subprocess

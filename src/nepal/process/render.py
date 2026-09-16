@@ -24,7 +24,7 @@ from typing import Any, Mapping, Sequence
 
 log = logging.getLogger(__name__)
 
-DRAFT_W, DRAFT_H, DRAFT_CRF = 960, 540, 23
+DRAFT_W, DRAFT_H, DRAFT_CRF, DRAFT_FPS = 960, 540, 23, 30
 
 _HAS_DRAWTEXT: bool | None = None
 
@@ -73,7 +73,7 @@ def escape_drawtext(text: str) -> str:
 
 def segment_filters(row: Mapping[str, Any], index: int, *,
                     width: int = DRAFT_W, height: int = DRAFT_H,
-                    overlay: bool = True) -> str:
+                    overlay: bool = True, fps: int = DRAFT_FPS) -> str:
     """The per-shot video chain: reset timestamps, scale, label.
 
     The trim is NOT here. A ``trim`` filter runs after the decoder, so
@@ -89,7 +89,12 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
     chain = []
     if is_still(row):
         dur = float(row["t_out"]) - float(row["t_in"])
-        chain += [f"loop=loop=-1:size=1:start=0", "fps=25", f"trim=duration={dur:.3f}"]
+        chain += [f"loop=loop=-1:size=1:start=0", f"fps={fps}", f"trim=duration={dur:.3f}"]
+    else:
+        # Every leg of the concat must share a rate: the proxies are 15 fps,
+        # the phones 30 or 60, and a concat of mixed rates produced a 120 fps
+        # draft.
+        chain += [f"fps={fps}"]
     chain += ["setpts=PTS-STARTPTS",
              f"scale={width}:{height}:force_original_aspect_ratio=decrease"
              f":force_divisible_by=2",
@@ -112,7 +117,7 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
                   out_path: Path, music_path: Path | None = None,
                   width: int = DRAFT_W, height: int = DRAFT_H,
                   crf: int = DRAFT_CRF, music_lufs: float = -14.0,
-                  overlay: bool = True) -> list[str]:
+                  overlay: bool = True, fps: int = DRAFT_FPS) -> list[str]:
     """One ffmpeg invocation that renders the whole draft.
 
     Every shot is an input; the filter graph trims each, concatenates, and
@@ -158,7 +163,7 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
     parts: list[str] = []
     labels: list[str] = []
     for i, r in enumerate(rows):
-        parts.append(f"[{i}:v]{segment_filters(r, i, width=width, height=height, overlay=overlay)}[v{i}]")
+        parts.append(f"[{i}:v]{segment_filters(r, i, width=width, height=height, overlay=overlay, fps=fps)}[v{i}]")
         labels.append(f"[v{i}]")
     parts.append("".join(labels) + f"concat=n={len(rows)}:v=1:a=0[vout]")
 
@@ -169,7 +174,7 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
         parts.append(f"[{music_idx}:a]loudnorm=I={music_lufs:g}:TP=-1.5:LRA=11[aout]")
         maps += ["-map", "[aout]", "-shortest"]
 
-    cmd += ["-filter_complex", ";".join(parts), *maps,
+    cmd += ["-filter_complex", ";".join(parts), *maps, "-r", str(fps),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
             "-pix_fmt", "yuv420p"]
     if music_idx is not None:
