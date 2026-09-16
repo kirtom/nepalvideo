@@ -250,8 +250,9 @@ def detect_shots(cfg: Config, conn) -> dict[str, Any]:
             row["act"] = acts_mod.act_for(ts, bounds) if (ts and bounds) else None
             pos = gps_mod.interpolate_at(track, ts, max_gap_s=max_gap) \
                 if (ts and track) else None
-            if pos:
-                row["lat"], row["lon"] = pos
+            # Every row carries every column: db.upsert takes its column list
+            # from the first row and refuses rows that differ.
+            row["lat"], row["lon"] = pos if pos else (None, None)
         out += rows
     bar.close(f"{len(out)} shots from {len(pending)} recording(s)")
 

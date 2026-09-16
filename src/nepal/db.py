@@ -322,6 +322,20 @@ def upsert(conn: sqlite3.Connection, table: str, key_cols: Sequence[str],
     if not rows:
         return 0
     cols = list(rows[0].keys())
+    # The column list comes from the first row, so a row missing a key would
+    # have that column dropped for *every* row -- silently. That is how 930
+    # video shots lost their position: the first recording was a Telegram
+    # clip outside the GPS track, so it had no `lat`, so nobody did.
+    want = set(cols)
+    for i, r in enumerate(rows):
+        have = set(r.keys())
+        if have != want:
+            missing = sorted(want - have)
+            extra = sorted(have - want)
+            raise ValueError(
+                f"upsert into {table}: row {i} does not share the first row's "
+                f"keys (missing {missing}, extra {extra}). Every row must carry "
+                f"every column, with None where there is no value.")
     placeholders = ",".join("?" for _ in cols)
     updates = ",".join(f"{c}=excluded.{c}" for c in cols if c not in key_cols)
     sql = (f"INSERT INTO {table} ({','.join(cols)}) VALUES ({placeholders}) "
