@@ -500,8 +500,11 @@ the scene's target and the section's features, plus a switching cost when
 the section's piece differs from the previous scene's, minus a continuity
 bonus when it is the section that follows in the same piece, plus a
 repetition penalty for a piece heard within `music.reuse_gap_s` (300).
-Hard rules: the credits piece is excluded; Act 4's last scene must end on a
-swell, followed by the silence window; the long take (§13.5) and the
+Hard rules: **Marusha's *Somewhere over the Rainbow* is the credits piece
+and plays there only** — it is withdrawn from the library before the scene
+assignment runs, as `music.credits_track` already does, so no scene can pick
+it and the credits are the first time it is heard; Act 4's last scene must
+end on a swell, followed by the silence window; the long take (§13.5) and the
 natural-sound windows carry no music; Act 0 takes the section chosen for
 Act 4 from its swell so the summit music is heard first and recognised when
 it returns. The result is written to `music_map.json` in the existing shape
