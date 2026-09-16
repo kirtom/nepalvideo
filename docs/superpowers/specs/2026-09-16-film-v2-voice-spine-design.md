@@ -50,7 +50,7 @@ Delhi, and the operator is adding Delhi footage. That is two acts.
 
 | Act | Name | Target | Boundary | Musical character |
 |---|---|---|---|---|
-| 0 | Cold open | 20 s | 15–25 s from Act 3 or 4, hard cut to black, title | the summit cue, cut dead |
+| 0 | Opening + cold open | 40 s | the rise and the flyover (§13.8), then 15–25 s from Act 3 or 4, hard cut to black, "three months earlier" | the summit cue, cut dead |
 | 1 | Planning | 80 s | first planning message → departure | small, domestic, wistful |
 | 2 | Approach | 240 s | arrival → where the ascent steepens | warmth entering |
 | 3 | The climb | 360 s | → summit push | the build; costs something |
@@ -58,12 +58,13 @@ Delhi, and the operator is adding Delhi footage. That is two acts.
 | 5 | Descent | 170 s | summit → first fix inside `spine.return_radius_km` of Kathmandu | release; the Act 1 theme returning |
 | 6 | Return | 200 s | Kathmandu → last message in the "after" phase | fuller callback; the last words are a message sent after everyone got home |
 
-Sum 1,180 s plus credits (60–120 s, outside the runtime). `acts` in
+Sum 1,200 s plus credits (60–120 s, outside the runtime). `acts` in
 `config/pipeline.yaml` gains the sixth row; `spine/acts.py` gains the return
 boundary, found as the first GPS fix after the summit within
 `spine.return_radius_km` (default 30) of the geocoded `spine.return_place`
 (default `Kathmandu`). Act 6 grows when the Delhi material lands; its `max_s`
-allows 400.
+allows 400. Where a Strava activity exists (§13.1) its start and end are the
+day's boundaries and its name is the day's title.
 
 ### 1.2 The unit is a moment, not a chunk
 
@@ -129,7 +130,7 @@ at 1080p/4K are conformed, not upscaled.
 
 ```
 S01 Probe            unchanged + prune step + ignore list
-S02 Spine            + Act 6 boundary, + hallucination filter, + music by character (Gate 1)
+S02 Spine            + Strava track, + Act 6 boundary, + hallucination filter; music unchanged
 S03 Process          unchanged; bugs fixed (has_face, video geotag, day_index)
 S04 Semantic         S04.1 CLIP (remote GPU) · S04.2 framing (Claude, 2x2 sheet) · S04.3 captions (Claude)
 S04.5 Beat sheet     NEW: Claude reads transcripts + chat → beats.json           [remote, API]
@@ -179,8 +180,7 @@ v2 run, at published rates:
 | Beat sheet (one long-context call, text only, Sonnet 5) | < $1 |
 | S04.2 framing, 22 dual-fisheye recordings' shots, Haiku 4.5 | < $1 |
 | S04.3 captions, 1,632 shots × 4 frames, Haiku 4.5 (Batch) | ~$1.5 |
-| Music assignment proposal + Gate 1 | < $0.1 |
-| Remote CPU, ~6 h over the project | ~$1 |
+| Remote CPU, ~8 h over the project (includes the Blender flyover) | ~$1 |
 | Remote GPU, ~1 h total (CLIP minutes, upscaling at conform) | ~$0.5 |
 | **Total** | **~$5, ceiling $15** |
 
@@ -321,11 +321,19 @@ the gate, and reported.
      "effect": "none", "rank": 2, "rationale": "the first admission of cost"},
     {"kind": "quote", "msg_id": "…", "act": 1, "text": "…", "rank": 7, "rationale": "…"}
   ],
+  "pairs": [
+    {"planning_msg_id": "…", "trek_beat_id": "…", "why": "20 km a day, typed in February"}
+  ],
   "closing": {"msg_id": "…", "text": "…"},
   "act_notes": {"3": "the climb should feel slower after the bridge…"},
-  "stat_card_ideas": ["…"]
+  "stat_card_ideas": ["…"],
+  "trailer": {"hook_beat_id": "…", "cliffhanger_beat_id": "…", "cards": ["…"]}
 }
 ```
+
+`pairs` are the planning-versus-reality moments (§13.2): a confident message
+from the planning phase laid as a chat card over the trek beat that answers
+it. Zero to five; the model returns none rather than forcing one.
 
 **Rules the prompt states and the validator enforces:**
 
@@ -431,35 +439,24 @@ location audio at full, picture stays on the recording that has the sound.
 
 ### 5.5 Act 0 and credits
 
-Cold open: the highest-ranked Act 3/4 beat or, absent one, the highest-scoring
-Act 4 shot; 15–25 s; music is the Act 4 cue from its swell; hard cut to black;
-title card (`beats.title`), then the card "three months earlier" (config
+Act 0 is the opening of §13.8 (the rise and the flyover, title landing on the
+pass) followed by the cold open: the highest-ranked Act 3/4 beat or, absent
+one, the highest-scoring Act 4 shot; 15–25 s; music is the Act 4 cue from its
+swell; hard cut to black; the card "three months earlier" (config
 `film.cold_open_card`), then Act 1.
 
 Credits per spec §1.8 and §S09.1, generated from the database at render time;
 `decisions.credits_track` under them. Rendered with the draft so Gate 3 sees
 them.
 
-### 5.6 Music assignment by character
+### 5.6 Music stays as assigned
 
-`spine/music.py` keeps the analysis (beats, sections, swells) and drops the
-Hungarian act assignment as the default. Assignment becomes a `decisions`
-value proposed by Claude from the track list (title, artist, duration, tempo,
-energy shape) and the six acts' characters, and **confirmed by the operator at
-Gate 1**. The feature vectors remain a sanity check: a proposal whose energy
-ordering contradicts the acts is flagged, never rejected. Draft proposal to
-put in front of the operator:
-
-| Act | Cue |
-|---|---|
-| 0 cold open | *Outro* (M83), from its swell, cut dead |
-| 1 Planning | *Cornfield Chase* (Zimmer) |
-| 2 Approach | *Send Me on My Way* → *Lovely Day* |
-| 3 Climb | *Time* (Zimmer) → *The Grid* → *Mind Heist* |
-| 4 Highest | *Outro* (M83), swell into silence |
-| 5 Descent | *Heartbeats* (José González) |
-| 6 Return | *Home* (Edward Sharpe), *Sita Ram* under Kathmandu |
-| credits | *Somewhere over the Rainbow* (Marusha), as configured |
+The music is pre-defined: `spine/music.py` keeps its analysis (beats,
+sections, swells) and its automatic act assignment, extended to six acts and
+the opening. Nobody is asked about it at a gate, and no track title is ever
+shown during the film; the credits list the pieces once, as the spec's §1.8
+already does. The Act 0 opening and cold open take the Act 4 cue from its
+swell so the summit music is heard first and recognised when it returns.
 
 ---
 
@@ -513,7 +510,10 @@ CPU box, then composited by ffmpeg `overlay`. Nothing is drawn with `drawtext`.
 | `chat_card` | Act 1 quotes, sparingly elsewhere | chat bubble, left/right by speaker, typing animation, timestamp, **no name** |
 | `stat_card` | once per act, on a freeze or a hold | generated from the DB: km, gain, hours walked, highest point, photos taken, messages sent, coldest morning |
 | `subtitle` | under every speech beat | the transcript text, bottom centre, since the audience may not be Russian speakers — `render.subtitles: true` |
-| `credits` | after the last slot | the four blocks of spec §1.8 |
+| `name_tag` | first appearance of each named face cluster | an arrow-style tag from the face box: `Darma · guide`, and the two protagonists by first name (`overlays.name_tags`, §13.7) |
+| `peak_label` | when Manaslu is in frame | arrow to the summit's pixel and `Manaslu · 8,163 m · 14 km` (§13.3) |
+| `hud_hr` (top-left, small) | Acts 3–5 where Strava has heart rate | a pulse at the real rate with the number (§13.1) |
+| `credits` | after the last slot | the four blocks of spec §1.8, plus the disclosures of §13.10 |
 
 Anything a widget shows is computed from `gps_points`, `shots`, `messages` and
 `assets` at layout time; nothing is typed.
@@ -569,14 +569,26 @@ Each is a unit test plus, where a tool boundary is touched, a slow test.
     `capture_time_overrides` the operator can fill; otherwise they stay out.
 12. **`usable_as_card`** is dropped as a selector (it marks 79% of messages);
     quotes come from the beat sheet.
+13. **Strava ingestion** (§13.1): `nepal_data/strava/activities.csv` plus the
+    `.fit.gz` files become `gps_points` rows with `source = 'strava'` and the
+    new `hr_bpm`, `alt_baro_m` columns; `spine/gps.py` merges them ahead of
+    photo fixes. Pure-Python FIT decoding (`fitdecode`) is a core dependency.
+14. **Heading and lens tags** added to `CAPTURE_TAGS` (`GPSImgDirection`,
+    `GPSImgDirectionRef`, `GPSHPositioningError`, `FocalLengthIn35mmFormat`)
+    and stored on `assets` as `heading_deg`, `pos_error_m`, `focal_35mm`; the
+    photo manifest is re-probed once (minutes, on the remote box).
+15. **Named peaks** in `reference.py`: Manaslu (28.5497 N, 84.5597 E, 8,163 m)
+    and the other 7,000 m+ peaks of the circuit from GeoNames, in
+    `spine.named_peaks`, so the geometry of §13.3 has targets.
 
 ---
 
 ## 9. Gates (what the operator sees)
 
-- **Gate 1** gains: the music proposal with 20 s previews per act and an
-  override; the six act boundaries; the FOV sheets; the Delhi footage check
-  ("Act 6 has N minutes of material").
+- **Gate 1** gains: the six act boundaries with the Strava stage names; the
+  FOV sheets; the Delhi footage check ("Act 6 has N minutes of material");
+  Strava coverage per day (which days have heart rate and a 1 Hz track).
+  Music is not on the page.
 - **Gate 2** gains: the beat sheet (text, rationale, play button on the
   utterance), drop/retime/re-rank; the pairs; the 360 framing choices.
 - **Gate 3**: the draft with everything in it, credits included, and the shot
@@ -606,20 +618,24 @@ Step Functions machinery remains out of scope.
 
 ## 11. Order of work
 
-1. Bugs and hygiene (§8) — independent of every creative decision; re-cut and
-   re-render locally-cheap parts to confirm the stills/videos balance and the
-   ghost removal.
+1. Bugs and hygiene (§8), including Strava ingestion and the heading tags —
+   independent of every creative decision; re-cut and re-render the cheap
+   parts to confirm the stills/videos balance and the ghost removal.
 2. Remote execution (`nepal remote`) and the spend guard — everything after
    this runs there.
-3. Hallucination filter, segment times, beat sheet (S04.5) → Gate 2 review of
-   the beats.
+3. Hallucination filter, segment times, beat sheet (S04.5) with the pairs and
+   the trailer picks → Gate 2 review of the beats.
 4. Schema v2 (`beats`, `timeline`, `audio_cues`, `overlays`) and assembly v2
-   (§5) with the deterministic similarity fallback; audio graph (§7).
-5. CLIP on the remote GPU; S04.2 and S04.3 via the API.
-6. Motion (§6.1) and overlays (§6.4); credits; cold open.
-7. Six acts, music by character, Gate 1 page.
+   (§5) with the deterministic similarity fallback, the long take (§13.5);
+   audio graph (§7).
+5. CLIP on the remote GPU; S04.2 and S04.3 via the API, the latter asking
+   about Manaslu (§13.3).
+6. Motion (§6.1), grade by altitude (§13.4), overlays (§6.4) including the
+   name tags, the peak label and the cards of §13.6; the mountain-approaches
+   motif (§13.3); credits; the opening (§13.8) and the cold open.
+7. Six acts and the Gate 1 page.
 8. Conform with upscaling (§1.8) once the Delhi footage is in and Gate 3 has
-   passed.
+   passed; then the vertical option and the trailer (§13.9).
 
 Each step ends with a draft the operator can watch.
 
@@ -631,5 +647,158 @@ Each step ends with a draft the operator can watch.
   the tree). Say when it is there; the prune-then-resume path handles the rest.
 - **Provider**: GCP account and a GPU quota request, or a serverless-GPU
   account, or an SSH box you already have. Credentials stay with you.
-- **Music proposal** in §5.6: confirm or change at Gate 1.
 - **Subtitles**: on by default; say if the audience is Russian-only.
+- **The porters' names** for the credits, if you want them credited by name.
+- **Name tags** (§13.7): default is all three people on first appearance;
+  say if only Darma should get one.
+- **Bridge foley** (§13.5): off by default; turn on `render.long_take_foley`
+  if the real audio of the crossing is not enough.
+
+---
+
+## 13. Additions adopted from the 2026-09-16 brainstorm
+
+### 13.1 Strava is the spine
+
+`nepal_data/strava/` holds `activities.csv` and eleven `.fit.gz` files, one
+per trekking day from *Machakhola to Jagat* (29 April) to *Bimtang to
+Dharapani* (7 May), recorded on an Apple Watch: position at roughly one fix
+per second, barometric altitude, heart rate (peaks of 126–160 per day), and
+per-activity distance, moving time and elevation gain. This replaces photo
+EXIF as the primary track wherever it exists; photos fill the jeep days and
+Kathmandu.
+
+What changes because of it:
+
+- `gps_points` gains `hr_bpm`, `alt_baro_m`, `activity_id`; S02.1 reads Strava
+  first and photo fixes second; S02.3 prefers barometric altitude to SRTM
+  where both exist and records which was used.
+- `spine/effort.py` gets a heart-rate term: exertion is `hr / hr_max_observed`
+  where heart rate exists, blended with the GPS-derived terms; the
+  natural-sound windows and the Act 3 burst follow it.
+- Days are named by the activity (`Day 3 · Deng to Namrung`) and bounded by its
+  start and end; the pre-dawn summit start is the activity's start time
+  (*Dharmasala to Larkya Pass* began at 04:07 local).
+- Stat cards use the activity's own numbers (distance, moving time, gain,
+  maximum heart rate) rather than derived ones.
+- A small `hud_hr` widget shows the live rate through Acts 3–5; it hides
+  wherever there is no data rather than freezing.
+- Watch time is GPS-disciplined, so the clock solver gains a third reference
+  to check the phones against; a disagreement above 2 s is reported.
+
+### 13.2 Planning versus reality
+
+The beat sheet returns up to five `pairs`: a confident planning message and
+the trek beat it collides with. Rendered as a `chat_card` (anonymous, dated)
+sliding in over the trek picture while the beat's audio plays. The model may
+return none; a forced pair is worse than no pair.
+
+### 13.3 Manaslu, tracked and labelled
+
+Two mechanisms, geometry first:
+
+- **Geometry, for photographs.** iPhone stills carry `GPSImgDirection` (true
+  north) and a 35 mm-equivalent focal length. For each positioned photo with a
+  heading: the bearing and elevation angle from the camera to the summit are
+  computed from the two positions and altitudes; the summit is in frame when
+  the bearing lies inside the horizontal field of view and the elevation
+  angle inside the vertical one; a line-of-sight test along the bearing over
+  the SRTM tiles rejects a summit hidden behind a nearer ridge. The result is
+  the summit's pixel position, within `overlays.peak_tolerance_deg` (3).
+- **Recognition, for video.** S04.3 captioning asks, for every shot, whether
+  Manaslu (the double-summited peak) is visible and roughly where; a yes with
+  no geometry places a corner `peak_label` without an arrow.
+
+The **mountain approaches** motif: photographs where geometry found the
+summit, one per day of the approach, cropped so the summit sits at the same
+screen position in each, played as a 6–8 s sequence on the beat, the mountain
+growing in place with the day counter ticking. Placed once, in Act 2 or early
+Act 3, where the beat sheet's act notes suggest.
+
+### 13.4 Grade by altitude
+
+The colour temperature of the grade follows the shot's altitude: linear from
+`render.grade.warm_k` (5,600 K) at `render.grade.low_m` (800 m) to
+`render.grade.cold_k` (7,400 K) at `render.grade.high_m` (5,200 m), applied per
+slot with ffmpeg's `colortemperature` filter in the draft and folded into the
+per-source LUT at conform. Acts 1 and 6 sit at the warm end. Subtle by design;
+the audience should feel it, not see it.
+
+### 13.5 The long take: the bridge
+
+One slot of `assemble.long_take_s` (60–90 s), unbroken, on the highest
+suspension-bridge crossing the corpus holds. Candidates: recordings whose
+captions mention a bridge or whose transcripts do ("мост"), ranked by drop
+below the bridge from the DEM at the crossing point and by the recording's
+continuous length. Picture is the recording as shot, `yaw_drift` off, one
+slow pan at most. Audio: music fades out fully 2 s before, the recording's
+own sound at full for the whole take (creaks, wind, boots on the deck), music
+returns on the far bank. `render.long_take_foley` (off) allows a licensed
+sound layer on top if the real audio is wind-blown; when it is on, the
+credits say "sound design" in the machine block.
+
+### 13.6 Oxygen and sunrise cards
+
+Two `stat_card` variants computed from altitude, position and time alone:
+
+- **Oxygen**: the barometric formula gives the pressure at the altitude and
+  hence the share of sea-level oxygen; shown on the first slot above 4,000 m
+  and at the pass: `5,106 m · 53 % of the oxygen at sea level`.
+- **Sunrise**: solar position for the date and place gives sunrise and
+  golden hour; shown on the summit day with the actual start time from
+  Strava: `Left Dharmasala 04:07 · sunrise 05:19`.
+
+### 13.7 Name tags
+
+On the first appearance of each named face cluster, a `name_tag` overlay:
+a thin line from the face box to a label for `overlays.name_tag_s` (2.5 s).
+Labels come from `overlays.name_tags` (`keller: Kirill`, `kulikov: Sasha`,
+`other_0: Darma · guide`); the cluster-to-person mapping is confirmed at
+Gate 2 as the spec already requires. Chat cards remain anonymous; the tag
+names people on screen, which is a different promise.
+
+### 13.8 The opening: the rise and the flyover
+
+Two pictures, dissolved into one move, before the cold open:
+
+1. **The rise** (8 s). A 360 frame with both protagonists in it, ideally the
+   trailhead or a viewpoint early in Act 2 (chosen by face count and
+   `vlm_interest`, overridable in `decisions`). The reprojection animates
+   pitch from level to straight down and the field of view from 100° to a
+   full tiny planet: the camera appears to lift away and look down at the two
+   figures. This is real footage and needs no drone.
+2. **The flyover** (12 s). A terrain render from the SRTM tiles: hillshade
+   with hypsometric tint, snow above 5,000 m, the route drawn progressively,
+   labels rising at the key places (Machakhola, Jagat, Deng, Namrung,
+   Samagaon, Manaslu 8,163 m, Larke Pass 5,106 m, Bimtang, Dharapani). The
+   camera follows the route from the trailhead to the pass and the title
+   lands there. Rendered headless in Blender (`bpy`, Eevee) on the remote CPU
+   box from a generated script; a 2.5-D `pyvista` render is the fallback if
+   Blender is not installable. The same scene, reversed, closes Act 6 before
+   the credits, and short cuts of it serve as the act-transition map moments.
+
+The flyover is the one picture in the film not shot on the trek; the credits
+say so (§13.10).
+
+### 13.9 Formats: horizontal film, vertical option, vertical trailer
+
+- The film is 16:9. `deliver.vertical_video: false` by default; when true, a
+  9:16 version is rendered from the same timeline: portrait clips native,
+  landscape shots cropped to the face or to saliency, 360 shots reframed at a
+  9:16 field of view, HUD widgets stacked at the top, cards resized.
+- The short cut becomes a **vertical trailer**, 60–90 s, `deliver.trailer:
+  true`: hook (3 s of the peak), three planning quotes as cards, a burst
+  montage on the Act 3 build, the cliffhanger — the pre-dawn start, breathing,
+  "Страшно", cut to black on the hardest moment before the pass — then the
+  title. It never shows the pass. The beat sheet's `trailer` block names the
+  hook and the cliffhanger; the assembler's `trailer` profile builds it with
+  the same code paths and the burst rhythm of §5.4.
+
+### 13.10 What the credits disclose
+
+The machine block of the credits states, generated from the run: every frame
+except the flyover map was shot on the trek; how many shots were considered
+and used; that the transcriber hallucinated "Subtitles by DimaTorzok" 33
+times; that the camera's clock was 18 days wrong; whether sound design was
+added to the bridge; and that the Nepal painting in the chat was imagined
+before anyone went.
