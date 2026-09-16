@@ -166,6 +166,18 @@ def run(cfg, args) -> int:
         if r["method"]:
             print(f"      {str(r['method'])[:110]}")
 
+    hr("shots placed, per kind -- the context score reads these")
+    for r in conn.execute(
+        "SELECT media_kind, COUNT(*) n, SUM(lat IS NOT NULL) pos, "
+        "SUM(alt_dem_m IS NOT NULL) alt, SUM(place_name IS NOT NULL) named, "
+        "SUM(day_index IS NOT NULL) dayed FROM shots WHERE status <> 'rejected' "
+        "GROUP BY media_kind ORDER BY media_kind"
+    ):
+        print(f"  {r['media_kind']:<6} {r['n']:>5} surviving: {r['pos']:>5} positioned, "
+              f"{r['alt']:>5} with altitude, {r['named']:>5} named, {r['dayed']:>5} on a trek day")
+        if r["n"] and not r["pos"]:
+            print("     ^ none positioned: run `nepal s03 --redo place` after `nepal s02`")
+
     hr("GPS track: how much is actually in Nepal?")
     la0, lo0, la1, lo1 = NEPAL
     tot = conn.execute("SELECT COUNT(*) n FROM gps_points").fetchone()["n"]

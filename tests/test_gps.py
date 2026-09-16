@@ -242,3 +242,19 @@ def test_trek_envelope_radius_is_configurable():
 
 def test_trek_envelope_empty():
     assert trek_envelope([]) == (None, 0)
+
+
+# -- interpolate_point (Film v2 step 1) ---------------------------------
+
+from nepal.spine.gps import interpolate_point
+
+
+def test_interpolate_point_carries_altitude_only_between_watch_fixes():
+    a = GpsPoint(t(6), 28.0, 84.0, 4000.0, "strava", None, 100.0, "A")
+    b = GpsPoint(t(8), 28.2, 84.2, 4400.0, "strava", None, 120.0, "A")
+    mid = interpolate_point([a, b], t(7))
+    assert mid.lat == pytest.approx(28.1) and mid.ele == pytest.approx(4200.0)
+    assert mid.hr == pytest.approx(110.0) and mid.source == "interp"
+    photo = GpsPoint(t(8), 28.2, 84.2, 4400.0, "phone_keller")
+    assert interpolate_point([a, photo], t(7)).ele is None
+    assert interpolate_point([a, b], t(9)) is None

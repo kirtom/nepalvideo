@@ -200,6 +200,38 @@ def interpolate_at(points: Sequence[GpsPoint], ts: datetime, *,
     return (lo.lat + (hi.lat - lo.lat) * f, lo.lon + (hi.lon - lo.lon) * f)
 
 
+def interpolate_point(points: Sequence[GpsPoint], ts: datetime, *,
+                      max_gap_s: float = 14400.0) -> GpsPoint | None:
+    """Like ``interpolate_at`` but a whole point: altitude and heart rate
+    come along **only between two watch fixes**. A photo fix's ``ele`` is a
+    DEM lookup at the photo, and interpolating two of those is worse than
+    looking the DEM up at the interpolated position, so between anything
+    else they are left None for the caller to resolve."""
+    if not points:
+        return None
+    lo, hi = _bracket(points, ts)
+    if lo is None or hi is None:
+        return None
+    if lo is hi:
+        return GpsPoint(ts, lo.lat, lo.lon, lo.ele if lo.activity_id else None,
+                        "interp", None, lo.hr if lo.activity_id else None,
+                        lo.activity_id)
+    span = (hi.ts - lo.ts).total_seconds()
+    if span > max_gap_s:
+        return None
+    f = 0.0 if span <= 0 else (ts - lo.ts).total_seconds() / span
+    both_watch = bool(lo.activity_id and hi.activity_id)
+
+    def mix(a: float | None, b: float | None) -> float | None:
+        if not both_watch or a is None or b is None:
+            return None
+        return a + (b - a) * f
+
+    return GpsPoint(ts, lo.lat + (hi.lat - lo.lat) * f, lo.lon + (hi.lon - lo.lon) * f,
+                    mix(lo.ele, hi.ele), "interp", None, mix(lo.hr, hi.hr),
+                    lo.activity_id if both_watch else None)
+
+
 def _bracket(points: Sequence[GpsPoint], ts: datetime):
     import bisect
     times = [p.ts for p in points]

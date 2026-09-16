@@ -28,7 +28,8 @@ from nepal.process import (asr as asr_mod, audio as audio_mod,
                            embed as embed_mod, faces as faces_mod,
                            gate as gate_mod, metrics as metrics_mod,
                            reproject, shots as shots_mod, stills)
-from nepal.spine import acts as acts_mod, gps as gps_mod
+from nepal.spine import (acts as acts_mod, dem as dem_mod, geocode as geo_mod,
+                         gps as gps_mod, place as place_mod)
 from nepal.util import proc
 from nepal.util.progress import Progress, heartbeat
 
@@ -208,10 +209,6 @@ def detect_shots(cfg: Config, conn) -> dict[str, Any]:
     from datetime import timedelta
 
     bounds = _bounds(conn)
-    track = [gps_mod.GpsPoint(_dt(r["ts_utc"]), r["lat"], r["lon"], r["alt_dem_m"])
-             for r in conn.execute("SELECT ts_utc, lat, lon, alt_dem_m FROM gps_points "
-                                   "ORDER BY ts_utc")]
-    max_gap = float(cfg.get("spine.max_interp_gap_s"))
     threshold = float(cfg.get("process.scene_threshold"))
     min_len = float(cfg.get("process.min_shot_s"))
     max_len = float(cfg.get("process.max_shot_s", 20.0))
@@ -248,11 +245,13 @@ def detect_shots(cfg: Config, conn) -> dict[str, Any]:
             ts = rec_start + timedelta(seconds=row["start_s"]) if rec_start else None
             row["start_utc"] = ts.isoformat() if ts else None
             row["act"] = acts_mod.act_for(ts, bounds) if (ts and bounds) else None
-            pos = gps_mod.interpolate_at(track, ts, max_gap_s=max_gap) \
-                if (ts and track) else None
-            # Every row carries every column: db.upsert takes its column list
-            # from the first row and refuses rows that differ.
-            row["lat"], row["lon"] = pos if pos else (None, None)
+            # Position, altitude, place and day are the `place` sub-step's
+            # job, run right after this one and again whenever S02 moves.
+            # Every row carries every column: db.upsert refuses rows that
+            # differ, and a first row without `lat` once cost every video
+            # shot its position.
+            row["lat"] = row["lon"] = row["alt_dem_m"] = row["place_name"] = None
+            row["day_index"] = None
         out += rows
     bar.close(f"{len(out)} shots from {len(pending)} recording(s)")
 
@@ -267,10 +266,9 @@ def detect_shots(cfg: Config, conn) -> dict[str, Any]:
     by_act: dict[Any, int] = {}
     for row in out:
         by_act[row.get("act")] = by_act.get(row.get("act"), 0) + 1
-    placed = sum(1 for row in out if row.get("lat") is not None)
-    log.info("S03.2 %d shot(s) from %d recording(s); per act %s; %d positioned",
+    log.info("S03.2 %d shot(s) from %d recording(s); per act %s",
              len(out), len(pending), {k: by_act[k] for k in sorted(
-                 by_act, key=lambda x: (x is None, x))}, placed)
+                 by_act, key=lambda x: (x is None, x))})
     if no_cuts:
         # One scene is not one shot any more: process.max_shot_s divides it.
         from_single = sum(1 for row in out if row["recording_id"] in single_scene)
@@ -278,7 +276,7 @@ def detect_shots(cfg: Config, conn) -> dict[str, Any]:
                  "divided those into %d shot(s)", no_cuts, max_len, from_single)
     return {"n_recordings": len(recs), "n_with_proxy": len(pending),
             "n_shots": len(out), "per_act": {str(k): v for k, v in by_act.items()},
-            "n_positioned": placed, "n_single_shot": no_cuts}
+            "n_single_shot": no_cuts}
 
 
 def _bounds(conn) -> list:
@@ -325,6 +323,7 @@ def _measure(item: dict[str, Any], *, max_px: int, slot_base: float,
         "act": item["act"],
         "lat": item["lat"], "lon": item["lon"], "alt_dem_m": item["alt_dem_m"],
         "place_name": item["place_name"],
+        "day_index": None,          # the `place` sub-step fills it
         "sharpness": round(sharp, 4),
         "exposure_pen": round(pen, 4),
         "stability": None,          # a still does not shake; that is not merit
@@ -1064,6 +1063,62 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
             "n_needs_heif": missing_heif}
 
 
+def place_shots(cfg: Config, conn) -> dict[str, Any]:
+    """S03 `place` -- position, altitude, place name and trek day for every
+    shot, from its moment against the track.
+
+    Always re-run: it is a pure function of the track and the act
+    boundaries, both of which move when S02 does, and it costs seconds. A
+    photograph keeps its own fix -- a phone's GPS at the moment of the shot
+    beats an interpolation -- and gains only what the fix lacks.
+    """
+    bounds = _bounds(conn)
+    span = place_mod.trek_span(bounds) if bounds else None
+    track = place_mod.load_track(conn)
+    max_gap = float(cfg.get("spine.max_interp_gap_s"))
+    srtm = dem_mod.Srtm(cfg.srtm_dir)
+    gaz = geo_mod.Gazetteer(geo_mod.load_geonames(cfg.geonames_path))
+
+    rows = [dict(r) for r in conn.execute(
+        "SELECT shot_id, media_kind, start_utc, lat, lon FROM shots")]
+    updates: list[tuple] = []
+    positioned = dayed = named = 0
+    by_kind: dict[str, list[int]] = {}
+    for r in rows:
+        ts = _dt(r["start_utc"])
+        if r["media_kind"] == "photo" and r["lat"] is not None and r["lon"] is not None:
+            alt, src, name = place_mod.describe(r["lat"], r["lon"], srtm=srtm, gazetteer=gaz)
+            p = place_mod.Placement(r["lat"], r["lon"], alt, src, name,
+                                    place_mod.day_of(ts, span))
+        else:
+            p = place_mod.place_at(track, ts, srtm=srtm, gazetteer=gaz,
+                                   max_gap_s=max_gap, span=span)
+        updates.append((p.lat, p.lon, p.alt_m, p.place_name, p.day_index, r["shot_id"]))
+        tally = by_kind.setdefault(r["media_kind"], [0, 0, 0])
+        tally[0] += 1
+        if p.lat is not None:
+            positioned += 1
+            tally[1] += 1
+        if p.day_index is not None:
+            dayed += 1
+            tally[2] += 1
+        if p.place_name:
+            named += 1
+    conn.executemany("UPDATE shots SET lat=?, lon=?, alt_dem_m=?, place_name=?, "
+                     "day_index=? WHERE shot_id=?", updates)
+    conn.commit()
+    log.info("S03 place: %d shot(s): %d positioned, %d named, %d on a trek day; "
+             "by kind %s", len(rows), positioned, named, dayed,
+             {k: f"{v[1]}/{v[0]} positioned, {v[2]} dayed" for k, v in by_kind.items()})
+    if rows and not positioned:
+        log.warning("S03 place: no shot could be positioned -- is gps_points empty, "
+                    "or every start_utc outside the track?")
+    return {"n_shots": len(rows), "n_positioned": positioned, "n_named": named,
+            "n_dayed": dayed, "n_track_points": len(track),
+            "by_kind": {k: {"n": v[0], "positioned": v[1], "dayed": v[2]}
+                        for k, v in by_kind.items()}}
+
+
 def run(cfg: Config, *, force: bool = False,
         redo: set[str] | None = None) -> dict[str, Any]:
     conn = db.init(cfg.db_path)
@@ -1075,6 +1130,9 @@ def run(cfg: Config, *, force: bool = False,
     steps = [("proxies", lambda: build_proxies(cfg, conn, force=force)),
              ("shots", lambda: detect_shots(cfg, conn)),
              ("photos", lambda: build_photo_shots(cfg, conn)),
+             # Cheap and pure, so it always re-runs: the track and the act
+             # boundaries move whenever S02 does.
+             ("place", lambda: place_shots(cfg, conn)),
              ("metrics", lambda: measure_shots(
                  cfg, conn, force=force or "metrics" in (redo or ()))),
              ("audio", lambda: measure_audio(
@@ -1091,7 +1149,7 @@ def run(cfg: Config, *, force: bool = False,
              ("gate", lambda: apply_gate(cfg, conn))]
     # The gate is a pure function of metrics and thresholds, both of which move
     # while the film is being tuned, so it is never skipped as already done.
-    always = {"gate"} | set(redo or ())
+    always = {"gate", "place"} | set(redo or ())
     if "faces" in always:
         always.add("recluster")          # a fresh detection pass re-clusters itself
     unknown = (redo or set()) - {name for name, _ in steps}
