@@ -1,9 +1,9 @@
 """Command line entry point.
 
     nepal doctor                 check binaries, packages and resolved paths
-    nepal s01 [--force] [--skip-fov] [--skip-clock]
+    nepal s01 [--force] [--skip-fov] [--skip-clock] [--redo UNITS]
     nepal fetch-reference        SRTM tiles + GeoNames gazetteer
-    nepal s02 [--force] [--skip-asr]
+    nepal s02 [--force] [--skip-asr] [--redo UNITS]
     nepal s03 [--force] [--redo STEPS]   per-clip processing
     nepal s04 [--force] [--redo STEPS]   semantic layer (CLIP embeddings)
     nepal cut [--redo score,timeline,draft]  score, assemble, render the draft
@@ -51,10 +51,15 @@ def main(argv: list[str] | None = None) -> int:
     p1.add_argument("--force", action="store_true", help="recompute completed sub-steps")
     p1.add_argument("--skip-fov", action="store_true", help="leave fov_deg at its fallback")
     p1.add_argument("--skip-clock", action="store_true", help="skip audio cross-correlation")
+    p1.add_argument("--redo", metavar="UNITS", default="",
+                    help="comma-separated sub-steps to recompute: manifest,chapters,fov,clock")
 
     p2 = sub.add_parser("s02", help="spine: gps, altitude, places, telegram, music")
     p2.add_argument("--force", action="store_true")
     p2.add_argument("--skip-asr", action="store_true", help="skip round-video transcription")
+    p2.add_argument("--redo", metavar="UNITS", default="",
+                    help="comma-separated sub-steps to recompute: "
+                         "gps_track,telegram,geotag,asr,music,acts")
 
     pf = sub.add_parser("fetch-reference",
                         help="download SRTM elevation tiles and the GeoNames gazetteer")
@@ -122,13 +127,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "s01":
         from nepal.stages import s01_probe
         rep = s01_probe.run(cfg, force=args.force, skip_fov=args.skip_fov,
-                            skip_clock=args.skip_clock)
+                            skip_clock=args.skip_clock,
+                            redo={x.strip() for x in args.redo.split(",") if x.strip()})
         _print_s01(rep)
         return 0
 
     if args.cmd == "s02":
         from nepal.stages import s02_spine
-        rep = s02_spine.run(cfg, force=args.force, skip_asr=args.skip_asr)
+        rep = s02_spine.run(cfg, force=args.force, skip_asr=args.skip_asr,
+                            redo={x.strip() for x in args.redo.split(",") if x.strip()})
         print(json.dumps(rep, indent=2, default=str)[:4000])
         return 0
 

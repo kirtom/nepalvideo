@@ -906,7 +906,16 @@ def print_chronology(cfg: Config) -> int:
 
 # ---------------------------------------------------------------- driver
 
-def run(cfg: Config, *, force: bool = False, skip_asr: bool = False) -> dict[str, Any]:
+S02_UNITS = ("gps_track", "telegram", "geotag", "asr", "music", "acts")
+
+
+def run(cfg: Config, *, force: bool = False, skip_asr: bool = False,
+        redo: set[str] | None = None) -> dict[str, Any]:
+    redo = set(redo or ())
+    unknown = redo - set(S02_UNITS)
+    if unknown:
+        raise SystemExit(f"unknown --redo unit(s): {', '.join(sorted(unknown))}; "
+                         f"valid: {', '.join(S02_UNITS)}")
     conn = db.init(cfg.db_path)
     report: dict[str, Any] = {"stage": STAGE, "started_utc": db.utcnow()}
     done = db.done_units(conn, STAGE)
@@ -927,7 +936,7 @@ def run(cfg: Config, *, force: bool = False, skip_asr: bool = False) -> dict[str
         steps.insert(3, ("asr", lambda: transcribe_round_videos(cfg, conn)))
 
     for name, fn in steps:
-        if not force and name in done:
+        if not force and name in done and name not in redo:
             report[name] = {"skipped": "already done"}
             continue
         report[name] = fn()

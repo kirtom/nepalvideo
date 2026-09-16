@@ -772,12 +772,17 @@ def _read_wav(path: Path):
     return data / 32768.0
 
 
-def apply_offsets(conn, offsets: dict[str, float]) -> int:
+def apply_offsets(conn, offsets: dict[str, float],
+                  overrides: dict[str, str] | None = None) -> int:
     """Write ``created_at_utc`` = created_at + offset for every asset.
 
     The reference device takes offset 0; every other device takes the offset
     S01.5 measured for it. Telegram timestamps come from the server rather than
     a device, so they are already correct and are never shifted.
+
+    ``overrides`` maps a file name to a capture time the operator knows and
+    the file does not: three phone clips on this corpus carry only an export
+    date, and no offset can recover a time that was never recorded.
     """
     from datetime import timedelta
     source_offset = {
@@ -797,6 +802,19 @@ def apply_offsets(conn, offsets: dict[str, float]) -> int:
         conn.execute("UPDATE assets SET created_at_utc=? WHERE asset_id=?",
                      (shifted.astimezone(timezone.utc).isoformat(), r["asset_id"]))
         n += 1
+    conn.commit()
+
+    for name, when in (overrides or {}).items():
+        dt = manifest.parse_exif_datetime(when)
+        if dt is None:
+            log.warning("S01 capture_time_overrides: cannot parse %r for %s", when, name)
+            continue
+        cur = conn.execute("UPDATE assets SET created_at_utc=? WHERE s3_key LIKE ?",
+                           (dt.astimezone(timezone.utc).isoformat(), f"%/{name}"))
+        if cur.rowcount:
+            log.info("S01 %s: capture time set to %s by operator override", name, when)
+        else:
+            log.warning("S01 capture_time_overrides names %s, which is not an asset", name)
     conn.commit()
 
     conn.execute("""
@@ -826,22 +844,36 @@ def stored_offsets(conn) -> dict[str, float]:
 
 # ---------------------------------------------------------------- driver
 
+S01_UNITS = ("manifest", "chapters", "fov", "clock")
+
+
 def run(cfg: Config, *, force: bool = False, skip_fov: bool = False,
-        skip_clock: bool = False) -> dict[str, Any]:
+        skip_clock: bool = False, redo: set[str] | None = None) -> dict[str, Any]:
+    redo = set(redo or ())
+    unknown = redo - set(S01_UNITS)
+    if unknown:
+        raise SystemExit(f"unknown --redo unit(s): {', '.join(sorted(unknown))}; "
+                         f"valid: {', '.join(S01_UNITS)}")
     conn = db.init(cfg.db_path)
     report: dict[str, Any] = {"stage": STAGE, "started_utc": db.utcnow()}
     done = db.done_units(conn, STAGE)
     report["skipped_stale"] = freshness.warn_if_stale(
         log, conn, STAGE, force=force,
         rerun_hint="nepal s01 --force --skip-fov --skip-clock")
+    overrides = dict(cfg.get("probe.capture_time_overrides", {}) or {})
 
-    if force or "manifest" not in done:
+    def wanted(unit: str) -> bool:
+        # --force redoes everything; --redo names units; otherwise only what
+        # has never completed runs.
+        return force or unit in redo or unit not in done
+
+    if wanted("manifest"):
         report["manifest"] = build_manifest(cfg, conn, force=force)
         db.mark_unit(conn, STAGE, "manifest", detail=json.dumps(report["manifest"]))
     else:
         report["manifest"] = {"skipped": "already done"}
 
-    if force or "chapters" not in done:
+    if wanted("chapters"):
         report["chapters"] = group_chapters(cfg, conn)
         db.mark_unit(conn, STAGE, "chapters", detail=json.dumps(report["chapters"]))
     else:
@@ -854,10 +886,10 @@ def run(cfg: Config, *, force: bool = False, skip_fov: bool = False,
     # Re-solving the clocks to avoid that is wasted work -- the offsets are
     # recorded decisions, so replay them instead. This is the path a fix to the
     # manifest alone should take: minutes rather than an hour of GCC-PHAT.
-    clock_will_run = not skip_clock and (force or "clock" not in done)
+    clock_will_run = not skip_clock and wanted("clock")
     if "skipped" not in report["manifest"] and not clock_will_run:
         offsets = stored_offsets(conn)
-        report["applied_utc_to_assets"] = apply_offsets(conn, offsets)
+        report["applied_utc_to_assets"] = apply_offsets(conn, offsets, overrides)
         log.info("S01 the manifest changed but the clocks did not: re-derived "
                  "created_at_utc for %d asset(s) from the stored offsets (%s)",
                  report["applied_utc_to_assets"],
@@ -869,7 +901,7 @@ def run(cfg: Config, *, force: bool = False, skip_fov: bool = False,
 
     if skip_fov:
         report["fov"] = {"skipped": "--skip-fov"}
-    elif force or "fov" not in done:
+    elif wanted("fov"):
         fr = solve_fov(cfg, conn)
         db.set_decision(conn, "fov_deg", fr.fov_deg, fr.confidence, fr.method)
         report["fov"] = {k: v for k, v in asdict(fr).items() if k != "scores"}
@@ -881,7 +913,7 @@ def run(cfg: Config, *, force: bool = False, skip_fov: bool = False,
 
     if skip_clock:
         report["clock"] = {"skipped": "--skip-clock"}
-    elif force or "clock" not in done:
+    elif wanted("clock"):
         results = solve_clocks(cfg, conn)
         offsets = {}
         report["clock"] = {}
@@ -895,7 +927,7 @@ def run(cfg: Config, *, force: bool = False, skip_fov: bool = False,
                 "pairs_accepted": r.n_pairs_accepted, "spread_s": r.spread_s,
                 "needs_manual": r.needs_manual,
             }
-        report["applied_utc_to_assets"] = apply_offsets(conn, offsets)
+        report["applied_utc_to_assets"] = apply_offsets(conn, offsets, overrides)
         db.mark_unit(conn, STAGE, "clock")
     else:
         report["clock"] = {"skipped": "already done"}
