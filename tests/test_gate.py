@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from nepal.process.gate import verdict
+from nepal.process.gate import has_face, verdict
 
 CAMERA = {"min_sharpness": 4.0, "max_exposure_pen": 0.15,
           "min_stability": 0.35, "min_duration_s": 1.5}
@@ -80,3 +80,17 @@ def test_a_photograph_is_never_shaky():
 
 def test_duration_is_checked_even_without_metrics():
     assert verdict({"start_s": 0.0, "end_s": 0.5}, CAMERA) == "too short"
+
+
+# -- has_face (Film v2 step 1) ------------------------------------------
+
+@pytest.mark.parametrize("score,cluster,want", [
+    (0.83, "keller", 1),
+    (0.83, None, 1),        # detected, not attributed to a known person
+    (0.30, None, 0),        # below the detector floor: a buckle, lichen
+    (0.0, None, 0),         # looked at, nothing there
+    (None, None, 0),        # never looked at
+    (None, "kulikov", 1),   # re-clustered from stored embeddings after a re-detect
+])
+def test_has_face_is_derived_from_what_was_measured(score, cluster, want):
+    assert has_face(score, cluster, min_det_score=0.55) == want

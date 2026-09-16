@@ -27,6 +27,25 @@ from typing import Any, Mapping
 
 SPEECH_SHARPNESS_FACTOR = 0.6
 SPEECH_MIN_DURATION_S = 1.0
+FACE_MIN_DET_SCORE = 0.55
+
+
+def has_face(face_score: float | None, face_cluster: str | None, *,
+             min_det_score: float = FACE_MIN_DET_SCORE) -> int:
+    """Whether the shot shows a face, from what S03.6 stored.
+
+    Derived at gate time rather than trusted from detection time, like
+    stability and the audio flags: S03.2's re-detection replaces shot rows
+    and the recluster step restores only the cluster label from the stored
+    embeddings, so the flag written at detection time did not survive -- on
+    the first draft `has_face` was 0 on every row while 347 carried a
+    cluster, and the subject constraint and the context term were dead.
+    """
+    if face_cluster:
+        return 1
+    if face_score is None:
+        return 0
+    return int(float(face_score) >= float(min_det_score))
 
 
 def verdict(shot: Mapping[str, Any], curve: Mapping[str, float], *,

@@ -885,7 +885,7 @@ def apply_gate(cfg: Config, conn) -> dict[str, Any]:
     rows = [dict(r) for r in conn.execute(
         "SELECT s.shot_id, s.media_kind, s.start_s, s.end_s, s.sharpness, "
         "s.exposure_pen, s.stability, s.jerk_px, s.has_speech, s.speech_s, "
-        "s.wind_lf_share, s.act, "
+        "s.wind_lf_share, s.act, s.face_score, s.face_cluster, "
         "COALESCE(a.quality_curve, ra.quality_curve, 'camera') AS curve "
         "FROM shots s "
         "LEFT JOIN assets a ON a.asset_id = s.asset_id "
@@ -915,6 +915,14 @@ def apply_gate(cfg: Config, conn) -> dict[str, Any]:
         if r["speech_s"] is not None:
             r["has_speech"] = int(audio_mod.has_speech(r["speech_s"], min_s=speech_min))
     refresh_audio_flags(cfg, conn)
+
+    # Faces, the same way: a fact derived from the stored score and label.
+    min_det = float(cfg.get("process.face_min_det_score", gate_mod.FACE_MIN_DET_SCORE))
+    faces = [(gate_mod.has_face(r["face_score"], r["face_cluster"], min_det_score=min_det),
+              r["shot_id"]) for r in rows]
+    conn.executemany("UPDATE shots SET has_face=? WHERE shot_id=?", faces)
+    n_faces = sum(f for f, _ in faces)
+    log.info("S03.7 %d shot(s) show a face", n_faces)
 
     speech_factor = float(cfg.get("gate.speech_sharpness_factor",
                                   gate_mod.SPEECH_SHARPNESS_FACTOR))
@@ -957,7 +965,7 @@ def apply_gate(cfg: Config, conn) -> dict[str, Any]:
     return {"n_shots": len(rows), "n_kept": kept, "reasons": reasons,
             "by_curve": {k: {"n": n, "kept": ok} for k, (n, ok) in by_curve.items()},
             "survivors_by_act": {str(k): v for k, v in surviving_by_act.items()},
-            "n_unmeasured": unmeasured}
+            "n_unmeasured": unmeasured, "n_with_face": n_faces}
 
 
 def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
