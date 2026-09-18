@@ -1,0 +1,47 @@
+#!/bin/bash
+# Film v2 step 3 on the box, detached. The whole suite (the fast tests on
+# the box for the first time with the SDK installed, and the slow ones);
+# the beat-sheet prompt written and priced before anything is re-made;
+# then the re-transcription with word timestamps, which is the long part
+# (about 0.7x realtime on 8 cores over two hours of speech), with the
+# hallucination filter and the gate following inside S03; then the prompt
+# again, now with cut points inside the shots. No live call: that needs
+# the anthropic-api-key metadata, which the operator sets.
+#
+#   nepal remote exec -- 'nohup tools/cloud/jobs-step3.sh >/dev/null 2>&1 &'
+#   ... then read /data/projects/nepal_work/reports/remote_jobs.log
+set -uo pipefail
+cd /data/projects/nepalvideo
+N=.venv/bin/nepal
+WORK=/data/projects/nepal_work
+LOG=$WORK/reports/remote_jobs.log
+FULL=$WORK/reports/remote_jobs
+B=gs://nepalvideo-29922345852
+mkdir -p "$FULL"
+
+stage() {  # stage <name> <grep pattern> -- <command...>
+  local name=$1 pat=$2; shift 2; [ "$1" = "--" ] && shift
+  echo "--- $name $(date -u +%T)"
+  "$@" > "$FULL/$name.log" 2>&1
+  local rc=$?
+  grep -E "$pat" "$FULL/$name.log" | grep -v "reading faces\|measuring\|detecting\|placing assets\|transcribing" | tail -${TAIL:-14}
+  if grep -q "Traceback" "$FULL/$name.log"; then
+    echo "!!! $name raised; the traceback:"; grep -A 12 "Traceback" "$FULL/$name.log" | tail -14
+  fi
+  echo "    ($name exit $rc, $(date -u +%T))"
+}
+
+{
+echo "=== jobs start $(date -u +%FT%TZ) on $(hostname), $(nproc) cores, step 3"
+TAIL=4 stage tests "passed|failed|error" -- \
+  .venv/bin/python -m pytest -q -p no:cacheprovider -m "slow or not slow"
+TAIL=8 stage beats-dry-1 "S04\.5|WARN|ERROR" -- $N --no-progress beats --dry-run
+# The filter and the gate run inside S03 after the transcription; every
+# other sub-step resumes through the data and costs nothing.
+TAIL=24 stage s03 "S03\.[0-9]|S03 place|WARN|ERROR" -- $N --no-progress s03 --redo asr
+TAIL=8 stage beats-dry-2 "S04\.5|WARN|ERROR" -- $N --no-progress beats --dry-run
+echo "--- push $(date -u +%T)"
+$N status-page >/dev/null 2>&1
+gcloud storage rsync --recursive "$WORK" "$B/work" 2>&1 | tail -1
+echo "=== jobs done $(date -u +%FT%TZ)"
+} > "$LOG" 2>&1
