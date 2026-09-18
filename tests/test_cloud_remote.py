@@ -78,6 +78,12 @@ def test_up_creates_when_absent_then_starts_when_stopped(env):
     r.up(wait=True)
     verbs = [c[2] for c in calls(tmp) if c[:2] == ["compute", "instances"]]
     assert "start" in verbs and "create" not in verbs
+    # the box boots the startup script in its metadata, so a start first
+    # pushes the checkout's copy
+    assert verbs.index("add-metadata") < verbs.index("start")
+    meta = next(c for c in calls(tmp) if c[2:3] == ["add-metadata"])
+    assert any(a.startswith("--metadata-from-file=startup-script=") and
+               a.endswith("bootstrap-gcp.sh") for a in meta)
 
 
 def test_down_records_the_hours_in_the_ledger(env):

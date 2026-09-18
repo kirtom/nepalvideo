@@ -62,12 +62,27 @@ if [ -f tools/cloud/ops-agent.yaml ] && [ -d /etc/google-cloud-ops-agent ]; then
   systemctl restart google-cloud-ops-agent || true
 fi
 
-# -- the API key, from metadata into the user's environment -------------
-KEY="$(md anthropic-api-key)"
-if [ -n "$KEY" ]; then
-  grep -q ANTHROPIC_API_KEY /home/$USER_NAME/.profile 2>/dev/null || \
-    echo "export ANTHROPIC_API_KEY=$KEY" >> /home/$USER_NAME/.profile
+# -- the API key: fetched from metadata at every login, never on disk ----
+# The first version copied the value into .profile, and `set -x` traced it
+# into this log, syslog and Cloud Logging. The profile now holds the fetch,
+# not the key; a rotated key reaches the next login with no reboot. The
+# sed drops that first version's line and leaves the fetch alone.
+PROFILE_RC=/home/$USER_NAME/.profile
+sed -i '/^export ANTHROPIC_API_KEY=/{/metadata.google.internal/!d}' $PROFILE_RC 2>/dev/null || true
+if ! grep -q 'attributes/anthropic-api-key' $PROFILE_RC 2>/dev/null; then
+  cat >> $PROFILE_RC <<'EOF'
+_k="$(curl -sf -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/anthropic-api-key)"
+[ -n "$_k" ] && export ANTHROPIC_API_KEY="$_k"; unset _k
+EOF
+  chown $USER_NAME:$USER_NAME $PROFILE_RC
 fi
+
+# -- the user's systemd manager outlives its sessions --------------------
+# The snap-packaged gcloud registers a scope in the user's manager when one
+# is running. `nepal remote up` probes readiness over ssh every 15 s as this
+# user; a probe that overlapped the rsync below started that manager, and
+# its logout stopped it and killed the rsync (exit 143, READY never written).
+loginctl enable-linger $USER_NAME || true
 
 # -- the bucket -> the same paths the config names -----------------------
 if [ -n "$BUCKET" ]; then

@@ -36,8 +36,9 @@ MODE=${1:-full}       # full | resume: the corrected chain | beats: the live cal
 echo "=== jobs start $(date -u +%FT%TZ) on $(hostname), $(nproc) cores, step 3 ($MODE)"
 if [ "$MODE" = "beats" ]; then
 # The live call, detached like everything else: an ssh session that drops
-# mid-answer would take the answer with it. Needs ANTHROPIC_API_KEY, which
-# the bootstrap puts in ~/.profile from the anthropic-api-key metadata.
+# mid-answer would take the answer with it. Needs ANTHROPIC_API_KEY: the
+# profile line the bootstrap wrote fetches it from the anthropic-api-key
+# metadata at every login, so the key is never on the disk or in a log.
 . ~/.profile 2>/dev/null
 [ -n "${ANTHROPIC_API_KEY:-}" ] || echo "!!! ANTHROPIC_API_KEY is not set on this box (no anthropic-api-key metadata at boot?)"
 TAIL=30 stage beats "S04\.5|WARN|ERROR" -- $N --no-progress beats

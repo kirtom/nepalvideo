@@ -72,6 +72,11 @@ class Remote:
             self.gcloud.run(gce.create_args(self.profile, project=self.project, zone=self.zone,
                                             startup_script=self.startup_script, metadata=meta))
         elif st.state in ("TERMINATED", "STOPPING"):
+            # The checkout's bootstrap, every start: the box boots the
+            # startup script in its metadata, not the one in the branch.
+            self.gcloud.run(gce.startup_script_args(self.profile.name, project=self.project,
+                                                    zone=self.zone,
+                                                    startup_script=self.startup_script))
             log.info("remote: starting %s", self.profile.name)
             self.gcloud.run(gce.start_args(self.profile.name, project=self.project,
                                            zone=self.zone))

@@ -75,6 +75,15 @@ def describe_args(name: str, *, project: str, zone: str) -> list[str]:
     return _base(name, "describe", project=project, zone=zone) + ["--format=json"]
 
 
+def startup_script_args(name: str, *, project: str, zone: str,
+                        startup_script: Path) -> list[str]:
+    # A box runs the startup script it was created with; nothing on it
+    # pulls a newer one. The first fix to the bootstrap never reached the
+    # box until this call existed.
+    return _base(name, "add-metadata", project=project, zone=zone) + [
+        f"--metadata-from-file=startup-script={startup_script}"]
+
+
 def start_args(name: str, *, project: str, zone: str) -> list[str]:
     return _base(name, "start", project=project, zone=zone)
 
