@@ -68,6 +68,8 @@ def test_ssh_args_pass_a_command_through():
     assert "--" not in args
     plain = gce.ssh_args("nepal-cpu", project="p", zone="z")
     assert not any(a.startswith("--command") for a in plain)
+    as_user = gce.ssh_args("nepal-cpu", project="p", zone="z", user="nepal")
+    assert as_user[2] == "nepal@nepal-cpu"
 
 
 def test_parse_describe_reads_state_and_ip():

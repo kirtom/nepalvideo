@@ -477,5 +477,7 @@ cloud:
     remote_data_root: /data/projects/nepal_data
     remote_work_root: /data/projects/nepal_work
     remote_repo: /data/projects/nepalvideo
+    # The box's user, who owns the checkout and the data; ssh logs in as it.
+    ssh_user: nepal
     # How long `up` waits for the startup script to write its READY marker.
     ready_timeout_s: 1500

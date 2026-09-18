@@ -86,8 +86,12 @@ def delete_args(name: str, *, project: str, zone: str) -> list[str]:
 
 
 def ssh_args(name: str, *, project: str, zone: str,
-             command: str | None = None) -> list[str]:
-    args = ["compute", "ssh", name, f"--project={project}", f"--zone={zone}",
+             command: str | None = None, user: str | None = None) -> list[str]:
+    # Log in as the user that owns the checkout and the data on the box.
+    # Without this gcloud uses the local login name, and git refuses to
+    # touch a repository owned by somebody else ("dubious ownership").
+    target = f"{user}@{name}" if user else name
+    args = ["compute", "ssh", target, f"--project={project}", f"--zone={zone}",
             "--quiet"]
     if command is not None:
         args.append(f"--command={command}")

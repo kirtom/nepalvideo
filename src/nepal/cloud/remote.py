@@ -37,6 +37,7 @@ class Remote:
         self.remote_repo = str(g["remote_repo"])
         self.remote_work = str(g["remote_work_root"])
         self.remote_data = str(g["remote_data_root"])
+        self.ssh_user = str(g.get("ssh_user", "nepal"))
         self.ready_timeout = float(g.get("ready_timeout_s", 1500))
         self.gcloud = gcloud or Gcloud(g.get("gcloud", "gcloud"))
         self.state_path = cfg.work_root / "reports" / "remote_state.json"
@@ -86,7 +87,7 @@ class Remote:
         deadline = time.monotonic() + self.ready_timeout
         probe = "test -f /data/projects/READY"
         while time.monotonic() < deadline:
-            proc = self.gcloud.run(gce.ssh_args(self.profile.name, project=self.project,
+            proc = self.gcloud.run(gce.ssh_args(self.profile.name, project=self.project, user=self.ssh_user,
                                                 zone=self.zone, command=probe), check=False)
             if proc.returncode == 0:
                 log.info("remote: %s is ready", self.profile.name)
@@ -130,18 +131,21 @@ class Remote:
         pull = (f"gcloud storage rsync --recursive {self.bucket}/raw {self.remote_data} && "
                 f"gcloud storage rsync --recursive {self.bucket}/work {self.remote_work}")
         push = f"gcloud storage rsync --recursive {self.remote_work} {self.bucket}/work"
-        return (f"cd {self.remote_repo} && git fetch -q origin {self.branch} && "
+        # A --command runs in a non-login shell, so the profile (and the API
+        # key the bootstrap put in it) is sourced by hand.
+        return (f". ~/.profile 2>/dev/null; cd {self.remote_repo} && "
+                f"git fetch -q origin {self.branch} && "
                 f"git reset -q --hard origin/{self.branch} && "
                 f".venv/bin/pip install -q -e '.[{EXTRAS}]' && {pull} && "
                 f"({command}); rc=$?; {push}; exit $rc")
 
     def exec_cmd(self, command: str) -> int:
-        return self.gcloud.stream(gce.ssh_args(self.profile.name, project=self.project,
+        return self.gcloud.stream(gce.ssh_args(self.profile.name, project=self.project, user=self.ssh_user,
                                                zone=self.zone, command=self._wrap(command)))
 
     def run_nepal(self, args: Sequence[str]) -> int:
         return self.exec_cmd(".venv/bin/nepal " + " ".join(shlex.quote(a) for a in args))
 
     def ssh(self) -> int:
-        return self.gcloud.stream(gce.ssh_args(self.profile.name, project=self.project,
+        return self.gcloud.stream(gce.ssh_args(self.profile.name, project=self.project, user=self.ssh_user,
                                                zone=self.zone))
