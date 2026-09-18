@@ -133,19 +133,10 @@ def missing_levity(chosen: Sequence[Mapping[str, Any]], *, minimum: int) -> int:
     return max(0, int(minimum) - have)
 
 
-def speech_first(candidates: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
-    """Speech-carrying shots ahead of the rest, each group by score.
-
-    Section 1.4 makes speech the spine of the film, and the spec says every
-    transcribed moment that survives Gate 2 is placed -- so speech is not a
-    scoring bonus to be outweighed, it is a claim on a slot. Ordering the
-    candidate list this way means the MMR fill reaches for silence only once
-    the voices are in.
-    """
-    def key(s: Mapping[str, Any]) -> tuple:
-        speaks = bool(s.get("has_speech") and (s.get("transcript") or "").strip())
-        return (0 if speaks else 1, -float(s.get("score_total") or 0.0))
-    return sorted(candidates, key=key)
+# `speech_first` lived here until Film v2 step 3: speech-carrying shots ahead
+# of the rest, so the fill reached for silence only once the voices were in.
+# It placed two whisper hallucinations first in their acts. The voice of the
+# film is now chosen by reading (the beat sheet, S04.5), not by a flag.
 
 
 def shot_available_s(shot: Mapping[str, Any]) -> float:

@@ -535,11 +535,17 @@ beats:
   max_pairs: 5
   # a cut point must sit on a segment or word boundary this close
   cut_tolerance_s: 0.05
+  # a time this close to a cut point is a rounding and is snapped onto it
+  snap_s: 0.5
+  title_max_chars: 80
   # one more call with the validator's complaints, then give up
   retries: 1
   # the two refusals before any money is spent
   max_input_tokens: 200000
   estimate_usd_cap: 3.0
+  # for the dry run on a machine without the SDK: Cyrillic runs about three
+  # characters a token; the live call counts for real before it spends
+  estimate_chars_per_token: 3.0
   # long messages are clipped in the prompt; a card is 180 characters anyway
   chat_max_chars: 500
 

@@ -88,6 +88,13 @@ def main(argv: list[str] | None = None) -> int:
     p4.add_argument("--redo", metavar="STEPS", default="",
                     help="comma-separated sub-steps to recompute: embeddings")
 
+    pb = sub.add_parser("beats", help="S04.5 -- the beat sheet: Claude reads every "
+                                      "transcript and the chat (Film v2 section 4.2)")
+    pb.add_argument("--force", action="store_true",
+                    help="call again even though story_beats has rows (about a dollar)")
+    pb.add_argument("--dry-run", action="store_true",
+                    help="write the prompt and the estimate to work/beats/, call nothing")
+
     pcut = sub.add_parser("cut", help="S05-S07 -- score, assemble and render the draft")
     pcut.add_argument("--force", action="store_true")
     pcut.add_argument("--redo", metavar="STEPS", default="score,timeline,draft",
@@ -186,6 +193,29 @@ def main(argv: list[str] | None = None) -> int:
         redo = {x.strip() for x in args.redo.split(",") if x.strip()}
         rep = s04_semantic.run(cfg, force=args.force, redo=redo)
         print(json.dumps(rep, indent=2, default=str)[:2000])
+        return 0
+
+    if args.cmd == "beats":
+        from nepal.stages import s045_beats
+        try:
+            rep = s045_beats.run(cfg, force=args.force, dry_run=args.dry_run)
+        except (s045_beats.BeatsRefused, s045_beats.BeatsInvalid) as exc:
+            print(f"S04.5 {exc}")
+            for err in getattr(exc, "errors", [])[:20]:
+                print(f"  - {err}")
+            return 1
+        if rep.get("skipped"):
+            print(f"S04.5 {rep['skipped']}")
+            return 0
+        print(f"S04.5 {rep['input_tokens']} input tokens ({rep['tokens_how']}), "
+              f"estimate {rep['estimate_usd']:.2f} USD, ledger {rep['ledger_usd']:.2f} USD")
+        if rep.get("dry_run"):
+            print(f"      dry run: prompt at {cfg.work_root / 'beats' / 'prompt.txt'}")
+            return 0
+        print(f"      {rep['title']!r}: {rep['n_speech']} speech beats {rep['per_act']}, "
+              f"{rep['n_quotes']} quotes, {rep['n_pairs']} pairs; {rep['attempts']} attempt(s), "
+              f"{rep['usd']:.2f} USD")
+        print(f"      Gate 2: {rep['gate2']}")
         return 0
 
     if args.cmd == "cut":

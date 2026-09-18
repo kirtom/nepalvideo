@@ -157,7 +157,12 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         def admissible(c, chosen, _cap=place_cap):
             return asm.place_count_ok(c, chosen, limit=_cap)
 
-        picked = asm.mmr_select(asm.speech_first(act_rows), budget=budget,
+        # Speech is no longer a claim on a slot here: the beat sheet (S04.5)
+        # chooses the voice by reading, and assembly v2 builds around it.
+        # Until that lands, the fill is by score alone, ties by id.
+        by_score = sorted(act_rows, key=lambda r: (-float(r.get("score_total") or 0.0),
+                                                   str(r.get("shot_id"))))
+        picked = asm.mmr_select(by_score, budget=budget,
                                 embeddings=embeddings, lam=lam, admissible=admissible)
         ordered = asm.chronological(picked)
         laid = asm.lay_out(ordered, start_s=t, duration_range=rng,

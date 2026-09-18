@@ -127,19 +127,13 @@ def test_levity_is_owed_until_it_is_present():
     assert assemble.missing_levity([shot("a", tag_levity=1)], minimum=1) == 0
 
 
-# -- speech is the spine -----------------------------------------------
+# -- speech is the spine, but not here -----------------------------------
 
-def test_speech_shots_are_offered_before_silent_ones_even_when_they_score_less():
-    """Section 1.4: speech is a claim on a slot, not a scoring bonus that a
-    prettier silent shot can outweigh."""
-    cands = [shot("pretty", 0.95),
-             shot("talks", 0.40, has_speech=1, transcript="мы идём наверх")]
-    assert [s["shot_id"] for s in assemble.speech_first(cands)] == ["talks", "pretty"]
-
-
-def test_a_speech_flag_with_no_words_is_not_speech():
-    cands = [shot("pretty", 0.9), shot("flagged", 0.4, has_speech=1, transcript="  ")]
-    assert [s["shot_id"] for s in assemble.speech_first(cands)] == ["pretty", "flagged"]
+def test_speech_is_no_longer_a_claim_on_a_slot_in_the_fill():
+    """Film v2 section 4.3: `speech_first` is gone. The voice of the film is
+    chosen by reading (the beat sheet); the fill does not reorder on a flag
+    that two whisper hallucinations once carried to the front of their acts."""
+    assert not hasattr(assemble, "speech_first")
 
 
 # -- layout ------------------------------------------------------------
