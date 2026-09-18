@@ -112,9 +112,12 @@ def test_s03_2_finds_the_cut_where_it_actually_is(project):
 @needs_tools
 def test_video_shots_carry_their_moment_act_and_position(project):
     pytest.importorskip("scenedetect")
-    from nepal.stages.s03_process import detect_shots
+    from nepal.stages.s03_process import detect_shots, place_shots
     cfg, conn = project
     detect_shots(cfg, conn)
+    # Detection gives a shot its moment and its act; the `place` step, run
+    # right after it in the pipeline, gives it its position from the track.
+    place_shots(cfg, conn)
     rows = [dict(r) for r in conn.execute(
         "SELECT * FROM shots WHERE media_kind='video' ORDER BY start_s")]
     assert all(r["act"] == 4 for r in rows)

@@ -152,8 +152,11 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
 
         st = path.stat()
         prev = known.get(f"raw/{rel}")
+        # Millisecond tolerance, not a second: a file rewritten within the
+        # same second with content of the same length is a changed file, and
+        # on a fast box that is exactly what a test (or an export) does.
         if prev and prev[1] == st.st_size and prev[2] is not None and \
-                abs(float(prev[2]) - st.st_mtime) < 1.0:
+                abs(float(prev[2]) - st.st_mtime) < 1e-3:
             asset_id = prev[0]                 # same bytes as last time, by size and mtime
             reused += 1
         else:

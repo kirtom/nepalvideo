@@ -48,6 +48,8 @@ def test_an_unchanged_file_is_not_hashed_again(tmp_path, monkeypatch):
     monkeypatch.setattr(s01_probe, "sha256_file", lambda p: (calls.append(p), real(p))[1])
     second = s01_probe.build_manifest(cfg, conn)
     assert second["n_hash_reused"] == 1 and calls == []
+    # Same length on purpose: only the mtime says the bytes changed, and on a
+    # fast machine the rewrite lands within the same second as the probe.
     (data / "media_from_phones" / "keller" / "IMG_1.jpg").write_bytes(b"\xff\xd8changed!")
     third = s01_probe.build_manifest(cfg, conn)
     assert third["n_hash_reused"] == 0 and len(calls) == 1
