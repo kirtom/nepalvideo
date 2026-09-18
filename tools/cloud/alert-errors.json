@@ -1,0 +1,23 @@
+{
+  "displayName": "nepal pipeline error",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "an ERROR or a Traceback in the stage logs",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/nepal_errors\" resource.type=\"gce_instance\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "aggregations": [
+          {"alignmentPeriod": "300s", "perSeriesAligner": "ALIGN_SUM"}
+        ]
+      }
+    }
+  ],
+  "alertStrategy": {"autoClose": "1800s"},
+  "documentation": {
+    "content": "A stage on the nepal box logged an ERROR or raised. Read the full stage log under work/reports/remote_jobs/ in the bucket, or the Pipeline log panel on the nepal dashboard.",
+    "mimeType": "text/markdown"
+  }
+}

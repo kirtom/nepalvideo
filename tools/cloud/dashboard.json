@@ -1,0 +1,83 @@
+{
+  "displayName": "nepal",
+  "mosaicLayout": {
+    "columns": 12,
+    "tiles": [
+      {
+        "xPos": 0, "yPos": 0, "width": 4, "height": 4,
+        "widget": {
+          "title": "CPU",
+          "xyChart": {
+            "dataSets": [{
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "metric.type=\"compute.googleapis.com/instance/cpu/utilization\" resource.type=\"gce_instance\"",
+                  "aggregation": {"alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_MEAN"}
+                }
+              },
+              "plotType": "LINE",
+              "legendTemplate": "${resource.labels.instance_id}"
+            }],
+            "yAxis": {"scale": "LINEAR"}
+          }
+        }
+      },
+      {
+        "xPos": 4, "yPos": 0, "width": 4, "height": 4,
+        "widget": {
+          "title": "Memory",
+          "xyChart": {
+            "dataSets": [{
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "metric.type=\"agent.googleapis.com/memory/percent_used\" resource.type=\"gce_instance\" metric.label.\"state\"=\"used\"",
+                  "aggregation": {"alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_MEAN"}
+                }
+              },
+              "plotType": "LINE"
+            }],
+            "yAxis": {"scale": "LINEAR"}
+          }
+        }
+      },
+      {
+        "xPos": 8, "yPos": 0, "width": 4, "height": 4,
+        "widget": {
+          "title": "Disk",
+          "xyChart": {
+            "dataSets": [{
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "metric.type=\"agent.googleapis.com/disk/percent_used\" resource.type=\"gce_instance\" metric.label.\"state\"=\"used\" metric.label.\"device\"=\"sda1\"",
+                  "aggregation": {"alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_MEAN"}
+                }
+              },
+              "plotType": "LINE"
+            }],
+            "yAxis": {"scale": "LINEAR"}
+          }
+        }
+      },
+      {
+        "xPos": 0, "yPos": 4, "width": 12, "height": 9,
+        "widget": {
+          "title": "Pipeline log",
+          "logsPanel": {
+            "filter": "logName=\"projects/nepalvideo/logs/nepal_pipeline\"",
+            "resourceNames": ["projects/nepalvideo"]
+          }
+        }
+      },
+      {
+        "xPos": 0, "yPos": 13, "width": 12, "height": 2,
+        "widget": {
+          "title": "Where else to look",
+          "text": {
+            "content": "**Status page** (funnel, latest stage, spend, last run): [work/status/index.html in the bucket](https://console.cloud.google.com/storage/browser/_details/nepalvideo-29922345852/work/status/index.html?project=nepalvideo) — open its *Authenticated URL*.  \n**Spend ledger:** work/reports/spend.json in the bucket.  \n**Billing:** [console](https://console.cloud.google.com/billing?project=nepalvideo). Budget \"nepal\": 60 USD, alerts at 50% and 80%.",
+            "format": "MARKDOWN"
+          }
+        }
+      }
+    ]
+  }
+}
