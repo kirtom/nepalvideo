@@ -8,9 +8,11 @@ the ffmpeg graphs in S03 and S07.
 Two decisions are baked in. Spot VMs stop rather than terminate on
 preemption (`--instance-termination-action=STOP`), so the disk and everything
 pulled onto it survive and `nepal remote up` simply starts it again. And the
-box gets the `storage-rw` scope and nothing else: it needs the bucket, and a
-box that can only read and write one bucket is a box whose compromise costs
-one bucket.
+box gets the `storage-rw` scope plus the two the Ops Agent needs to ship logs
+and metrics, and nothing else: a box that can only read and write one bucket
+and its own telemetry is a box whose compromise costs one bucket. The first
+box had storage only, and the agent was refused for insufficient scopes while
+every chart stayed empty.
 """
 from __future__ import annotations
 
@@ -55,7 +57,7 @@ def create_args(p: Profile, *, project: str, zone: str, startup_script: Path,
         f"--machine-type={p.machine_type}",
         f"--image-family={p.image_family}", f"--image-project={p.image_project}",
         f"--boot-disk-size={p.disk_gb}GB", "--boot-disk-type=pd-balanced",
-        "--scopes=storage-rw",
+        "--scopes=storage-rw,logging-write,monitoring-write",
         f"--metadata-from-file=startup-script={startup_script}",
         "--labels=project=nepal",
     ]

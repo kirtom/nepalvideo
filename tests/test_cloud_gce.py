@@ -30,7 +30,7 @@ def test_create_args_for_a_spot_cpu_box(tmp_path):
     assert "--boot-disk-size=60GB" in args
     assert f"--metadata-from-file=startup-script={script}" in args
     assert "--metadata=nepal-profile=cpu" in args
-    assert "--scopes=storage-rw" in s                        # the bucket, nothing more
+    assert "--scopes=storage-rw,logging-write,monitoring-write" in s   # the bucket, and the agent
     assert "--accelerator" not in s and "--maintenance-policy" not in s
 
 
