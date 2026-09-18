@@ -1,4 +1,5 @@
 """The SQLite layer: schema, migrations, and the generic upsert."""
+import sqlite3
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
@@ -45,8 +46,8 @@ def test_delete_shots_takes_the_slots_with_them(tmp_path):
     conn.executemany("INSERT INTO shots(shot_id, recording_id, asset_id, media_kind, start_s, end_s) "
                      "VALUES (?,?,?,?,0,3)", [("r1#0", "r1", None, "video"),
                                              ("photo_a1", None, "a1", "photo")])
-    conn.executemany("INSERT INTO timeline(slot_index, act, shot_id, t_in, t_out) VALUES (?,1,?,0,3)",
-                     [(0, "r1#0"), (1, "photo_a1")])
+    conn.executemany("INSERT INTO timeline(slot_index, act, kind, shot_id, t_in, t_out) "
+                     "VALUES (?,1,?,?,0,3)", [(0, "video", "r1#0"), (1, "photo", "photo_a1")])
     conn.commit()
     assert db.delete_shots(conn, recording_id="r1") == 1
     assert db.delete_shots(conn, asset_id="a1") == 1
@@ -91,3 +92,31 @@ def test_an_older_db_gains_the_voice_spine_columns(tmp_path):
     row = conn.execute("SELECT transcript_json, hallucinated FROM shots").fetchone()
     assert row["transcript_json"] is None and row["hallucinated"] is None
     assert conn.execute("SELECT COUNT(*) FROM story_beats").fetchone()[0] == 0
+
+
+def test_a_fresh_db_has_the_picture_and_audio_tables(tmp_path):
+    conn = db.init(tmp_path / "n.sqlite")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(timeline)")}
+    assert {"kind", "secondary_shot_id", "secondary_src_in", "motion", "speed",
+            "transition", "beat_id", "scene_id"} <= cols
+    assert {r[1] for r in conn.execute("PRAGMA table_info(audio_cues)")} >= {
+        "cue_id", "track", "t_in", "t_out", "source", "src_in", "src_out",
+        "gain_lufs", "fade_in_s", "fade_out_s", "beat_id"}
+    assert {r[1] for r in conn.execute("PRAGMA table_info(overlays)")} >= {
+        "overlay_id", "kind", "t_in", "t_out", "payload", "asset_path"}
+
+
+def test_an_older_timeline_is_rebuilt_because_it_is_derived(tmp_path):
+    """timeline is DELETEd and rewritten by every S05 run; a v1 table is
+    dropped and recreated rather than migrated column by column."""
+    p = tmp_path / "old.sqlite"
+    c = sqlite3.connect(p)
+    c.execute("CREATE TABLE timeline (slot_index INTEGER PRIMARY KEY, act INTEGER, "
+              "shot_id TEXT, msg_id TEXT, t_in REAL, t_out REAL, src_in REAL, src_out REAL, "
+              "yaw REAL, transition TEXT)")
+    c.execute("INSERT INTO timeline(slot_index, act) VALUES (0, 1)")
+    c.commit(); c.close()
+    conn = db.init(p)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(timeline)")}
+    assert "kind" in cols and "beat_id" in cols
+    assert conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] == 0

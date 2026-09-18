@@ -174,17 +174,45 @@ CREATE TABLE IF NOT EXISTS story_beats (
   created_utc TEXT
 );
 
+-- Film v2 section 3.3: the picture track. Rebuilt, not migrated: S05 deletes
+-- and rewrites it on every run, so an older shape carries nothing worth keeping.
 CREATE TABLE IF NOT EXISTS timeline (
   slot_index  INTEGER PRIMARY KEY,
   act         INTEGER,
+  t_in REAL, t_out REAL,
+  kind        TEXT NOT NULL,                 -- video | photo | card | black
   shot_id     TEXT REFERENCES shots(shot_id),
-  msg_id      TEXT REFERENCES messages(msg_id),
-  t_in        REAL,
-  t_out       REAL,
-  src_in      REAL,
-  src_out     REAL,
-  yaw         REAL,
-  transition  TEXT
+  src_in REAL, src_out REAL,
+  secondary_shot_id TEXT,                    -- split screen: the other phone's clip
+  secondary_src_in  REAL,
+  motion      TEXT,                          -- JSON: {"type":"split"} now; step 6 adds the rest
+  speed       REAL DEFAULT 1.0,
+  transition  TEXT,                          -- cut | dissolve | dip_black
+  beat_id     TEXT REFERENCES story_beats(beat_id),
+  scene_id    INTEGER,                       -- the music scene the slot belongs to
+  msg_id      TEXT REFERENCES messages(msg_id),   -- a card slot's message
+  yaw         REAL
+);
+
+-- the audio tracks
+CREATE TABLE IF NOT EXISTS audio_cues (
+  cue_id      TEXT PRIMARY KEY,
+  track       TEXT NOT NULL,                 -- speech | location | music
+  t_in REAL, t_out REAL,
+  source      TEXT,                          -- recording_id or track_id
+  src_in REAL, src_out REAL,
+  gain_lufs   REAL,
+  fade_in_s REAL DEFAULT 0, fade_out_s REAL DEFAULT 0,
+  beat_id     TEXT REFERENCES story_beats(beat_id)
+);
+
+-- generated pictures laid over the picture track (rendered by S06.5, step 6)
+CREATE TABLE IF NOT EXISTS overlays (
+  overlay_id  TEXT PRIMARY KEY,
+  kind        TEXT NOT NULL,                 -- hud_map | hud_day | place_card | profile | chat_card | stat_card | subtitle
+  t_in REAL, t_out REAL,
+  payload     TEXT,                          -- JSON the renderer needs
+  asset_path  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS decisions (
@@ -305,9 +333,26 @@ def _rebuild_shots_for_photo_slots(conn: sqlite3.Connection) -> bool:
     return True
 
 
+TIMELINE_V2_COLUMNS = ("slot_index", "act", "t_in", "t_out", "kind", "shot_id", "src_in",
+                       "src_out", "secondary_shot_id", "secondary_src_in", "motion", "speed",
+                       "transition", "beat_id", "scene_id", "msg_id", "yaw")
+
+
+def _rebuild_timeline_v2(conn: sqlite3.Connection) -> bool:
+    """A v1 timeline is dropped: it is derived data that the next S05 run
+    rewrites in full. Returns True when it did something."""
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(timeline)")}
+    if not existing or "beat_id" in existing:
+        return False
+    conn.execute("DROP TABLE timeline")
+    conn.commit()
+    return True
+
+
 def init(db_path: str | Path) -> sqlite3.Connection:
     conn = connect(db_path)
     _rebuild_shots_for_photo_slots(conn)
+    _rebuild_timeline_v2(conn)
     conn.executescript(SCHEMA)
     for table, column, coltype in MIGRATIONS:
         existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}

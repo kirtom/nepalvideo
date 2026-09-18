@@ -21,21 +21,24 @@ aws:
 
 film:
   # The film aims for the target and moves either way as the material warrants.
-  # Twenty minutes is the length the creative brief was written for, so a longer
-  # cut has to earn it rather than happen by default -- but the target is not a
-  # cap, and it is not a floor either. Where the material will not carry twenty
-  # minutes, fifteen is a better film than twenty padded out.
+  # Section 13.11.5 moved the target from twenty minutes to twenty-five: draft
+  # feedback (2026-09-18) called 25-40 fine, so a longer cut no longer has to
+  # fight the target to exist -- but the target is still not a cap, and it is
+  # not a floor either. Where the material will not carry twenty-five minutes,
+  # fifteen is a better film than twenty-five padded out.
   min_duration_s:  900           # 15 min -- shorter than this is not the film
-  target_duration_s: 1200        # 20 min -- what it aims for
+  target_duration_s: 1500        # 25 min (section 13.11.5); max_duration_s stays 2400
   max_duration_s: 2400           # 40 min -- hard ceiling
   short_duration_s: 180          # the 3 min cut
   shot_count_min: 150
   shot_count_max: 200
   duration_tolerance_s: 30
   # How readily the film grows past the target. 0 pins it at the target
-  # regardless of material; 1 extends to whatever the material supports. Low by
-  # design -- surplus footage is a weak reason to make a film longer.
-  growth_bias: 0.35
+  # regardless of material; 1 extends to whatever the material supports.
+  # Raised alongside the target (section 13.11.5): a film aiming for 25
+  # minutes and tolerating up to 40 can afford to grow on strong material,
+  # where the old 20-minute target could not.
+  growth_bias: 0.6
   # The film is motion; stills are punctuation. This is the share of each act's
   # runtime that photographs may occupy -- applied per act, so it cannot pool
   # into one place and turn Act 1 into a slideshow. Only the best stills compete
@@ -50,7 +53,10 @@ film:
   # The pre-title sequence: 15-25 s from Act 3 or 4, then a hard cut to a title
   # card. Carved off the top, so the acts are allocated over the remainder. This
   # is the one deliberate break in chronology.
-  cold_open_s: 20
+  cold_open_s: [15, 25]          # replaces the dead scalar
+  # The title card's caption, over the cut from cold open to Act 1 -- "three
+  # months earlier".
+  cold_open_card: "тремя месяцами ранее"
   # How much keepable footage a minute of finished film is cut from. The film
   # counts nothing as surplus until it has this many times its own length in
   # shots that survive the quality gate.
@@ -397,6 +403,28 @@ assemble:
   natural_sound_windows: 4
   natural_sound_window_s: [10.0, 20.0]
   max_reassembly_loops: 3
+  # -- Film v2 section 4.3: assembly v2's alternation and rhythm rules --
+  pair_window_s: 60
+  pairs_per_act: 2
+  max_consecutive_recording: 2   # outside a beat
+  source_alternation_after: 3    # soft: prefer another source after this many in a row
+  source_share_min: 0.25         # of an act's phone slots, to each phone that has material
+  long_take_s: [60, 90]
+  long_take_keywords: ["мост", "мосту", "моста", "bridge", "suspension"]
+  # When the similarity model (semantic.clip_model) has nothing to score --
+  # the shortlist ran thin, or two shots are compared across a gap it was
+  # never asked about -- these deterministic proxies stand in, ranked by how
+  # much they imply "the same moment": literally adjacent, then the same
+  # recording, then just the same place within the hour.
+  similarity_fallback: {same_recording_60s: 1.0, same_recording: 0.6, same_place_hour: 0.3}
+  rhythm:                        # section energy percentile -> slot length (s)
+    low:  [5.0, 8.0]             # < 33
+    mid:  [3.0, 5.0]             # 33-66
+    high: [1.5, 2.5]             # > 66, cut on downbeats
+    burst_slots: [8, 12]         # one beat each, on the act's highest swell
+  chat_card_s: 4.0               # an Act 1 quote on screen
+  closing_card_s: 6.0
+  card_s: 3.0                    # the cold-open card
 
 render:
   draft: {width: 960, height: 540, crf: 23}
@@ -406,8 +434,35 @@ render:
   music_lufs: -14.0            # the music bed
   duck_lufs: -28.0             # location audio under the bed
   duck_lufs_speech: -22.0      # music under speech
+  # -- Film v2 section 6: the audio graph's own loudness targets, separate
+  # from the three levels above (which govern the music bed against what
+  # plays under it). These are per-track targets the mixer aims each cue at
+  # before the final normalisation pass.
+  speech_lufs: -16.0
+  location_full_lufs: -18.0
+  location_under_speech_lufs: -24.0
+  music_xfade_s: 2.0
+  window_fade_s: 1.0             # music out into a natural-sound window or the silence
+  cue_fade_s: 0.15
+  final_lufs: -14.0
+  true_peak_db: -1.5
+  audio_bitrate_k: 192
 
 music:
+  # Film v2 section 5.6: music is assigned per scene, not per act, so a track
+  # can turn over inside a long act rather than being stuck with whichever cue
+  # won the act's average.
+  assignment: scene              # scene | act
+  min_scene_s: 45                # a scene shorter than this is folded into a neighbour
+  reuse_gap_s: 300                # a track cannot repeat within this many seconds of itself
+  switch_cost: 0.6                # penalty for changing track between adjacent scenes
+  continuity_bonus: 0.3           # reward for keeping the same track across a cut
+  repeat_penalty: 0.5             # extra cost for a track already used elsewhere in the film
+  scene_targets:                  # weights of the distance terms
+    energy: 1.0
+    tempo: 0.6
+    dynamics: 0.5
+    brightness: 0.4
   # How long one piece may play before the film moves to another. Without a cap
   # a long track swallows its act -- a 9-minute one covered the whole 6.8-minute
   # Climb, leaving the centre of the film on a single cue while 19 other tracks
@@ -561,6 +616,11 @@ beats:
   estimate_chars_per_token: 3.0
   # long messages are clipped in the prompt; a card is 180 characters anyway
   chat_max_chars: 500
+  # -- Film v2 section 4.4: placing picture against the voice spine --
+  face_hold_s: 2.5               # the speaker's own shot before B-roll takes over
+  pre_roll_s: 0.4                # picture cuts this much before the utterance starts
+  broll_window_s: 7200           # B-roll candidates within +-2 h of the beat, same act
+  own_picture_face_score_below: 0.35   # below this the beat is a walking shot: picture stays
 
 # -- the API, priced ---------------------------------------------------------
 # USD per million tokens, for the estimate before the call and the ledger
