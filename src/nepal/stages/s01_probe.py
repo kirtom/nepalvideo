@@ -239,6 +239,14 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
         rows_o = [(a,) for a in orphans]
         conn.executemany("UPDATE messages SET media_asset=NULL WHERE media_asset=?",
                          rows_o)
+        # A photograph that no longer exists has a shot row pointing at it,
+        # and possibly a slot in the cut. Both go first: with foreign keys on,
+        # deleting the asset under them is refused, and the first re-probe on
+        # a box that held fewer files died exactly there, halfway through
+        # writing the manifest.
+        conn.executemany("DELETE FROM timeline WHERE shot_id IN "
+                         "(SELECT shot_id FROM shots WHERE asset_id=?)", rows_o)
+        conn.executemany("DELETE FROM shots WHERE asset_id=?", rows_o)
         conn.executemany("DELETE FROM assets WHERE asset_id=?", rows_o)
         conn.commit()
 

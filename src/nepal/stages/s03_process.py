@@ -24,6 +24,7 @@ import numpy as np
 
 from nepal import db, freshness
 from nepal.config import Config
+from nepal.probe import manifest
 from nepal.process import (asr as asr_mod, audio as audio_mod,
                            embed as embed_mod, faces as faces_mod,
                            gate as gate_mod, metrics as metrics_mod,
@@ -83,6 +84,16 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
     encoder = reproject.detect_encoder()
     log.info("S03.1 %d recording(s), hwaccel=%s encoder=%s, yaw videos=%s",
              len(recs), hwaccel or "none", encoder, yaw_videos)
+
+    # A host that holds part of the corpus cannot build proxies for the rest;
+    # the GCP box never sees the camera originals. Skip those quietly rather
+    # than report 93 failures that are not failures.
+    absent = manifest.absent_sources(cfg.data_root)
+    if absent:
+        n_absent = sum(1 for r in recs if r["source"] in absent)
+        recs = [r for r in recs if r["source"] not in absent]
+        log.info("S03.1 this host does not hold %s: %d recording(s) left alone",
+                 ", ".join(sorted(absent)), n_absent)
 
     built = skipped = failed = 0
     modes: dict[str, int] = {}

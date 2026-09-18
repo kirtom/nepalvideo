@@ -38,6 +38,26 @@ def test_rows_of_an_absent_source_survive_a_re_probe(tmp_path):
     assert rep["sources_absent"] == sorted({"camera", "phone_kulikov", "telegram", "music"})
 
 
+def test_an_orphan_photo_takes_its_shot_and_its_slot_with_it(tmp_path):
+    """Foreign keys are on. A deleted photograph still has a shot row and
+    may have a slot in the cut; deleting the asset under them is refused,
+    and the first re-probe on the box died on exactly that."""
+    cfg, data = _cfg(tmp_path)
+    conn = db.init(cfg.db_path)
+    conn.execute("INSERT INTO assets(asset_id, s3_key, source, kind) VALUES "
+                 "('gone', 'raw/media_from_phones/keller/IMG_9.jpg', 'phone_keller', 'photo')")
+    conn.execute("INSERT INTO shots(shot_id, asset_id, media_kind, start_s, end_s) "
+                 "VALUES ('photo_gone', 'gone', 'photo', 0.0, 3.0)")
+    conn.execute("INSERT INTO timeline(slot_index, act, shot_id, t_in, t_out) "
+                 "VALUES (0, 2, 'photo_gone', 0.0, 3.0)")
+    conn.commit()
+    rep = s01_probe.build_manifest(cfg, conn)
+    assert rep["n_orphans_removed"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM shots WHERE asset_id='gone'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM assets WHERE asset_id='gone'").fetchone()[0] == 0
+
+
 def test_an_unchanged_file_is_not_hashed_again(tmp_path, monkeypatch):
     cfg, data = _cfg(tmp_path)
     conn = db.init(cfg.db_path)
