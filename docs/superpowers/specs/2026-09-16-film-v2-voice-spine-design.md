@@ -865,6 +865,53 @@ say so (§13.10).
 The machine block of the credits states, generated from the run: every frame
 except the flyover map was shot on the trek; how many shots were considered
 and used; that the transcriber hallucinated "Subtitles by DimaTorzok" 33
-times; that the camera's clock was 18 days wrong; whether sound design was
-added to the bridge; and that the Nepal painting in the chat was imagined
-before anyone went.
+times; that the camera's clock was 14 days wrong (and that the solver first
+said 18); whether sound design was added to the bridge; and that the Nepal
+painting in the chat was imagined before anyone went.
+
+### 13.11 What the second draft taught (operator feedback, 2026-09-18)
+
+The operator watched the step 2 draft and sent six notes, with the request
+to take them critically. What was found and decided:
+
+1. **The chronology break is the camera's clock.** The departure lunch
+   ("Подготовка к выезду… Шереметьево", file dated 13 April) sat at minute 5
+   in Namrung because S01.5 put the camera +18.00 days, from an audio match
+   on 3 of 60 pairs. The clips say +14.00 — the monastery 250 m above
+   Samagaon (file 19 April = 3 May by the watch), the eve of the pass
+   ("Сейчас попиздуем на перевал", 21 April = 5 May) — and +14 was among the
+   histogram's own candidates twice. Four days moved 564 shots: the pass into
+   Act 5, the departure into Act 3. *Done in step 3:* `probe.clock.offset_overrides_s`
+   (Gate 1's word, per source), and the place step re-derives every shot's
+   moment and act from its recording so a moved clock moves the shots.
+   Photographs were never affected (phone clocks are GPS-validated), which
+   is why they read as "all at the beginning": they were in the right place
+   and the camera footage was not.
+2. **A wallpaper behind anything that does not fill the frame.** Adopted,
+   for step 6. Portrait phone clips keep §6.1's `blur_fill` (their own blurred
+   copy: colour continuity, no extra asset). Round Telegram videos and
+   portrait stills get a **per-act wallpaper**: one wide still from the act,
+   chosen automatically (sharpest 360 still with sky, no face), blurred to
+   abstraction (`render.wallpaper_blur_sigma`), darkened and desaturated so
+   it never competes. Round videos are drawn at `render.round_video_height`
+   (0.6 of the frame), circle-masked, centred — smaller reads as sharper.
+3. **"Some videos look a bit stretched."** Not the scaler (it pads, never
+   stretches) and not the lens paths (single-lens pairs and pre-stitched
+   files take their own graphs). The 360 views are rectilinear at
+   100°×70°, and a 100° rectilinear view stretches its edges. *Step 6:*
+   `render.view_h_fov` 85° with `v_fov` derived for 16:9, or a Panini
+   projection (`v360 output=pannini`) for the walking shots.
+4. **Both phones evenly.** Measured on the step 2 draft: phone_kulikov 75
+   slots, camera 70, telegram 19, phone_keller 12 — against 648, 348, 64 and
+   490 surviving shots. *Step 4:* a per-act **source share** constraint
+   (`assemble.source_share_min` 0.25 of the phone slots to each phone where
+   it has material), and the status page and Gate 3 show the ratio per act,
+   draft against available. If the draft read as "mostly mine" to the
+   operator while the database says Kulikov's phone, the folder labels may
+   be the other way round — to confirm at Gate 1.
+5. **Length.** No hard limit at 15–20 minutes: 30 is fine, 40 if it stays
+   natural. *Step 4:* `film.target_duration_s` 1500, `max_duration_s` 2400,
+   `growth_bias` 0.6; the six-act table scales; the beat sheet and the music
+   sections decide the rest. Not changed now, because a target without the
+   six-act table beside it is an inconsistency, not a decision.
+6. **Round videos not full-screen.** Folded into 2.

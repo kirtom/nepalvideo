@@ -204,9 +204,33 @@ once, and writes `story_beats`, `work/beats/beats.json` and
 `work/gates/gate2/index.html`. The SDK is behind one wrapper
 (`cloud/claude.py`) with a fake for the tests.
 
-**Numbers from the box** are filled in below once the step 3 jobs finish
-(`tools/cloud/jobs-step3.sh`: the suite, the prompt priced, the
-re-transcription, the prompt again).
+**The first pass on the box** (`tools/cloud/jobs-step3.sh`, 56 min): 1,002
+tests passed, one e2e test asserted the pre-step-2 detection behaviour and
+was corrected; 265 shots re-transcribed with word times at 0.1 shot/s; the
+filter marked **58 of 500 transcripts as hallucinations** (50 by phrase, 26
+by whisper's no-speech probability, 1 loop); the gate keeps 1,550 of 1,775;
+the priced prompt held 438 transcripts (973 segments), 1,858 messages, 32
+days: ~92k tokens, **0.86 USD estimated**.
+
+**What that prompt showed, fixed in the same day:** (1) the model saw shot
+ids, and recording ids carry the source folder's surname — it now sees
+`S0001` handles and "phone of B"; (2) S03.5 selected `status = 'candidate'`
+and skipped the 218 shortlisted shots the film was made of — the whitelist
+trap, met again; it asks for the complement and owes any speech shot a
+transcript with word times; (3) **the camera clock is +14 days, not the
+solver's +18** — see spec §13.11.1; `probe.clock.offset_overrides_s` holds
+Gate 1's word and the place step moves the shots with their recording. The
+ledger became one file per entry so the box and this machine stop
+overwriting each other's copy.
+
+**The corrected chain** (`jobs-step3.sh resume`: suite, `s01 --redo clock`,
+`s02 --redo geotag,acts`, `s03`, `beats --dry-run`) — numbers below when it
+finishes.
+
+**Operator feedback on the draft** (2026-09-18) is answered in spec §13.11:
+the chronology break was the camera clock (fixed); wallpaper, smaller round
+videos, a narrower 360 view, per-act source share and a 25–40 minute length
+are decided for steps 4 and 6.
 
 ## The last full run
 
