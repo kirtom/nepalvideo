@@ -27,7 +27,8 @@ from nepal.config import Config
 from nepal.probe import manifest
 from nepal.process import (asr as asr_mod, audio as audio_mod,
                            embed as embed_mod, faces as faces_mod,
-                           gate as gate_mod, metrics as metrics_mod,
+                           gate as gate_mod, hallucination as halluc_mod,
+                           metrics as metrics_mod,
                            reproject, shots as shots_mod, stills)
 from nepal.spine import (acts as acts_mod, dem as dem_mod, geocode as geo_mod,
                          gps as gps_mod, place as place_mod)
@@ -497,9 +498,13 @@ def refresh_audio_flags(cfg: Config, conn) -> int:
     speech_min = float(cfg.get("process.speech_min_s", audio_mod.SPEECH_MIN_S))
     wind_thr = float(cfg.get("process.wind_lf_ratio", audio_mod.WIND_SHARE))
     flags: list[tuple[int, int, str]] = []
-    for r in conn.execute("SELECT shot_id, speech_s, wind_lf_share FROM shots "
+    for r in conn.execute("SELECT shot_id, speech_s, wind_lf_share, hallucinated FROM shots "
                           "WHERE speech_s IS NOT NULL OR wind_lf_share IS NOT NULL"):
-        flags.append((int(audio_mod.has_speech(r["speech_s"], min_s=speech_min)),
+        # A hallucinated transcript is not speech for any downstream purpose
+        # (Film v2 section 3.1): no reprieve at the gate, no context bonus,
+        # no place in the beat sheet.
+        speaks = audio_mod.has_speech(r["speech_s"], min_s=speech_min) and not r["hallucinated"]
+        flags.append((int(speaks),
                       int(audio_mod.is_wind(r["wind_lf_share"], threshold=wind_thr)),
                       r["shot_id"]))
     if flags:
@@ -735,6 +740,61 @@ def backfill_transcript_json(cfg: Config, conn) -> dict[str, Any]:
              "(one segment over the shot; re-transcribe with --redo asr for words)",
              len(rows), from_files, synthetic)
     return {"n_rows": len(rows), "from_files": from_files, "synthetic": synthetic}
+
+
+def apply_hallucination_filter(cfg: Config, conn) -> dict[str, Any]:
+    """S03.5b -- mark the transcripts whisper made up (Film v2 section 4.1).
+
+    Runs over every transcribed shot every time, like the gate: the rules
+    are thresholds and a phrase list, both of which move, and the cost is
+    one read of the table. The per-segment reasons are written back into
+    ``transcript_json`` so Gate 2 and the beat sheet can see why a line is
+    missing rather than just that it is.
+    """
+    backfill = backfill_transcript_json(cfg, conn)
+    rules = halluc_mod.rules_from_cfg(cfg)
+    speech_min = float(cfg.get("process.speech_min_s", audio_mod.SPEECH_MIN_S))
+    rows = [dict(r) for r in conn.execute(
+        "SELECT shot_id, speech_s, transcript_json FROM shots "
+        "WHERE transcript_json IS NOT NULL")]
+    updates: list[tuple[int, str, str]] = []
+    n_bad = 0
+    reason_tally: dict[str, int] = {}
+    examples: list[dict[str, str]] = []
+    for r in rows:
+        try:
+            doc = json.loads(r["transcript_json"])
+        except ValueError:
+            continue
+        segs = doc.get("segments") or []
+        flag, per_seg = halluc_mod.shot_hallucinated(
+            segs, speech_s=r["speech_s"], speech_min_s=speech_min, **rules)
+        for seg, why in zip(segs, per_seg):
+            if why:
+                seg["hallucinated_reasons"] = why
+            else:
+                seg.pop("hallucinated_reasons", None)
+        if flag:
+            n_bad += 1
+            for why in per_seg:
+                for w in why:
+                    key = w.split(":", 1)[0]
+                    reason_tally[key] = reason_tally.get(key, 0) + 1
+            if len(examples) < 8:
+                examples.append({"shot_id": r["shot_id"],
+                                 "text": (doc.get("text") or "")[:80]})
+        updates.append((int(flag), json.dumps(doc, ensure_ascii=False), r["shot_id"]))
+    if updates:
+        conn.executemany("UPDATE shots SET hallucinated=?, transcript_json=? WHERE shot_id=?",
+                         updates)
+        conn.commit()
+    refresh_audio_flags(cfg, conn)          # has_speech follows the flag at once
+    log.info("S03.5b %d of %d transcript(s) are hallucinations %s", n_bad, len(rows),
+             reason_tally)
+    for ex in examples[:4]:
+        log.info("S03.5b   e.g. %s: %r", ex["shot_id"], ex["text"])
+    return {"n_transcripts": len(rows), "n_hallucinated": n_bad, "reasons": reason_tally,
+            "examples": examples, "backfill": backfill}
 
 
 def detect_faces(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
@@ -977,7 +1037,7 @@ def apply_gate(cfg: Config, conn) -> dict[str, Any]:
     rows = [dict(r) for r in conn.execute(
         "SELECT s.shot_id, s.media_kind, s.start_s, s.end_s, s.sharpness, "
         "s.exposure_pen, s.stability, s.jerk_px, s.has_speech, s.speech_s, "
-        "s.wind_lf_share, s.act, s.face_score, s.face_cluster, "
+        "s.wind_lf_share, s.act, s.face_score, s.face_cluster, s.hallucinated, "
         "COALESCE(a.quality_curve, ra.quality_curve, 'camera') AS curve "
         "FROM shots s "
         "LEFT JOIN assets a ON a.asset_id = s.asset_id "
@@ -1005,7 +1065,8 @@ def apply_gate(cfg: Config, conn) -> dict[str, Any]:
     speech_min = float(cfg.get("process.speech_min_s", audio_mod.SPEECH_MIN_S))
     for r in rows:
         if r["speech_s"] is not None:
-            r["has_speech"] = int(audio_mod.has_speech(r["speech_s"], min_s=speech_min))
+            r["has_speech"] = int(audio_mod.has_speech(r["speech_s"], min_s=speech_min)
+                                  and not r["hallucinated"])
     refresh_audio_flags(cfg, conn)
 
     # Faces, the same way: a fact derived from the stored score and label.
@@ -1244,6 +1305,9 @@ def run(cfg: Config, *, force: bool = False,
                  cfg, conn, force=force or "audio" in (redo or ()))),
              ("asr", lambda: transcribe_shots(
                  cfg, conn, force=force or "asr" in (redo or ()))),
+             # Pure and cheap, so it always re-runs: a phrase list and two
+             # thresholds, over what is already in the table.
+             ("hallucination", lambda: apply_hallucination_filter(cfg, conn)),
              ("faces", lambda: detect_faces(
                  cfg, conn, force=force or "faces" in (redo or ()))),
              # Cheap, and depends on two thresholds that move, so it is re-run
@@ -1260,8 +1324,8 @@ def run(cfg: Config, *, force: bool = False,
     # unit used to skip them, which after a re-detection left 1,060 shots
     # with no metrics, no transcript and no face behind a marker that said
     # otherwise. Shots too: detection now resumes per recording.
-    always = {"gate", "place", "shots", "metrics", "audio", "asr", "faces",
-              "recluster"} | set(redo or ())
+    always = {"gate", "place", "shots", "metrics", "audio", "asr", "hallucination",
+              "faces", "recluster"} | set(redo or ())
     if "faces" in always:
         always.add("recluster")          # a fresh detection pass re-clusters itself
     unknown = (redo or set()) - {name for name, _ in steps}

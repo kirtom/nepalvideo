@@ -80,7 +80,8 @@ def main(argv: list[str] | None = None) -> int:
     # tuned, so they are reachable without paying for the expensive one.
     p3.add_argument("--redo", metavar="STEPS", default="",
                     help="comma-separated sub-steps to recompute: "
-                         "proxies,shots,photos,place,metrics,audio,asr,faces,recluster,gate")
+                         "proxies,shots,photos,place,metrics,audio,asr,hallucination,"
+                         "faces,recluster,gate")
 
     p4 = sub.add_parser("s04", help="S04 -- semantic layer (CLIP embeddings)")
     p4.add_argument("--force", action="store_true", help="recompute completed sub-steps")
