@@ -565,6 +565,30 @@ directory is absent on the current host untouched instead of treating them
 as deleted files, and a file whose size and mtime match its row is not hashed
 again.
 
+### Watching it
+
+Three places, all built from what the pipeline already records:
+
+- **The dashboard** — Cloud Monitoring, project `nepalvideo`, dashboard
+  "nepal" (`https://console.cloud.google.com/monitoring/dashboards?project=nepalvideo`):
+  the box's CPU, memory and disk, and a live panel of the pipeline's own log
+  lines, shipped by the Ops Agent from `reports/remote_jobs/*.log` under the
+  log name `nepal_pipeline`.
+- **The alert** — a log-based metric `nepal_errors` counts ERROR and
+  Traceback lines; the policy "nepal pipeline error" emails the operator
+  when one appears.
+- **The status page** — `work/status/index.html` in the bucket, rewritten
+  after every remote run by `nepal status-page` from `stage_units`, the
+  tables, the reports and the ledger: the latest stage, the funnel counts,
+  the spend, the tail of the last run. Open its *Authenticated URL* from the
+  console's object viewer; no server, private to your login.
+
+All three are recreated by `tools/cloud/monitoring-setup.sh` (idempotent)
+and `tools/cloud/{dashboard.json,alert-errors.json,ops-agent.yaml}`. The box
+needs the `logging-write` and `monitoring-write` scopes for any of it; a
+box with the storage scope alone ships nothing and says so only in
+`/var/log/google-cloud-ops-agent/subagents/`.
+
 ### What was learned on AWS before the account was suspended
 
 One rented box running the same CLI, not the spec's Batch + ECR + Step
