@@ -147,29 +147,30 @@ Every new stage is a `stage_units` unit, resumable, and pure where it decides.
 
 ### 2.2 Execution model: local decides, remote works
 
-The local machine runs only what finishes in seconds to a few minutes: S05
-scoring, S06 assembly, overlay *layout*, and tests. Everything else runs on a
-remote box through one command:
+**The local machine computes nothing** (operator, 2026-09-18: "my machine is
+dying and very slow — let's move to GCP completely"). It edits files, runs
+git, and issues `nepal remote` commands. Scoring, assembly, tests, probes,
+renders and API loops all run on the remote box:
 
 ```bash
-nepal remote up                       # create or resume the box, sync work_root subset
-nepal remote run s04 --redo clip      # run a stage there, stream the log, sync the DB back
-nepal remote down
+nepal remote up                       # create or resume the box; it pulls the bucket
+nepal remote run s04 --redo clip      # run a stage there, stream the log, push results to the bucket
+nepal remote exec -- pytest -m slow   # any command on the box
+nepal remote pull                     # bucket -> local, for inspection
+nepal remote down                     # stop (keep the disk) or --delete
 ```
 
-`tools/cloud/` already holds `launch.sh`/`bootstrap.sh` for AWS; `remote`
-generalises it behind a provider setting (`cloud.provider: gcp | aws | ssh`).
-`ssh` means "a box the operator already has" and is the escape hatch.
+**The bucket is the hub.** `gs://nepalvideo-29922345852` (europe-west4) holds
+`raw/` (phones, chat, music, Strava; not the camera originals until conform),
+`work/` and `ref/` (SRTM, GeoNames). Local pushes to it, the box pulls from it
+before a run and pushes after, local pulls to look. The database is
+authoritative in the bucket from the first push on; a VM is disposable.
 
-Provider recommendation, in order:
-
-1. **GCP** — the operator already leaned this way. `e2-standard-8` spot
-   (~$0.10/h) for CPU stages and API loops; `g2-standard-4` (one L4) spot
-   (~$0.30/h) for CLIP, faces re-runs and upscaling. Vertex AI carries Claude
-   if the operator later prefers one bill. Account and quota are the
-   operator's to create.
-2. **Serverless GPU** (Modal or equivalent) for the GPU minutes only, if the
-   GCP GPU quota is slow to arrive. Per-second billing, no VM.
+Provider: **GCP**, project `nepalvideo`. `e2-standard-8` Spot (~$0.10/h) for
+CPU stages and API loops; `g2-standard-4` with one L4, Spot (~$0.30/h), for
+CLIP, faces and upscaling once the global GPU quota lands. Both stop rather
+than delete on `down`, so the disk (~$5/month) is the only idle cost. A
+serverless GPU remains the fallback for GPU minutes if the quota stalls.
 
 Claude calls go **directly to the Anthropic API** from the remote box
 (`ANTHROPIC_API_KEY` in the box's environment, never in the repo), using the
