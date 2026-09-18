@@ -30,6 +30,14 @@ if [ ! -f $ROOT/.toolchain ]; then
   touch $ROOT/.toolchain
 fi
 
+# -- the Ops Agent, once: ships the stage logs and host metrics ---------
+if [ ! -f $ROOT/.ops-agent ]; then
+  curl -sSo /tmp/add-ops-agent.sh \
+    https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
+  bash /tmp/add-ops-agent.sh --also-install || echo "ops agent install failed; continuing"
+  touch $ROOT/.ops-agent
+fi
+
 # -- GPU driver, once, only on the gpu profile ---------------------------
 if [ "$PROFILE" = "gpu" ] && ! command -v nvidia-smi >/dev/null 2>&1; then
   curl -sSLo /tmp/install_gpu_driver.py \
@@ -47,6 +55,12 @@ sudo -u $USER_NAME git reset -q --hard "origin/$BRANCH"
 [ -d .venv ] || sudo -u $USER_NAME python3 -m venv .venv
 sudo -u $USER_NAME .venv/bin/pip install -q --upgrade pip
 sudo -u $USER_NAME .venv/bin/pip install -q -e '.[vision,music,asr,faces,semantic,dev]'
+
+# -- the agent's config, every boot: it lives in the repo and may change --
+if [ -f tools/cloud/ops-agent.yaml ] && [ -d /etc/google-cloud-ops-agent ]; then
+  cp tools/cloud/ops-agent.yaml /etc/google-cloud-ops-agent/config.yaml
+  systemctl restart google-cloud-ops-agent || true
+fi
 
 # -- the API key, from metadata into the user's environment -------------
 KEY="$(md anthropic-api-key)"

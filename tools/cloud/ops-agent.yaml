@@ -1,0 +1,32 @@
+# What the box ships to Cloud Logging and Cloud Monitoring (Film v2 step 2b).
+# Every stage's full log and the bootstrap log, under one log name, so the
+# dashboard's logs panel and the error alert have one thing to filter on.
+# Host metrics (CPU, memory, disk) feed the dashboard's charts.
+logging:
+  receivers:
+    nepal_pipeline:
+      type: files
+      include_paths:
+        - /data/projects/nepal_work/reports/remote_jobs/*.log
+        - /data/projects/nepal_work/reports/remote_jobs.log
+        - /var/log/nepal-bootstrap.log
+      record_log_file_path: true
+  processors:
+    nepal_severity:
+      type: parse_regex
+      field: message
+      regex: '^(?<time>\d\d:\d\d:\d\d) (?<severity>[A-Z]+) +(?<logger>\S+) \| (?<message>.*)$'
+  service:
+    pipelines:
+      nepal:
+        receivers: [nepal_pipeline]
+        processors: [nepal_severity]
+metrics:
+  receivers:
+    hostmetrics:
+      type: hostmetrics
+      collection_interval: 60s
+  service:
+    pipelines:
+      default_pipeline:
+        receivers: [hostmetrics]
