@@ -31,10 +31,17 @@ stage() {  # stage <name> <grep pattern> -- <command...>
   echo "    ($name exit $rc, $(date -u +%T))"
 }
 
-MODE=${1:-full}       # full | resume: the corrected chain after the first pass
+MODE=${1:-full}       # full | resume: the corrected chain | beats: the live call
 {
 echo "=== jobs start $(date -u +%FT%TZ) on $(hostname), $(nproc) cores, step 3 ($MODE)"
-if [ "$MODE" = "full" ]; then
+if [ "$MODE" = "beats" ]; then
+# The live call, detached like everything else: an ssh session that drops
+# mid-answer would take the answer with it. Needs ANTHROPIC_API_KEY, which
+# the bootstrap puts in ~/.profile from the anthropic-api-key metadata.
+. ~/.profile 2>/dev/null
+[ -n "${ANTHROPIC_API_KEY:-}" ] || echo "!!! ANTHROPIC_API_KEY is not set on this box (no anthropic-api-key metadata at boot?)"
+TAIL=30 stage beats "S04\.5|WARN|ERROR" -- $N --no-progress beats
+elif [ "$MODE" = "full" ]; then
 TAIL=4 stage tests "passed|failed|error" -- \
   .venv/bin/python -m pytest -q -p no:cacheprovider -m "slow or not slow"
 TAIL=8 stage beats-dry-1 "S04\.5|WARN|ERROR" -- $N --no-progress beats --dry-run
@@ -54,7 +61,9 @@ TAIL=10 stage s02 "S02\.[1-4]|trek window|WARN|ERROR" -- \
   $N --no-progress s02 --redo geotag,acts
 TAIL=24 stage s03 "S03\.[0-9]|S03 place|WARN|ERROR" -- $N --no-progress s03
 fi
+if [ "$MODE" != "beats" ]; then
 TAIL=8 stage beats-dry-2 "S04\.5|WARN|ERROR" -- $N --no-progress beats --dry-run
+fi
 echo "--- push $(date -u +%T)"
 $N status-page >/dev/null 2>&1
 gcloud storage rsync --recursive "$WORK" "$B/work" 2>&1 | tail -1
