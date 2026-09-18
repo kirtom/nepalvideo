@@ -31,7 +31,8 @@ PUSH = (
 )
 
 # work/ subdirs a run may change and local wants back
-PULL = ("db", "reports", "semantic", "faces", "transcripts", "gates", "overlays", "beats")
+PULL = ("db", "reports", "semantic", "faces", "transcripts", "gates", "overlays", "beats",
+        "status")
 
 
 def rsync_args(src: str, dst: str, *, exclude: str = EXCLUDE) -> list[str]:

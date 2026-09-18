@@ -48,6 +48,7 @@ TAIL=20 stage s03 "S03\.[0-9]|S03 place|WARN|ERROR" -- \
   $N --no-progress s03 --redo proxies,shots,photos,place,faces
 stage cut "S05 |S06 |S07 |WARN|ERROR" -- $N --no-progress cut
 echo "--- push $(date -u +%T)"
+$N status-page >/dev/null 2>&1
 gcloud storage rsync --recursive "$WORK" "$B/work" 2>&1 | tail -1
 echo "=== jobs done $(date -u +%FT%TZ)"
 } > "$LOG" 2>&1

@@ -137,7 +137,9 @@ class Remote:
                 f"git fetch -q origin {self.branch} && "
                 f"git reset -q --hard origin/{self.branch} && "
                 f".venv/bin/pip install -q -e '.[{EXTRAS}]' && {pull} && "
-                f"({command}); rc=$?; {push}; exit $rc")
+                f"({command}); rc=$?; "
+                # the status page is rebuilt after every run, whatever happened
+                f".venv/bin/nepal status-page >/dev/null 2>&1; {push}; exit $rc")
 
     def exec_cmd(self, command: str) -> int:
         return self.gcloud.stream(gce.ssh_args(self.profile.name, project=self.project, user=self.ssh_user,

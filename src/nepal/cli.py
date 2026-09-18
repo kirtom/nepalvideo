@@ -110,6 +110,9 @@ def main(argv: list[str] | None = None) -> int:
     pprune.add_argument("--dry-run", action="store_true",
                         help="report what would go without touching anything")
 
+    sub.add_parser("status-page", help="write work/status/{status.json,index.html}: "
+                                       "where the pipeline is, from the database and the reports")
+
     prem = sub.add_parser("remote", help="run things on the GCP box (Film v2 section 2.2)")
     prem.add_argument("action", choices=["up", "down", "status", "push", "pull", "run",
                                          "exec", "ssh"])
@@ -225,6 +228,11 @@ def main(argv: list[str] | None = None) -> int:
               "sliced detail, not for sharpness. Then set probe.fov.fallback_deg\n"
               "in the config, or record it with:\n"
               "  nepal decisions   (to see what is stored now)")
+        return 0
+
+    if args.cmd == "status-page":
+        from nepal.cloud import status as status_mod
+        print(status_mod.write_status(cfg))
         return 0
 
     if args.cmd == "remote":
