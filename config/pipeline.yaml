@@ -533,7 +533,11 @@ asr:
 beats:
   model: claude-opus-5
   effort: high                 # low | medium | high | xhigh | max
-  max_output_tokens: 16000
+  # A backstop, not a budget: thinking counts against it, and the first
+  # live call spent all of a 16000 cap thinking about 140k tokens of prompt
+  # and was cut off with no sheet. Opus 5 streams up to 128k; 64k is the
+  # documented setting for long work. It bounds the estimate, not the bill.
+  max_output_tokens: 64000
   # what the prompt states and the validator enforces
   min_speech_beats: 10
   max_speech_beats: 16

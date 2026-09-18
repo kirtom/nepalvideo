@@ -248,7 +248,17 @@ def run(cfg: Config, *, force: bool = False, dry_run: bool = False,
     doc: dict[str, Any] | None = None
     for attempt in range(1, attempts + 1):
         log.info("S04.5 calling %s (attempt %d of %d)", claude.model, attempt, attempts)
-        comp = claude.complete_json(prompt.system, messages, beats_schema.OUTPUT_SCHEMA)
+        try:
+            comp = claude.complete_json(prompt.system, messages, beats_schema.OUTPUT_SCHEMA)
+        except claude_mod.ClaudeError as exc:
+            # Paid for all the same: the ledger says so, and what did arrive
+            # is kept to be read. Then the failure is the caller's.
+            ledger.record("beats", exc.usd,
+                          detail=f"{claude.model} attempt {attempt} {type(exc).__name__}: "
+                                 f"{exc.input_tokens} in, {exc.output_tokens} out")
+            (out_dir / f"response_{attempt}_failed.txt").write_text(exc.text or "")
+            conn.close()
+            raise
         completions.append(comp)
         ledger.record("beats", comp.usd,
                       detail=f"{comp.model} attempt {attempt}: {comp.input_tokens} in, "

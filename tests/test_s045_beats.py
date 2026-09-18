@@ -150,6 +150,28 @@ def test_the_two_refusals_happen_before_any_call(tmp_path):
         s045_beats.run(cfg, claude=cl.FakeClaude([_sheet()], n_tokens=50_000))
 
 
+def test_a_truncated_call_is_recorded_and_its_text_kept(tmp_path):
+    """The first live call hit the output cap: 1.11 USD spent, nothing on
+    the ledger, the partial answer gone with the exception."""
+    cfg = _cfg(tmp_path)
+    _seed(cfg)
+
+    class Cut(cl.FakeClaude):
+        def complete_json(self, system, messages, schema):
+            self.calls.append({"op": "complete_json", "messages": list(messages)})
+            raise cl.ClaudeTruncated("stopped", text='{"title": "Пере', usd=1.1087,
+                                     input_tokens=141_737, output_tokens=16_000)
+
+    with pytest.raises(cl.ClaudeTruncated):
+        s045_beats.run(cfg, claude=Cut([], n_tokens=50_000))
+    led = spend.ledger(cfg)
+    assert len(led.entries) == 1 and led.entries[0].usd == 1.1087
+    assert "ClaudeTruncated" in led.entries[0].detail and "16000 out" in led.entries[0].detail
+    kept = cfg.workdir("beats") / "response_1_failed.txt"
+    assert kept.read_text() == '{"title": "Пере'
+    assert not (cfg.workdir("beats") / "beats.json").exists()
+
+
 def test_a_sheet_still_wrong_after_the_retry_writes_nothing(tmp_path):
     cfg = _cfg(tmp_path)
     _seed(cfg)

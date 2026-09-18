@@ -67,21 +67,35 @@ class Completion:
     model: str
 
 
-class ClaudeRefused(RuntimeError):
+class ClaudeError(RuntimeError):
+    """A call that came back unusable was still paid for. The cost and
+    whatever text arrived ride on the exception so the caller can record
+    the one and keep the other: the first live call was truncated, cost
+    1.11 USD, and left the ledger untouched and the answer unread."""
+
+    def __init__(self, msg: str, *, text: str = "", usd: float = 0.0,
+                 input_tokens: int = 0, output_tokens: int = 0):
+        self.text, self.usd = text, float(usd)
+        self.input_tokens, self.output_tokens = int(input_tokens), int(output_tokens)
+        super().__init__(msg)
+
+
+class ClaudeRefused(ClaudeError):
     """The model declined (stop_reason refusal). Not retried: the input is
     trek footage and a chat about it, so a refusal is something to read."""
 
 
-class ClaudeTruncated(RuntimeError):
-    """The answer hit max_tokens. Raise beats.max_output_tokens."""
+class ClaudeTruncated(ClaudeError):
+    """The answer hit max_tokens. Thinking counts against the cap, so a
+    long prompt can spend a small cap entirely on thinking; raise
+    beats.max_output_tokens."""
 
 
-class ClaudeBadJSON(RuntimeError):
-    """The text was not JSON despite the output format. The text is kept
-    on the exception so it can be written out and read."""
-    def __init__(self, text: str, exc: Exception):
-        self.text = text
-        super().__init__(f"the answer is not JSON ({exc}); first 200 chars: {text[:200]!r}")
+class ClaudeBadJSON(ClaudeError):
+    """The text was not JSON despite the output format."""
+    def __init__(self, text: str, exc: Exception, **spent):
+        super().__init__(f"the answer is not JSON ({exc}); first 200 chars: {text[:200]!r}",
+                         text=text, **spent)
 
 
 class Claude:
@@ -121,23 +135,36 @@ class Claude:
                 model=self.model, max_tokens=self.max_tokens,
                 system=system, messages=list(messages),
                 thinking={"type": "adaptive"},
+                # The prompt is the last cacheable block. A retry after a
+                # broken rule carries the same prompt again and reads it
+                # from the cache at a tenth of the input rate, instead of
+                # paying for 140k tokens twice.
+                cache_control={"type": "ephemeral"},
                 output_config={"effort": self.effort,
                                "format": {"type": "json_schema", "schema": dict(schema)}},
         ) as stream:
             msg = stream.get_final_message()
+        text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+        thinking = sum(len(getattr(b, "thinking", "") or "") for b in msg.content
+                       if getattr(b, "type", "") == "thinking")
+        spent = dict(usd=usage_usd(msg.usage, self.price),
+                     input_tokens=int(msg.usage.input_tokens),
+                     output_tokens=int(msg.usage.output_tokens))
         if msg.stop_reason == "refusal":
             details = getattr(msg, "stop_details", None)
             raise ClaudeRefused(f"{self.model} refused: "
                                 f"{getattr(details, 'category', None)} "
-                                f"{getattr(details, 'explanation', '') or ''}".strip())
-        text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+                                f"{getattr(details, 'explanation', '') or ''}".strip(),
+                                text=text, **spent)
         if msg.stop_reason == "max_tokens":
-            raise ClaudeTruncated(f"the answer stopped at {self.max_tokens} tokens; "
-                                  f"raise beats.max_output_tokens")
+            raise ClaudeTruncated(f"the answer stopped at {self.max_tokens} tokens "
+                                  f"({spent['output_tokens']} out: {thinking} chars of "
+                                  f"thinking, {len(text)} chars of answer); raise "
+                                  f"beats.max_output_tokens", text=text, **spent)
         try:
             data = json.loads(text)
         except ValueError as exc:
-            raise ClaudeBadJSON(text, exc) from exc
+            raise ClaudeBadJSON(text, exc, **spent) from exc
         return Completion(text=text, data=data,
                           input_tokens=int(msg.usage.input_tokens),
                           output_tokens=int(msg.usage.output_tokens),

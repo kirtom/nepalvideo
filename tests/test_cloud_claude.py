@@ -93,6 +93,7 @@ def test_complete_json_streams_with_the_schema_and_the_effort_and_parses():
     kw = seen[-1]
     assert kw["model"] == "claude-opus-5" and kw["max_tokens"] == 9000
     assert kw["system"] == "SYS" and kw["thinking"] == {"type": "adaptive"}
+    assert kw["cache_control"] == {"type": "ephemeral"}     # a retry re-reads the prompt
     assert kw["output_config"]["effort"] == "xhigh"
     assert kw["output_config"]["format"]["type"] == "json_schema"
     assert kw["output_config"]["format"]["schema"]["properties"]["title"] == {"type": "string"}
@@ -105,9 +106,15 @@ def test_refusal_truncation_and_bad_json_are_distinct_errors():
     with pytest.raises(cl.ClaudeRefused):
         c.complete_json("s", [], {})
     c._client = _client(_msg('{"partial', stop="max_tokens"), [])
-    with pytest.raises(cl.ClaudeTruncated):
+    with pytest.raises(cl.ClaudeTruncated) as exc:
         c.complete_json("s", [], {})
+    # paid for and partly answered: both ride on the exception
+    assert exc.value.usd == cl.estimate_usd(1000, 100, PRICE)
+    assert exc.value.text == '{"partial' and exc.value.output_tokens == 100
+    assert "chars of thinking" in str(exc.value)
     c._client = _client(_msg("nope"), [])
     with pytest.raises(cl.ClaudeBadJSON) as exc:
         c.complete_json("s", [], {})
-    assert exc.value.text == "nope"
+    assert exc.value.text == "nope" and exc.value.usd > 0
+    assert all(issubclass(e, cl.ClaudeError)
+               for e in (cl.ClaudeRefused, cl.ClaudeTruncated, cl.ClaudeBadJSON))
