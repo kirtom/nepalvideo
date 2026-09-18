@@ -500,7 +500,11 @@ states. The cost of a (scene, section) pair is the weighted distance between
 the scene's target and the section's features, plus a switching cost when
 the section's piece differs from the previous scene's, minus a continuity
 bonus when it is the section that follows in the same piece, plus a
-repetition penalty for a piece heard within `music.reuse_gap_s` (300).
+repetition penalty for a piece heard within `music.reuse_gap_s` (300), minus
+a preference bonus (`music.preferred_bonus`) for the pieces the operator
+listed in `music.preferred_tracks` — a soft prior, in their words "just my
+opinion, if logic chooses something different it's ok", so it tilts a close
+call and never overrides a bad fit.
 Hard rules: **Marusha's *Somewhere over the Rainbow* is the credits piece
 and plays there only** — it is withdrawn from the library before the scene
 assignment runs, as `music.credits_track` already does, so no scene can pick

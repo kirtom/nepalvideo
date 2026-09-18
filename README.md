@@ -502,51 +502,79 @@ then they are manual checkpoints.
 
 ## Running it in the cloud
 
-**The AWS account is currently suspended** pending document verification, so
-nothing below runs today. Everything the film needs up to Gate 3 has turned
-out to run on the local machine; the one thing a cloud is still required for
-is **Claude**, for S04.2 framing, S04.3 captioning and S06 ordering.
-
-If that account does not come back, the replacement is **Google Cloud, not
-Yandex**: Vertex AI carries Anthropic's models, so it unblocks captioning as
-well as compute, and the switching cost is zero — S04.2 and S04.3 were never
-written, so there is a provider to choose rather than a migration to perform.
-Yandex Cloud supplies compute only.
-
-The history below is what was actually done on AWS. S03.5 transcription was
-memory-bound and slow on an old CPU, and S04 captioning needed Bedrock.
-
-The approach taken is **one rented box, not an architecture**. The spec's
-Batch + ECR + Step Functions design was sized for 500 GB and a 2,400-minute
-corpus; at the actual 65 GB it is days of build for no benefit the resumable
-CLI does not already provide.
+**Nothing computes on the operator's machine.** Every stage, test, probe and
+render runs on one GCP Spot VM, driven from here:
 
 ```bash
-tools/cloud/launch.sh                         # Spot by default
-SPOT=0 TYPE=m7i.2xlarge tools/cloud/launch.sh # what actually ran
+nepal remote status                    # is the box up, what has the project spent
+nepal remote up                        # create or start nepal-cpu, wait for READY
+nepal remote run s03 --redo place      # a stage on the box, log streamed here
+nepal remote exec -- .venv/bin/python -m pytest -q      # anything else on the box
+nepal remote pull                      # bucket -> local: db, reports, gates, ...
+nepal remote down                      # stop; the disk and its contents stay
+nepal remote up --gpu                  # the L4 profile, for CLIP and upscaling
 ```
 
-**It is not a GPU box.** The account's G/VT quota is 0 vCPU in every region
-checked, so `g4dn.xlarge` cannot launch until a support case lands. An
-8-vCPU, 30 GB `m7i.2xlarge` turned out to be enough: S03.5 dropped from ~27
-hours to ~50 minutes. The win is RAM — the local machine was swapping 2.6 GB
-under `large-v3` — and core count, not vector hardware.
+**The bucket is the hub.** `gs://nepalvideo-29922345852` (europe-west4) holds
+`raw/` (phones, chat export, music, Strava — not the camera originals until
+conform), `work/` (proxies, audio, transcripts, faces, the database, reports)
+and `ref/` (SRTM tiles, GeoNames). `nepal remote push` sends the working set
+from here; the box pulls `raw/` and `work/` before every run and pushes
+`work/` back afterwards, whatever the exit code, so a killed run keeps its
+checkpoints; `nepal remote pull` brings the parts a run can change back here
+to look at. From the first push on, the database in the bucket is the
+authoritative one.
 
-`bootstrap.sh` runs as cloud-init user-data: it installs ffmpeg, exiftool and
-the package, then syncs the media subset and work directory from S3 to *the
-same paths the config already names*, so `config/pipeline.yaml` needs no
-change. It deliberately does **not** start a stage — the database is synced
-last, after the local run has stopped, and you start `nepal s03` over SSH.
+**Two profiles**, both Spot, both stopped rather than deleted on `down`:
 
-What actually has to travel: **nothing before S08 reads the camera originals.**
-S03.4/.5 read the extracted `.wav`s, S03.6 and S04 read proxy frames, S07
-renders from proxies. That is `nepal_work` (~4 GB) plus phones, chat and music
-— about 9 GB for everything through the draft cut. The 60 GB of originals
-matter only at conform.
+| Profile | Machine | For | Spot price (estimate) |
+|---|---|---|---|
+| `cpu` (default) | `e2-standard-8`, 60 GB | everything that is CPU, and the API loops | ~$0.11/h |
+| `gpu` | `g2-standard-4` + 1× L4, 100 GB | CLIP embeddings, faces re-runs, upscaling | ~$0.30/h |
 
-Cost guardrails, per spec §8.1, in order: a **Budgets alarm first**, then no
-NAT Gateway (public subnet plus a free S3 Gateway endpoint), 7-day CloudWatch
-retention, and `MAX_CAPTION_SHOTS` — the only unbounded cost in the system.
+Spot boxes stop on preemption (`--instance-termination-action=STOP`), so a
+preempted run is resumed by `nepal remote up` and the resumable CLI. The box
+gets the `storage-rw` scope and nothing else.
+
+**What the box runs on first boot** (`tools/cloud/bootstrap-gcp.sh`, a GCE
+startup script, so it runs on *every* boot and every step is idempotent):
+ffmpeg, exiftool, git, a venv with every extra; a clone of the branch named
+in `cloud.gcp.branch`, reset to `origin/<branch>` on each boot and each run
+— **push before `nepal remote run`**; the bucket pulled to the same paths the
+config names (`/data/projects/nepal_data`, `/data/projects/nepal_work`), so
+`pipeline.yaml` needs no change; `/data/projects/READY` when done, which is
+what `up` waits for. On the `gpu` profile it also installs the NVIDIA driver
+with Google's installer if `nvidia-smi` is absent.
+
+**Credentials.** The operator's `gcloud` login drives everything from here;
+nothing is stored in the repo. The Anthropic key reaches the box as the
+instance metadata attribute `anthropic-api-key`, which the startup script
+exports into the `nepal` user's profile; set it with
+`gcloud compute instances add-metadata nepal-cpu --metadata anthropic-api-key=…`.
+
+**The ledger.** `work/reports/spend.json` records every VM hour (written by
+`down`, at the profile's estimated price) and every paid API call (written by
+the stage that made it, from the response's `usage`). `up` and every paid
+stage ask it first and refuse past `cloud.spend_ceiling_usd` (15). The GCP
+billing budget ("nepal", 60 USD, alerts at 50% and 80%) is the warning
+behind the refusal.
+
+**A host that holds part of the corpus.** The box never sees the 60 GB of
+camera originals, so the manifest leaves the rows of any source whose
+directory is absent on the current host untouched instead of treating them
+as deleted files, and a file whose size and mtime match its row is not hashed
+again.
+
+### What was learned on AWS before the account was suspended
+
+One rented box running the same CLI, not the spec's Batch + ECR + Step
+Functions design: sized for 500 GB and 2,400 minutes, at 65 GB it was days
+of build for nothing the resumable CLI does not already do. **No GPU was
+needed for anything before CLIP**: S03.5 transcription dropped from ~27 hours
+locally to ~50 minutes on eight cores and 30 GB — the win was RAM, the local
+machine was swapping under `large-v3` — and S03.6 faces ran at a second a
+shot on the same CPU. The AWS scripts (`tools/cloud/launch.sh`,
+`bootstrap.sh`) are kept for the record; the account is suspended.
 
 ---
 

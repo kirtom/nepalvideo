@@ -19,8 +19,13 @@ the project to a person. This file is for how to work here.
 
 ## Running stages
 
-S03.1 takes hours and S03.2 takes tens of minutes. Start long runs in the
-background and poll; never block a turn on them, and never `sleep` waiting.
+**Nothing computes on the operator's machine.** It has four cores, eleven
+gigabytes and a swap file it lives in; a two-minute test suite makes it
+unusable. Stages, tests, probes, renders and API loops run on the GCP box
+through `nepal remote` (`up`, `run <nepal args>`, `exec -- <command>`,
+`pull`, `down`). Locally: edits, git, `nepal remote`, and queries that
+finish in a second. S03.1 takes hours and S03.2 tens of minutes even there;
+start them with `nepal remote run` and read the log, never `sleep` waiting.
 
 Every stage is resumable through `stage_units`, so a re-run redoes only what is
 missing. `--force` recomputes everything, which for S03 means rebuilding every

@@ -418,6 +418,18 @@ music:
   # against a cue that will never play there. Matched on file name, stem or
   # title; a name that matches nothing is a warning, never a silent no-op.
   credits_track: "Marusha.Somewhere over the Rainbow.mp3"
+  # The operator's own picks (2026-09-18: "just my opinion, if logic chooses
+  # something different it's ok"). A bonus in the per-scene assignment (Film
+  # v2 section 5.6), never a rule: it tilts a close call and cannot override
+  # a bad fit. Matched on file name or stem like credits_track.
+  preferred_tracks:
+    - "José González.Heartbeats.mp3"
+    - "Alexandre Desplat.The Imitation Game.mp3"
+    - "M83.Outro.mp3"
+    - 'Murray Gold.The Long Song - From "Doctor Who" Series 7.mp3'
+    - "Hans Zimmer.Time.mp3"
+    - "Rusted Root.Send Me on My Way.mp3"
+  preferred_bonus: 0.15
 
 # Remote execution (Film v2 section 2.2). The local machine computes nothing;
 # everything runs on one GCP Spot VM with the bucket as the hub.

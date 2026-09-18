@@ -440,14 +440,34 @@ the operator's.
 
 ## The cloud move
 
-**The AWS account was suspended for good on 2026-09-18**, without
-notification ("account details couldn't be verified"), after the 2026-09-15
-hold. Nothing more is planned on AWS. **Step 2 of Film v2 moves remote
-execution to GCP** (project 29922345852; the SDK is installed under
-`~/google-cloud-sdk`; bucket and VM to come). What follows is the AWS
-history, kept for the measurements. While it is down, Bedrock is unreachable, so
-S04.2 framing, S04.3 captioning and S06's ordering refinement are all blocked.
-Nothing else is: every remaining stage runs on this machine.
+**GCP, from 2026-09-18.** The AWS account was suspended for good that day,
+without notification ("account details couldn't be verified"), and the
+operator asked for a complete move: "my machine is dying and very slow —
+let's move to GCP completely". Nothing computes locally any more, not even
+the test suite.
+
+- **Project** `nepalvideo` (number 29922345852), billing linked, budget
+  "nepal" 60 USD with alerts at 50% and 80%. **Bucket**
+  `gs://nepalvideo-29922345852`, europe-west4, Standard. Quota: L4 GPUs
+  granted (1 regional, 1 preemptible, 1 global) the same day.
+- **Upload** of the working set (raw phones/chat/music/Strava, work
+  proxies/audio/transcripts/faces/db, ref tiles; ~8 GB, no camera originals)
+  started 06:03 UTC at a measured ~0.9 MB/s upstream, so roughly two and a
+  half hours. The 60 GB of originals would be an overnight job and wait for
+  conform.
+- **`nepal remote`** (step 2 of Film v2, `docs/superpowers/plans/
+  2026-09-18-film-v2-step2-gcp-remote.md`): `up`/`down`/`status`/`push`/
+  `pull`/`run`/`exec`/`ssh`, two Spot profiles (`nepal-cpu` e2-standard-8,
+  `nepal-gpu` g2-standard-4 + L4), a startup script that is idempotent on
+  every boot, a spend ledger (`work/reports/spend.json`) with a 15 USD
+  refusal, and a manifest that leaves absent sources alone so the box's
+  partial corpus cannot delete the camera rows. `nepal-cpu` was created at
+  06:5x UTC; first remote timings below once they exist.
+- **Preferred music** (operator, same day, as a soft prior for the per-scene
+  assignment): Heartbeats, The Imitation Game, Outro, The Long Song, Time,
+  Send Me on My Way — `music.preferred_tracks`.
+
+What follows is the AWS history, kept for its measurements.
 
 **Yandex Cloud is available as an alternative compute source** (operator,
 2026-09-16). It is a real option for anything that is *just CPU or GPU* — it
