@@ -25,3 +25,13 @@ def test_script_reads_its_metadata_and_writes_the_markers():
     assert "gcloud storage rsync" in s
     assert "git fetch" in s and "reset -q --hard" in s   # the box tracks the branch
     assert "ANTHROPIC_API_KEY" in s                   # from metadata, into the environment
+
+
+def test_a_box_with_state_pushes_work_on_boot_rather_than_pulling():
+    """After a preemption the disk is newer than the bucket: a run pushes
+    only when it ends, and a preempted run never did."""
+    s = SCRIPT.read_text()
+    assert 'if [ -f $ROOT/nepal_work/db/nepal.sqlite ]; then' in s
+    push = s.index("rsync --recursive $ROOT/nepal_work \"$BUCKET/work\"")
+    pull = s.index("rsync --recursive \"$BUCKET/work\" $ROOT/nepal_work")
+    assert push < pull

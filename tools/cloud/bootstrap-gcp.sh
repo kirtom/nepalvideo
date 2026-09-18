@@ -76,8 +76,16 @@ if [ -n "$BUCKET" ]; then
   mkdir -p $ROOT/nepal_data $ROOT/nepal_work $ROOT/nepalvideo/data
   chown -R $USER_NAME:$USER_NAME $ROOT/nepal_data $ROOT/nepal_work $ROOT/nepalvideo/data
   sudo -u $USER_NAME gcloud storage rsync --recursive "$BUCKET/raw"  $ROOT/nepal_data
-  sudo -u $USER_NAME gcloud storage rsync --recursive "$BUCKET/work" $ROOT/nepal_work
   sudo -u $USER_NAME gcloud storage rsync --recursive "$BUCKET/ref/data" $ROOT/nepalvideo/data
+  # work/: a box that already holds state is booting after a preemption or a
+  # stop, and its disk is newer than the bucket -- a run pushes only when it
+  # ends, and a preempted run never did. So the box pushes on boot; only a
+  # fresh box pulls. Pulling here once overwrote twenty minutes of a run.
+  if [ -f $ROOT/nepal_work/db/nepal.sqlite ]; then
+    sudo -u $USER_NAME gcloud storage rsync --recursive $ROOT/nepal_work "$BUCKET/work"
+  else
+    sudo -u $USER_NAME gcloud storage rsync --recursive "$BUCKET/work" $ROOT/nepal_work
+  fi
 fi
 
 sudo -u $USER_NAME .venv/bin/nepal doctor > $ROOT/doctor.txt 2>&1 || true

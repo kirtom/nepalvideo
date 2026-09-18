@@ -34,8 +34,10 @@ stage() {  # stage <name> <grep pattern> -- <command...>
   echo "    ($name exit $rc, $(date -u +%T))"
 }
 
+MODE=${1:-full}       # full | resume: after a preemption, pick S03 up where it stopped
 {
-echo "=== jobs start $(date -u +%FT%TZ) on $(hostname), $(nproc) cores"
+echo "=== jobs start $(date -u +%FT%TZ) on $(hostname), $(nproc) cores, mode $MODE"
+if [ "$MODE" = "full" ]; then
 TAIL=3 stage tests "passed|failed|error" -- \
   .venv/bin/python -m pytest -q -p no:cacheprovider -m "slow or not slow" \
     tests/test_manifest_partial.py tests/test_e2e_s03.py tests/test_e2e_s02.py
@@ -46,6 +48,11 @@ stage s02 "S02\.[1-4]|strava|trek window|WARN|ERROR" -- \
   $N --no-progress s02 --redo gps_track,geotag,acts
 TAIL=20 stage s03 "S03\.[0-9]|S03 place|WARN|ERROR" -- \
   $N --no-progress s03 --redo proxies,shots,photos,place,faces
+else
+# Every S03 sub-step is resumable through the data: a shot with a face_score
+# has been looked at, a recording with a proxy unit is built. No --redo.
+TAIL=20 stage s03 "S03\.[0-9]|S03 place|WARN|ERROR" -- $N --no-progress s03
+fi
 stage cut "S05 |S06 |S07 |WARN|ERROR" -- $N --no-progress cut
 echo "--- push $(date -u +%T)"
 $N status-page >/dev/null 2>&1
