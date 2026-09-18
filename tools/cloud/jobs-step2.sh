@@ -46,8 +46,12 @@ stage s01 "S01\.[12]|S01 the manifest|WARN|ERROR" -- \
 TAIL=6 stage prune "prune|owns|produced" -- $N prune
 stage s02 "S02\.[1-4]|strava|trek window|WARN|ERROR" -- \
   $N --no-progress s02 --redo gps_track,geotag,acts
+# No `shots` here: re-detection replaces every shot row and the metrics,
+# transcripts and faces they carried. Detection, metrics, audio, asr, faces
+# and place all resume through the data on every run; proxies resumes per
+# recording; photos is re-run for the stills and the new photographs.
 TAIL=20 stage s03 "S03\.[0-9]|S03 place|WARN|ERROR" -- \
-  $N --no-progress s03 --redo proxies,shots,photos,place,faces
+  $N --no-progress s03 --redo proxies,photos
 else
 # Every S03 sub-step is resumable through the data: a shot with a face_score
 # has been looked at, a recording with a proxy unit is built. No --redo.

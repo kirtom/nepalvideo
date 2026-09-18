@@ -205,7 +205,22 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
             "yaw_videos": yaw_videos, "source_hours": round(total_s / 3600, 2)}
 
 
-def detect_shots(cfg: Config, conn) -> dict[str, Any]:
+def recordings_to_detect(recs: list[dict[str, Any]], *, have_shots: set[str],
+                         proxies: Path, redo_all: bool) -> list[dict[str, Any]]:
+    """Which recordings S03.2 looks at: those with a proxy and no shots yet.
+
+    Re-detection replaces a recording's shot rows, and with them the metrics,
+    the transcript and the faces those rows carried -- 1,060 shots' worth,
+    the first time `--redo shots` was used to pick up three new clips. So
+    detection resumes per recording like every other sub-step, and only an
+    explicit redo touches recordings that already have shots.
+    """
+    return [r for r in recs
+            if (proxies / f"{r['recording_id']}_eq.mp4").exists()
+            and (redo_all or r["recording_id"] not in have_shots)]
+
+
+def detect_shots(cfg: Config, conn, *, redo_all: bool = False) -> dict[str, Any]:
     """S03.2 -- scene boundaries on each proxy become shot rows.
 
     Per recording rather than per file: the proxy already spans the whole take
@@ -227,10 +242,16 @@ def detect_shots(cfg: Config, conn) -> dict[str, Any]:
     recs = [dict(r) for r in conn.execute(
         "SELECT recording_id, start_utc, duration_s FROM recordings ORDER BY start_utc")]
     proxies = cfg.work_root / "proxies"
-    pending = [r for r in recs if (proxies / f"{r['recording_id']}_eq.mp4").exists()]
+    have = {r[0] for r in conn.execute(
+        "SELECT DISTINCT recording_id FROM shots WHERE recording_id IS NOT NULL")}
+    pending = recordings_to_detect(recs, have_shots=have, proxies=proxies,
+                                   redo_all=redo_all)
     if not pending:
-        return {"n_recordings": len(recs), "n_shots": 0,
-                "error": "no proxies on disk -- run S03.1 first"}
+        if not any((proxies / f"{r['recording_id']}_eq.mp4").exists() for r in recs):
+            return {"n_recordings": len(recs), "n_shots": 0,
+                    "error": "no proxies on disk -- run S03.1 first"}
+        return {"n_recordings": len(recs), "n_with_proxy": len(recs), "n_shots": 0,
+                "note": "every recording with a proxy already has shots"}
 
     out: list[dict[str, Any]] = []
     no_cuts = 0
@@ -1164,21 +1185,9 @@ def run(cfg: Config, *, force: bool = False,
     report["skipped_stale"] = freshness.warn_if_stale(
         log, conn, STAGE, force=force, rerun_hint="nepal s03 --force")
 
-    # Face detection that ran elsewhere leaves its embeddings on disk but no
-    # `faces` unit in this database, and the step resumes on every shot with
-    # no face_score -- which, once photographs became shots, was 667 of them
-    # at a second each. Marking the unit here, before the step, is what the
-    # recluster step did afterwards; afterwards was three hours too late.
-    if "faces" not in done and not force and \
-            (cfg.work_root / "faces" / "embeddings.npy").exists():
-        db.mark_unit(conn, STAGE, "faces",
-                     detail="embeddings present; detection ran on another machine")
-        done.add("faces")
-        log.info("S03.6 embeddings found on disk; the faces step is taken as done "
-                 "(use --redo faces to detect the shots it never saw)")
-
     steps = [("proxies", lambda: build_proxies(cfg, conn, force=force)),
-             ("shots", lambda: detect_shots(cfg, conn)),
+             ("shots", lambda: detect_shots(
+                 cfg, conn, redo_all=force or "shots" in (redo or ()))),
              ("photos", lambda: build_photo_shots(cfg, conn)),
              # Cheap and pure, so it always re-runs: the track and the act
              # boundaries move whenever S02 does.
@@ -1199,7 +1208,14 @@ def run(cfg: Config, *, force: bool = False,
              ("gate", lambda: apply_gate(cfg, conn))]
     # The gate is a pure function of metrics and thresholds, both of which move
     # while the film is being tuned, so it is never skipped as already done.
-    always = {"gate", "place"} | set(redo or ())
+    # Every measuring step resumes through the data -- a shot with a
+    # sharpness, a loudness, a transcript, a face_score has been done -- so
+    # each always runs and costs nothing when nothing is pending. A "done"
+    # unit used to skip them, which after a re-detection left 1,060 shots
+    # with no metrics, no transcript and no face behind a marker that said
+    # otherwise. Shots too: detection now resumes per recording.
+    always = {"gate", "place", "shots", "metrics", "audio", "asr", "faces",
+              "recluster"} | set(redo or ())
     if "faces" in always:
         always.add("recluster")          # a fresh detection pass re-clusters itself
     unknown = (redo or set()) - {name for name, _ in steps}

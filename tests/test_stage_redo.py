@@ -50,28 +50,51 @@ def test_capture_time_override_sets_created_at_utc_by_filename(tmp_path):
     assert got == "2024-05-12T03:45:00+00:00"
 
 
-def test_s03_does_not_redetect_faces_when_embeddings_exist(tmp_path, monkeypatch):
-    """Detection ran on another machine and left embeddings.npy; the local DB
-    has no `faces` unit and 667 shots with no face_score. Resuming would be
-    three hours on this machine. The embeddings on disk are the evidence that
-    the step was done."""
-    import numpy as np
+def test_s03_measuring_steps_always_run_resumably_even_when_marked_done(tmp_path, monkeypatch):
+    """A re-detection replaced 1,060 shot rows, and metrics, audio, asr and
+    faces stayed behind a "done" marker: no metrics, no transcript, no face.
+    Each of them resumes through the data, so each always runs, with
+    force=False, and costs nothing when nothing is pending."""
     from nepal.stages import s03_process as s3
     work = tmp_path / "work"
-    (work / "faces").mkdir(parents=True)
-    np.save(work / "faces" / "embeddings.npy", np.zeros((2, 4)))
     cfg = Config({"project": {"data_root": str(tmp_path / "data"), "work_root": str(work),
                               "db_path": str(work / "db" / "nepal.sqlite")}})
-    for name in ("build_proxies", "detect_shots", "build_photo_shots", "place_shots",
-                 "measure_shots", "measure_audio", "transcribe_shots",
-                 "recluster_faces", "apply_gate"):
-        monkeypatch.setattr(s3, name, lambda *a, **k: {})
-
-    def boom(*a, **k):
-        raise AssertionError("detect_faces must not run")
-    monkeypatch.setattr(s3, "detect_faces", boom)
-    monkeypatch.setattr(s3.freshness, "warn_if_stale", lambda *a, **k: [])
-    rep = s3.run(cfg, redo={"place"})
-    assert rep["faces"] == {"skipped": "already done"}
     conn = db.init(cfg.db_path)
-    assert "faces" in db.done_units(conn, "S03")
+    for unit in ("proxies", "shots", "photos", "metrics", "audio", "asr", "faces"):
+        db.mark_unit(conn, "S03", unit)
+    conn.close()
+    calls: dict[str, dict] = {}
+
+    def spy(name):
+        def fn(*a, **k):
+            calls[name] = k
+            return {}
+        return fn
+    for name in ("build_proxies", "detect_shots", "build_photo_shots", "place_shots",
+                 "measure_shots", "measure_audio", "transcribe_shots", "detect_faces",
+                 "recluster_faces", "apply_gate"):
+        monkeypatch.setattr(s3, name, spy(name))
+    monkeypatch.setattr(s3.freshness, "warn_if_stale", lambda *a, **k: [])
+    rep = s3.run(cfg)
+    for name in ("detect_shots", "measure_shots", "measure_audio", "transcribe_shots",
+                 "detect_faces"):
+        assert name in calls, f"{name} must run even when marked done"
+    assert calls["measure_shots"]["force"] is False and calls["detect_faces"]["force"] is False
+    assert calls["detect_shots"]["redo_all"] is False
+    assert "build_proxies" not in calls and "build_photo_shots" not in calls
+    assert rep["proxies"] == {"skipped": "already done"}
+
+
+def test_shot_detection_resumes_per_recording(tmp_path):
+    """Only recordings with a proxy and no shots yet; everything with an
+    explicit redo."""
+    from nepal.stages.s03_process import recordings_to_detect
+    proxies = tmp_path / "proxies"
+    proxies.mkdir()
+    for rid in ("a", "b"):
+        (proxies / f"{rid}_eq.mp4").write_bytes(b"x")
+    recs = [{"recording_id": "a"}, {"recording_id": "b"}, {"recording_id": "c"}]
+    todo = recordings_to_detect(recs, have_shots={"a"}, proxies=proxies, redo_all=False)
+    assert [r["recording_id"] for r in todo] == ["b"]          # a has shots, c has no proxy
+    everything = recordings_to_detect(recs, have_shots={"a"}, proxies=proxies, redo_all=True)
+    assert [r["recording_id"] for r in everything] == ["a", "b"]
