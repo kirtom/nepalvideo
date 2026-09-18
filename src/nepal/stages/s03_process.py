@@ -271,8 +271,8 @@ def detect_shots(cfg: Config, conn) -> dict[str, Any]:
     # upsert alone would leave the old numbering behind as extra shots that no
     # longer describe anything. Photo shots have no recording_id and are
     # untouched.
-    stale = [(rid,) for rid in {row["recording_id"] for row in out}]
-    conn.executemany("DELETE FROM shots WHERE recording_id = ?", stale)
+    for rid in {row["recording_id"] for row in out}:
+        db.delete_shots(conn, recording_id=rid)      # and their slots in the cut
     db.upsert(conn, "shots", ["shot_id"], out)
     by_act: dict[Any, int] = {}
     for row in out:
@@ -299,10 +299,18 @@ def _bounds(conn) -> list:
 
 
 def _measure(item: dict[str, Any], *, max_px: int, slot_base: float,
-             curve: dict[str, float]) -> dict[str, Any]:
+             curve: dict[str, float], still_path: Path | None = None,
+             still_px: int = 1920) -> dict[str, Any]:
     """Decode one photograph and score it. Pure: no database, no shared state.
 
     Called from a thread pool, so it must touch nothing but its argument.
+
+    While the photograph is decoded anyway, a JPEG of it is written to
+    ``still_path``: the renderer reads that instead of the original. An
+    iPhone still is HEIC, and whether ffmpeg can open HEIC depends on how it
+    was built -- the local ffmpeg 9 can, the box's Ubuntu 4.4 cannot -- so
+    the draft failed on the first HEIC slot there. pillow-heif decodes it
+    here regardless, once, and every renderer gets a JPEG.
     """
     from PIL import Image
     import numpy as np
@@ -310,8 +318,14 @@ def _measure(item: dict[str, Any], *, max_px: int, slot_base: float,
     with Image.open(item["src"]) as im:
         # A no-op for HEIF -- libheif decodes at full size regardless -- but it
         # still lets the JPEG decoder scale during the DCT, which is free.
-        im.draft("RGB", (max_px, max_px))
+        im.draft("RGB", (max(max_px, still_px if still_path else 0),) * 2)
         im = im.convert("RGB")
+        if still_path is not None and not still_path.exists():
+            keep = im.copy()
+            keep.thumbnail((still_px, still_px))
+            tmp = still_path.with_suffix(".jpg.tmp")
+            keep.save(tmp, "JPEG", quality=90)
+            tmp.replace(still_path)
         im.thumbnail((max_px, max_px))
         arr = np.asarray(im)
         w, h = im.size
@@ -1003,6 +1017,8 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
     max_px = int(cfg.get("process.photo_analysis_px", 1024))
     slot_base = float(cfg.get("process.photo_slot_s"))
     workers = int(cfg.get("process.photo_workers", 0)) or (os.cpu_count() or 4)
+    stills_dir = cfg.workdir("stills")
+    still_px = int(cfg.get("process.still_px", 1920))
 
     # Decide what is worth measuring before measuring anything: a photo outside
     # every act cannot become a slot, and a 12 MP HEIC costs over a second to
@@ -1032,7 +1048,9 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
         try:
             measured[i] = _measure(item, max_px=max_px, slot_base=slot_base,
                                    curve=cfg.quality_curve(item["quality_curve"]
-                                                           or "phone"))
+                                                           or "phone"),
+                                   still_path=stills_dir / f"photo_{item['asset_id'][:16]}.jpg",
+                                   still_px=still_px)
         except (OSError, ValueError) as exc:
             ext = item["src"].suffix.lower()
             log.debug("could not read %s: %s", item["src"].name, exc)

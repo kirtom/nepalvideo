@@ -36,6 +36,26 @@ def test_gps_points_and_activities_carry_the_strava_columns(tmp_path):
     assert {"activity_id", "name", "start_utc", "end_utc", "hr_max", "n_points"} <= acols
 
 
+def test_delete_shots_takes_the_slots_with_them(tmp_path):
+    """timeline.shot_id references shots and foreign keys are on: a bare
+    DELETE on a shot in the cut is refused. Two remote runs died on it."""
+    conn = db.init(tmp_path / "t.sqlite")
+    conn.execute("INSERT INTO recordings(recording_id, source, is_360) VALUES ('r1', 'camera', 0)")
+    conn.execute("INSERT INTO assets(asset_id, s3_key, source, kind) VALUES ('a1', 'k', 'phone_keller', 'photo')")
+    conn.executemany("INSERT INTO shots(shot_id, recording_id, asset_id, media_kind, start_s, end_s) "
+                     "VALUES (?,?,?,?,0,3)", [("r1#0", "r1", None, "video"),
+                                             ("photo_a1", None, "a1", "photo")])
+    conn.executemany("INSERT INTO timeline(slot_index, act, shot_id, t_in, t_out) VALUES (?,1,?,0,3)",
+                     [(0, "r1#0"), (1, "photo_a1")])
+    conn.commit()
+    assert db.delete_shots(conn, recording_id="r1") == 1
+    assert db.delete_shots(conn, asset_id="a1") == 1
+    assert conn.execute("SELECT COUNT(*) FROM shots").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] == 0
+    with pytest.raises(ValueError):
+        db.delete_shots(conn)
+
+
 def test_assets_carry_the_heading_columns(tmp_path):
     conn = db.init(tmp_path / "t.sqlite")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(assets)")}

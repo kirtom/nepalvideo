@@ -244,9 +244,8 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
         # deleting the asset under them is refused, and the first re-probe on
         # a box that held fewer files died exactly there, halfway through
         # writing the manifest.
-        conn.executemany("DELETE FROM timeline WHERE shot_id IN "
-                         "(SELECT shot_id FROM shots WHERE asset_id=?)", rows_o)
-        conn.executemany("DELETE FROM shots WHERE asset_id=?", rows_o)
+        for a in orphans:
+            db.delete_shots(conn, asset_id=a)
         conn.executemany("DELETE FROM assets WHERE asset_id=?", rows_o)
         conn.commit()
 
@@ -353,7 +352,7 @@ def group_chapters(cfg: Config, conn) -> dict[str, Any]:
                         (rid,)).fetchone():
             still_used.append(rid)
             continue
-        conn.execute("DELETE FROM shots WHERE recording_id=?", (rid,))
+        db.delete_shots(conn, recording_id=rid)
         conn.execute("DELETE FROM recordings WHERE recording_id=?", (rid,))
         removed.append(rid)
     if removed:

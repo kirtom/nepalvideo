@@ -343,3 +343,26 @@ def test_one_unreadable_file_does_not_sink_the_whole_pool(project):
     rep = build_photo_shots(cfg, conn)
     assert rep["n_shots"] == 4
     assert sum(rep["rejected"].values()) == 1
+
+
+def test_every_photo_shot_gets_a_jpeg_still_for_the_renderer(project):
+    """Whether ffmpeg can open HEIC is a property of its build; the box's
+    could not. S03.0 decodes every photograph anyway, so it writes a JPEG
+    the renderer prefers."""
+    from nepal.stages.s03_process import build_photo_shots
+    from nepal.stages.s05_cut import photo_source
+    cfg, conn, data = project
+    add_photo(conn, data, "one.jpg", TREK + timedelta(days=4))
+    add_photo(conn, data, "two.jpg", TREK + timedelta(days=5))
+    build_photo_shots(cfg, conn)
+    rows = [dict(r) for r in conn.execute(
+        "SELECT s.shot_id, a.s3_key FROM shots s JOIN assets a ON a.asset_id = s.asset_id "
+        "WHERE s.media_kind='photo'")]
+    assert rows
+    for r in rows:
+        still = cfg.work_root / "stills" / f"{r['shot_id']}.jpg"
+        assert still.exists() and still.stat().st_size > 0
+        assert photo_source(cfg, r) == still
+    (cfg.work_root / "stills" / f"{rows[0]['shot_id']}.jpg").unlink()
+    fallback = photo_source(cfg, rows[0])
+    assert fallback == cfg.data_root / rows[0]["s3_key"].replace("raw/", "")

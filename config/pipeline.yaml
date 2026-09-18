@@ -172,6 +172,12 @@ process:
   # cost, so this scales very nearly linearly -- 3.7x on four cores, with
   # identical measurements. 0 means one per core.
   photo_workers: 0
+  # While a photograph is decoded for its metrics, a JPEG of it is written to
+  # work/stills/ at this size and the renderer reads that, not the original.
+  # Whether ffmpeg opens HEIC depends on its build: the box's Ubuntu 4.4
+  # refused every iPhone still and the draft died on the first. 1920 is
+  # enough for the 1080p deliverable; conform re-reads the original.
+  still_px: 1920
 
   # -- S03.1 proxies --------------------------------------------------
   # Proxy frame rate. Shot detection and metric sampling do not need thirty

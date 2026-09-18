@@ -16,7 +16,8 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Any
+from pathlib import Path
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -185,6 +186,21 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
             "had_embeddings": bool(embeddings)}
 
 
+def photo_source(cfg: Config, row: Mapping[str, Any]) -> Path | None:
+    """What the renderer reads for a photograph slot.
+
+    The JPEG S03.0 wrote while decoding, when it exists; the original only
+    as a fallback. An iPhone still is HEIC and whether ffmpeg opens HEIC is a
+    property of its build, not of the file -- the box's Ubuntu ffmpeg 4.4
+    refused every one of them, and the draft died on the first.
+    """
+    still = cfg.work_root / "stills" / f"{row['shot_id']}.jpg"
+    if still.exists():
+        return still
+    key = row.get("s3_key")
+    return cfg.data_root / str(key).replace("raw/", "") if key else None
+
+
 def render_draft(cfg: Config, conn) -> dict[str, Any]:
     """S07 -- render the cut to a watchable file."""
     rows = [dict(r) for r in conn.execute(
@@ -199,8 +215,7 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
     missing: dict[str, int] = {}
     for r in rows:
         if r["media_kind"] == "photo":
-            key = r.get("s3_key")
-            p = cfg.data_root / str(key).replace("raw/", "") if key else None
+            p = photo_source(cfg, r)
         else:
             p = proxies / f"{r['recording_id']}_eq.mp4"
         if p is not None and p.exists():

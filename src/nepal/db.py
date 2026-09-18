@@ -348,6 +348,27 @@ def pending(conn: sqlite3.Connection, stage: str, unit_ids: Iterable[str]) -> li
     return [u for u in unit_ids if u not in done]
 
 
+# -- deleting shots ----------------------------------------------------
+
+def delete_shots(conn: sqlite3.Connection, *, recording_id: str | None = None,
+                 asset_id: str | None = None) -> int:
+    """Remove a recording's or an asset's shots, and the slots that use them.
+
+    Three places used to delete shots on their own -- chapter grouping,
+    shot re-detection, the orphan sweep -- and each one worked until a cut
+    existed. `timeline.shot_id` references `shots`, foreign keys are on, and
+    a bare DELETE on a shot in the cut is refused; two remote runs died on
+    exactly that in one day. One helper, one order: slots, then shots.
+    """
+    if (recording_id is None) == (asset_id is None):
+        raise ValueError("delete_shots takes exactly one of recording_id, asset_id")
+    col, val = ("recording_id", recording_id) if recording_id else ("asset_id", asset_id)
+    conn.execute(f"DELETE FROM timeline WHERE shot_id IN "
+                 f"(SELECT shot_id FROM shots WHERE {col}=?)", (val,))
+    cur = conn.execute(f"DELETE FROM shots WHERE {col}=?", (val,))
+    return int(cur.rowcount)
+
+
 # -- generic upsert ----------------------------------------------------
 
 def upsert(conn: sqlite3.Connection, table: str, key_cols: Sequence[str],
