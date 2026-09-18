@@ -443,9 +443,10 @@ cloud:
   provider: gcp
   # Hard ceiling on what the pipeline may spend, in USD, across API calls and
   # VM hours as the ledger (work/reports/spend.json) records them. The
-  # operator approved 15 on 2026-09-16; the GCP billing budget is 60 and
-  # alerts at 50% and 80%, but that is a warning, this is a refusal.
-  spend_ceiling_usd: 15
+  # operator approved 15 on 2026-09-16 and raised it to 25 on 2026-09-18 when
+  # the CPU box went on-demand; the GCP billing budget is 60 and alerts at
+  # 50% and 80%, but that is a warning, this is a refusal.
+  spend_ceiling_usd: 25
   gcp:
     gcloud: ~/google-cloud-sdk/bin/gcloud
     project: nepalvideo
@@ -460,6 +461,10 @@ cloud:
     # in europe-west4 as of 2026-09-18, for the ledger's estimate only -- the
     # bill is what GCP says it is.
     profiles:
+      # On-demand, by the operator's call (2026-09-18): Spot took the box back
+      # in the middle of a twenty-minute faces pass, and the CPU box runs the
+      # long unattended chains. About three times the Spot price, ~$12 more
+      # over the project; the ledger ceiling went from 15 to 25 for it.
       cpu:
         name: nepal-cpu
         machine_type: e2-standard-8
@@ -467,8 +472,8 @@ cloud:
         image_family: ubuntu-2204-lts
         image_project: ubuntu-os-cloud
         accelerator: null
-        spot: true
-        usd_per_h: 0.11
+        spot: false
+        usd_per_h: 0.30
       gpu:
         name: nepal-gpu
         machine_type: g2-standard-4
