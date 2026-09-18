@@ -215,6 +215,10 @@ selected recordings only (~120 files).
 
 ### 3.2 `beats` (new)
 
+*Amended 2026-09-18 (step 3): the table is named `story_beats`. `beats` was
+already the music beat grid S02.7 writes and S05 reads, and renaming a table
+two stages read is not worth the churn. Columns as below plus `created_utc`.*
+
 ```sql
 CREATE TABLE beats (
   beat_id     TEXT PRIMARY KEY,

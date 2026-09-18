@@ -180,6 +180,34 @@ also ingests the 35 new Keller photos added 2026-09-17: 27–28 April and
 11–12 May), face detection on the 667 unseen shots, the FOV re-solve
 (`nepal s01 --redo fov`), the draft render.
 
+## Film v2 — step 3: the voice spine (2026-09-18)
+
+Built and tested against recorded answers; run on the box up to the dry
+run. **The live call waits on one thing the operator holds:** the API key
+as instance metadata (`gcloud compute instances add-metadata nepal-cpu
+--zone europe-west4-a --metadata anthropic-api-key=…`), after which
+`nepal remote run beats` makes the call, about a dollar.
+
+**What changed.** Whisper's segments now live in the row
+(`shots.transcript_json`) with `no_speech_prob`, `compression_ratio` and word
+times; the 166 transcripts from before the JSON existed carry one synthetic
+segment over the shot until the re-transcription with `word_timestamps`
+replaces them. A deterministic filter (S03.5b, `process/hallucination.py`)
+marks the transcripts whisper made up and the gate folds the flag into
+`has_speech`. `speech_first` is gone from the fill. `nepal beats` (S04.5)
+builds the prompt — brief, rules, day table with the watch's km/gain/HR,
+every real transcript with clause-end cut points, the chat with authors
+replaced by A/B/C — counts it, refuses above `beats.max_input_tokens`,
+`beats.estimate_usd_cap` or the ledger ceiling, calls `claude-opus-5` with a
+JSON schema, validates the answer against §4.2, sends the complaints back
+once, and writes `story_beats`, `work/beats/beats.json` and
+`work/gates/gate2/index.html`. The SDK is behind one wrapper
+(`cloud/claude.py`) with a fake for the tests.
+
+**Numbers from the box** are filled in below once the step 3 jobs finish
+(`tools/cloud/jobs-step3.sh`: the suite, the prompt priced, the
+re-transcription, the prompt again).
+
 ## The last full run
 
 S01 + S03.0/.1/.2 on the real corpus, 4.5 hours wall clock. These numbers are

@@ -116,6 +116,20 @@ Each of these cost a wrong diagnosis or a wasted multi-hour run.
 - **A run measured in hours must checkpoint.** Accumulating in memory and
   writing once at the end means a kill at hour five costs five hours and
   leaves nothing to resume from. Write through a temporary name and rename.
+- **Whisper draws one segment per shot unless asked for words.** With no
+  previous text to condition on, a 20 s window comes back as one segment,
+  so "cut at an utterance" was "cut at the shot" for 332 transcripts. Ask
+  for `word_timestamps` and keep what comes back (`no_speech_prob` too:
+  the filter had nothing to read until it was stored).
+- **A transcript is not speech until a filter has read it.** Whisper wrote
+  subtitle credits over wind, and `has_speech` put them first in their
+  acts. Anything that treats a transcript as a claim must check
+  `hallucinated` -- or better, read `has_speech`, which the gate now
+  derives with the flag folded in.
+- **Nobody is named in what leaves the machine.** The chat authors are A,
+  B, C by first appearance in the prompt and on every card; the test asserts
+  the names are absent. Keep it that way in every stage that asks Claude a
+  question.
 
 ## Decisions that are not yours
 

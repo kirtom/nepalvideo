@@ -158,6 +158,8 @@ nepal s03                           # per-clip processing
 nepal diagnose                      # when the checkpoint table looks wrong
 nepal fov-check                     # Gate 1 seam comparison sheets
 nepal prune [--dry-run]             # remove what the pipeline no longer produces
+nepal beats [--dry-run] [--force]   # S04.5: Claude reads the transcripts and the chat
+                                    # and returns the beat sheet (Gate 2)
 ```
 
 **Every stage is resumable.** Each sub-step records completion in
@@ -173,7 +175,7 @@ nepal s03 --redo shots,photos       # re-detect and re-measure; proxies untouche
 nepal s03                           # the gate always re-runs; everything else resumes
 ```
 
-Valid `--redo` steps: `proxies,shots,photos,place,metrics,audio,asr,faces,recluster,gate`.
+Valid `--redo` steps: `proxies,shots,photos,place,metrics,audio,asr,hallucination,faces,recluster,gate`.
 S01 and S02 take `--redo` too (`manifest,chapters,fov,clock` and
 `gps_track,telegram,geotag,asr,music,acts`), so re-solving the FOV or
 re-reading the Strava export no longer means `--force` and an hour of clock
@@ -321,6 +323,22 @@ altitude curve exists).
   the film as a searchable index of a personal video library. Built and
   measured (~6 h on 4 CPU cores); not yet run to completion.
 - **S04.2 Framing / S04.3 Captions** — *not built.* Both need Claude.
+- **S04.5 The beat sheet** (`nepal beats`, Film v2 §4.2) — one Claude call
+  that reads every non-hallucinated transcript with its cut points, the
+  whole chat anonymised to A/B/C, and the day table with the watch's numbers,
+  and returns the 10–16 spoken moments that carry the story, the Act 1
+  quotes, the closing line, the planning-versus-reality pairs and the
+  trailer picks. The answer is validated against the rules (counts,
+  chronology, cut points, verbatim text) and sent back once with the
+  complaints; what passes lands in `story_beats`, `work/beats/beats.json`
+  and the Gate 2 page. Three refusals happen before a token is bought:
+  `beats.max_input_tokens`, `beats.estimate_usd_cap`, the project ledger.
+  `--dry-run` writes the prompt to `work/beats/prompt.txt` with the estimate
+  and calls nothing. About a dollar a run; re-run only with `--force`.
+  Before it, S03.5b (the hallucination filter) marks the transcripts whisper
+  made up — subtitle credits, a phrase looped, a segment whisper itself
+  doubted, text over a window the VAD heard nothing in — and takes their
+  `has_speech` away everywhere.
 
 ### S05 — Score
 
@@ -475,8 +493,12 @@ what is needed to decide, and stops.
 1. **Gate 1 — FOV and clocks.** `nepal fov-check` renders seam comparison
    sheets at each candidate FOV alongside the measured discontinuity curve.
    Confirm by eye; confirm the clock offsets regardless of their confidence.
-2. **Gate 2 — Shot veto.** Review the shortlist, veto shots, confirm the face
-   cluster labels.
+2. **Gate 2 — The voice and the shortlist.** `work/gates/gate2/index.html`
+   shows the beat sheet: every chosen line with its reason, a link to the
+   proxy at the moment, the quotes, the pairs, the closing line. Drop,
+   retime or re-rank by editing `work/beats/beats.json` (or the
+   `story_beats` rows). Then review the shortlist, veto shots, confirm the
+   face cluster labels.
 3. **Gate 3 — Draft cut.** Approve the rough cut before conform.
 
 Milestone 6 wires these into Step Functions with `waitForTaskToken`. Until
