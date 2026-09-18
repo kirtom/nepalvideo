@@ -36,6 +36,10 @@ def probed(tmp_path_factory):
     cfg_data["project"]["data_root"] = str(data)
     cfg_data["project"]["work_root"] = str(base / "work")
     cfg_data["project"]["db_path"] = str(base / "work" / "db" / "nepal.sqlite")
+    # The repo config carries the operator's word on the real camera's clock
+    # (Gate 1). The fixture camera has its own planted error, and these
+    # tests are about the solver recovering it.
+    cfg_data.setdefault("probe", {}).setdefault("clock", {})["offset_overrides_s"] = {}
     cfg_path = base / "cfg.yaml"
     cfg_path.write_text(yaml.safe_dump(cfg_data))
 
