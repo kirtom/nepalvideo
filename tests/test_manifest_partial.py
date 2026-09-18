@@ -48,8 +48,8 @@ def test_an_orphan_photo_takes_its_shot_and_its_slot_with_it(tmp_path):
                  "('gone', 'raw/media_from_phones/keller/IMG_9.jpg', 'phone_keller', 'photo')")
     conn.execute("INSERT INTO shots(shot_id, asset_id, media_kind, start_s, end_s) "
                  "VALUES ('photo_gone', 'gone', 'photo', 0.0, 3.0)")
-    conn.execute("INSERT INTO timeline(slot_index, act, shot_id, t_in, t_out) "
-                 "VALUES (0, 2, 'photo_gone', 0.0, 3.0)")
+    conn.execute("INSERT INTO timeline(slot_index, act, kind, shot_id, t_in, t_out) "
+                 "VALUES (0, 2, 'photo', 'photo_gone', 0.0, 3.0)")
     conn.commit()
     rep = s01_probe.build_manifest(cfg, conn)
     assert rep["n_orphans_removed"] == 1

@@ -171,12 +171,18 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         per_act[act] = len(laid)
         t = laid[-1]["t_out"] if laid else t
 
+    # lay_out's rows don't carry media_kind (it isn't needed to place a shot on
+    # the grid); timeline.kind is v2's, so it is looked up from the shots this
+    # function already read rather than threaded through lay_out for a v1
+    # stage that Task 9 rewrites anyway.
+    media_kind_by_id = {r["shot_id"]: r.get("media_kind") for r in rows}
     conn.execute("DELETE FROM timeline")
     conn.executemany(
-        "INSERT INTO timeline(slot_index, act, shot_id, t_in, t_out, src_in, src_out, yaw) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        [(i, r["act"], r["shot_id"], r["t_in"], r["t_out"], r["src_in"], r["src_out"],
-          r.get("yaw")) for i, r in enumerate(timeline)])
+        "INSERT INTO timeline(slot_index, act, kind, shot_id, t_in, t_out, src_in, src_out, yaw) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        [(i, r["act"], "photo" if media_kind_by_id.get(r["shot_id"]) == "photo" else "video",
+          r["shot_id"], r["t_in"], r["t_out"], r["src_in"], r["src_out"], r.get("yaw"))
+         for i, r in enumerate(timeline)])
     conn.commit()
 
     paths = timeline_io.write(timeline, cfg.workdir("."),

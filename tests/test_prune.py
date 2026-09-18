@@ -31,8 +31,8 @@ def _seed(tmp_path):
         "VALUES (?,?,?,?,?,?)",
         [("phone_kulikov_IMG#0000", "phone_kulikov_IMG", "video", 0.0, 20.0, "shortlisted"),
          ("phone_kulikov_IMG_0001#0000", "phone_kulikov_IMG_0001", "video", 0.0, 4.0, "candidate")])
-    conn.execute("INSERT INTO timeline(slot_index, act, shot_id, t_in, t_out) "
-                 "VALUES (0, 1, 'phone_kulikov_IMG#0000', 0.0, 4.0)")
+    conn.execute("INSERT INTO timeline(slot_index, act, kind, shot_id, t_in, t_out) "
+                 "VALUES (0, 1, 'video', 'phone_kulikov_IMG#0000', 0.0, 4.0)")
     conn.execute("INSERT INTO stage_units(stage, unit_id, status) "
                  "VALUES ('S03', 'proxy:phone_kulikov_IMG', 'done')")
     conn.commit()

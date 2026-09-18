@@ -20,8 +20,8 @@ def _seed(tmp_path):
                      "VALUES (?,?,?,?,?,?)",
                      [("r#0", "r", "video", 0, 5, "shortlisted"),
                       ("r#1", "r", "video", 5, 9, "rejected")])
-    conn.execute("INSERT INTO timeline(slot_index, act, shot_id, t_in, t_out) "
-                 "VALUES (0, 3, 'r#0', 0, 4.5)")
+    conn.execute("INSERT INTO timeline(slot_index, act, kind, shot_id, t_in, t_out) "
+                 "VALUES (0, 3, 'video', 'r#0', 0, 4.5)")
     db.mark_unit(conn, "S03", "faces", detail="x")
     db.mark_unit(conn, "S03", "place")
     reports = tmp_path / "reports"

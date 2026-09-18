@@ -96,9 +96,13 @@ def test_an_older_db_gains_the_voice_spine_columns(tmp_path):
 
 def test_a_fresh_db_has_the_picture_and_audio_tables(tmp_path):
     conn = db.init(tmp_path / "n.sqlite")
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(timeline)")}
+    ordered_cols = tuple(r[1] for r in conn.execute("PRAGMA table_info(timeline)"))
+    cols = set(ordered_cols)
     assert {"kind", "secondary_shot_id", "secondary_src_in", "motion", "speed",
             "transition", "beat_id", "scene_id"} <= cols
+    # TIMELINE_V2_COLUMNS is read by writers as the insert's column order; it
+    # must not drift from the DDL it is meant to describe.
+    assert db.TIMELINE_V2_COLUMNS == ordered_cols
     assert {r[1] for r in conn.execute("PRAGMA table_info(audio_cues)")} >= {
         "cue_id", "track", "t_in", "t_out", "source", "src_in", "src_out",
         "gain_lufs", "fade_in_s", "fade_out_s", "beat_id"}
