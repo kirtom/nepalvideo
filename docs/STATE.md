@@ -461,8 +461,30 @@ the test suite.
   `nepal-gpu` g2-standard-4 + L4), a startup script that is idempotent on
   every boot, a spend ledger (`work/reports/spend.json`) with a 15 USD
   refusal, and a manifest that leaves absent sources alone so the box's
-  partial corpus cannot delete the camera rows. `nepal-cpu` was created at
-  06:5x UTC; first remote timings below once they exist.
+  partial corpus cannot delete the camera rows.
+- **The first remote chain that ran clean (2026-09-18, 06:02–06:17 UTC,
+  `tools/cloud/jobs-step2.sh`)**, on `nepal-cpu` (e2-standard-8, 8 cores):
+  tests 1:01 (the fast suite alone is 14 s there against 2.5 min locally),
+  manifest re-probe with the heading tags and the 35 new photos 1:52 (1,247
+  hashes reused, 37 stale rows removed), prune 0:01, spine 0:19, S03 9:20 of
+  which faces over 581 shots 6:32 (538 faces; the photographs had never been
+  looked at), score + timeline + render 2:05, push 0:06. **14:44 end to
+  end.** Result: 1,551 of 1,775 shots survive; 178 slots, 14.4 min; a
+  112 MB draft in the bucket and pulled here. The camera originals were
+  never needed.
+- **Four chains failed before that one, each on something the local runs
+  had never exercised:** the manifest deleting an asset a photo shot still
+  referenced (foreign keys); shot re-detection deleting shots the timeline
+  referenced (same); `--redo shots` replacing every shot row and the metrics,
+  transcripts and faces they carried while "done" markers skipped the steps
+  that would have restored them; the box's Ubuntu ffmpeg 4.4 unable to open
+  HEIC; and Spot preempting the box mid-faces. All five are fixed in code
+  (`db.delete_shots`, per-recording resumable detection, measuring steps
+  that always run resumably, JPEG stills from S03.0, push-on-boot) and the
+  CPU box is on-demand by the operator's call.
+- **Step 2b, the dashboard**, is built: Cloud Monitoring dashboard "nepal",
+  log-based metric `nepal_errors` with an email alert, the Ops Agent on the
+  box, and `work/status/index.html` in the bucket after every run.
 - **Preferred music** (operator, same day, as a soft prior for the per-scene
   assignment): Heartbeats, The Imitation Game, Outro, The Long Song, Time,
   Send Me on My Way — `music.preferred_tracks`.
