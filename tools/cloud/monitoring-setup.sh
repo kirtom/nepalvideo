@@ -45,6 +45,16 @@ if [ -z "$DASH" ]; then
   $G monitoring dashboards create --project "$P" --config-from-file "$HERE/dashboard.json" 2>&1 | tail -1
 else
   echo "exists $DASH; updating from the file"
-  $G monitoring dashboards update "${DASH##*/}" --project "$P" --config-from-file "$HERE/dashboard.json" 2>&1 | tail -1
+  # An update must carry the current etag, which the checked-in file cannot
+  # know; fetch it and splice it into a temporary copy.
+  ETAG=$($G monitoring dashboards describe "${DASH##*/}" --project "$P" --format 'value(etag)' 2>/dev/null)
+  TMP=$(mktemp /tmp/nepal-dashboard.XXXXXX.json)
+  python3 - "$HERE/dashboard.json" "$TMP" "$ETAG" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["etag"] = sys.argv[3]
+json.dump(d, open(sys.argv[2], "w"))
+PY
+  $G monitoring dashboards update "${DASH##*/}" --project "$P" --config-from-file "$TMP" 2>&1 | tail -1
+  rm -f "$TMP"
 fi
 echo "dashboards: https://console.cloud.google.com/monitoring/dashboards?project=$P"
