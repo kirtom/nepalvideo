@@ -223,9 +223,18 @@ Gate 1's word and the place step moves the shots with their recording. The
 ledger became one file per entry so the box and this machine stop
 overwriting each other's copy.
 
-**The corrected chain** (`jobs-step3.sh resume`: suite, `s01 --redo clock`,
-`s02 --redo geotag,acts`, `s03`, `beats --dry-run`) — numbers below when it
-finishes.
+**The corrected chain** (`jobs-step3.sh resume`, 50 min): the camera at
++14.00 d by override, no solve; the place step moved the camera's shots
+with it — camera file day 13 is now 27 April in Act 1 (the departure lunch),
+day 22 is 6 May in Act 4 (the pass, 8 shots: the battery, presumably), days
+23–27 are 7–11 May in Act 5. Surviving shots per act: 82, 77, 884, 151, 347
+(9 outside every act). The 218 owed transcriptions took 44.6 min at 0.9×
+realtime; the filter now marks **70 of 500** (53 phrase, 37 whisper's own
+no-speech probability, 1 loop); the gate keeps 1,550 of 1,775. The prompt:
+**426 transcripts, 970 segments, 833 clause-level cut points, none
+whole-shot only**, 1,858 messages, 29 days, ~89k tokens, **0.85 USD
+estimated**; no name and no file id in it. Box time for step 3 in total
+about 1.9 h on the on-demand e2-standard-8.
 
 **Operator feedback on the draft** (2026-09-18) is answered in spec §13.11:
 the chronology break was the camera clock (fixed); wallpaper, smaller round
