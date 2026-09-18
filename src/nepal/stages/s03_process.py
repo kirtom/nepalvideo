@@ -636,6 +636,7 @@ def transcribe_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any
     language = cfg.get("spine.whisper_language")
     beam = int(cfg.get("process.asr_beam_size", 5))
     threads = int(cfg.get("process.asr_cpu_threads", 0))
+    word_times = bool(cfg.get("asr.word_timestamps", True))
     speech_total = sum(float(r["speech_s"] or 0) for r in rows)
     log.info("S03.5 transcribing %d shot(s), %.1f min of speech, with %s (%s), beam %d",
              len(rows), speech_total / 60, model_name, language or "auto", beam)
@@ -657,16 +658,22 @@ def transcribe_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any
         try:
             x, _sr = audio_mod.read_window(wav, r["start_s"], r["end_s"])
             res = asr_mod.transcribe_window(model, x, language=language, beam_size=beam,
-                                            offset_s=float(r["start_s"]))
+                                            offset_s=float(r["start_s"]),
+                                            word_timestamps=word_times)
         except Exception as exc:                       # one shot must not end the stage
             log.warning("S03.5 %s failed: %s", r["shot_id"], exc)
             key = type(exc).__name__
             failed[key] = failed.get(key, 0) + 1
             continue
+        doc = {"shot_id": r["shot_id"], **res}
         (out_dir / f"{r['shot_id'].replace('#', '_')}.json").write_text(json.dumps(
-            {"shot_id": r["shot_id"], **res}, ensure_ascii=False, indent=1))
-        conn.execute("UPDATE shots SET transcript=? WHERE shot_id=?",
-                     (res["text"], r["shot_id"]))
+            doc, ensure_ascii=False, indent=1))
+        # The segments go in the row as well as the file: the beat sheet and
+        # the filter read the table, and a file that is not pulled from the
+        # bucket is a transcript that does not exist.
+        conn.execute("UPDATE shots SET transcript=?, transcript_json=?, hallucinated=NULL "
+                     "WHERE shot_id=?",
+                     (res["text"], json.dumps(doc, ensure_ascii=False), r["shot_id"]))
         conn.commit()                                  # each shot survives a kill
         done_n += 1
         audio_done += float(r["end_s"]) - float(r["start_s"])
@@ -689,6 +696,45 @@ def transcribe_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any
     return {"n_shots": len(rows), "n_transcribed": done_n, "failed": failed,
             "seconds": round(el, 1), "realtime_factor": round(el / max(audio_done, 1e-6), 2),
             "n_empty": empty, "chars": chars}
+
+
+def backfill_transcript_json(cfg: Config, conn) -> dict[str, Any]:
+    """Give every transcribed shot its segments in the row.
+
+    Two generations of transcript exist: the ones S03.5 wrote a JSON for, and
+    the 166 it transcribed before it did, which have text in the table and
+    nothing else. The first are read from their file; the second get one
+    segment spanning the shot (``asr.synthetic_transcript``) until a
+    re-transcription replaces it. Idempotent: only NULL rows are touched.
+    """
+    rows = [dict(r) for r in conn.execute(
+        "SELECT shot_id, start_s, end_s, transcript FROM shots "
+        "WHERE transcript IS NOT NULL AND transcript_json IS NULL")]
+    if not rows:
+        return {"n_rows": 0}
+    tdir = cfg.work_root / "transcripts" / "shots"
+    from_files = synthetic = 0
+    updates: list[tuple[str, str]] = []
+    for r in rows:
+        path = tdir / f"{r['shot_id'].replace('#', '_')}.json"
+        doc = None
+        if path.exists():
+            try:
+                doc = json.loads(path.read_text())
+            except ValueError:
+                doc = None
+        if doc and isinstance(doc.get("segments"), list):
+            from_files += 1
+        else:
+            doc = asr_mod.synthetic_transcript(r)
+            synthetic += 1
+        updates.append((json.dumps(doc, ensure_ascii=False), r["shot_id"]))
+    conn.executemany("UPDATE shots SET transcript_json=? WHERE shot_id=?", updates)
+    conn.commit()
+    log.info("S03.5 segments filled in for %d shot(s): %d from files, %d synthetic "
+             "(one segment over the shot; re-transcribe with --redo asr for words)",
+             len(rows), from_files, synthetic)
+    return {"n_rows": len(rows), "from_files": from_files, "synthetic": synthetic}
 
 
 def detect_faces(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
