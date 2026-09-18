@@ -98,9 +98,16 @@ def test_planning_photos_are_refused_not_extrapolated(spined):
 
 # -- S02.3 altitude ----------------------------------------------------
 
+# The fixture trek is Lukla to Kala Patthar, which sits on these two tiles;
+# the reference fetch covers the real trek's extent (Manaslu), so the
+# Everest tiles are present only where somebody fetched them deliberately.
+_FIXTURE_TILES = ("N27E086", "N28E086")
+
+
 @needs_tools
-@pytest.mark.skipif(not (ROOT / "data" / "srtm").exists(),
-                    reason="SRTM tiles not fetched; run tools/fetch_reference.py")
+@pytest.mark.skipif(
+    not all((ROOT / "data" / "srtm" / f"{t}.hgt").exists() for t in _FIXTURE_TILES),
+    reason=f"fixture tiles {_FIXTURE_TILES} not fetched (the real trek is elsewhere)")
 def test_altitudes_come_from_the_dem_and_climb(spined):
     from nepal import db
     _, _, cfg = spined
