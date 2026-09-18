@@ -29,7 +29,7 @@ def _seed(tmp_path):
     (reports / "s03_process.json").write_text(json.dumps(
         {"stage": "S03", "finished_utc": "2026-09-18T05:00:00+00:00"}))
     (reports / "remote_jobs.log").write_text("--- s03 05:00:00\nS03.6 faces 10/10\n")
-    led = spend.Ledger(reports / "spend.json")
+    led = spend.Ledger(reports / "spend")
     led.record("gce:cpu", 0.42)
     return conn, led, reports
 

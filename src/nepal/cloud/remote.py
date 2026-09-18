@@ -102,10 +102,16 @@ class Remote:
         if since:
             hours = (datetime.now(timezone.utc)
                      - datetime.fromisoformat(since)).total_seconds() / 3600
-            spend.ledger(self.cfg).record(
+            led = spend.ledger(self.cfg)
+            led.record(
                 f"gce:{self.profile_key}", hours * self.profile.usd_per_h,
                 detail=f"{hours:.2f} h {self.profile.machine_type} at "
                        f"{self.profile.usd_per_h} USD/h (estimate)")
+            # The box guards the API spend against this total, and it reads
+            # the ledger from the bucket at its next run: push the entry now,
+            # not at the next `remote push` somebody remembers to make.
+            self.gcloud.run(sync.rsync_args(str(led.path), f"{self.bucket}/work/reports/spend"),
+                            check=False)
         self._save(state)
         args = (gce.delete_args if delete else gce.stop_args)(
             self.profile.name, project=self.project, zone=self.zone)

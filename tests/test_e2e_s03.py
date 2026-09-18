@@ -271,7 +271,11 @@ def test_the_gate_judges_a_shot_on_its_own_sources_curve(project):
 @needs_tools
 def test_re_detection_replaces_a_recordings_shots_rather_than_adding_to_them(project):
     """Boundaries move whenever the threshold or the maximum length moves. An
-    upsert alone leaves the old numbering behind as shots that describe nothing."""
+    upsert alone leaves the old numbering behind as shots that describe nothing.
+
+    Detection resumes per recording since step 2 -- a recording with shots is
+    done -- so a stale shot survives a plain run and goes with `--redo shots`
+    (``redo_all``), which is the run a threshold change asks for."""
     from nepal.stages.s03_process import detect_shots
     cfg, conn = project
     before = conn.execute("SELECT COUNT(*) FROM shots WHERE media_kind='video'").fetchone()[0]
@@ -279,7 +283,10 @@ def test_re_detection_replaces_a_recordings_shots_rather_than_adding_to_them(pro
                  "VALUES ('camera_20240506_081200#0099','camera_20240506_081200',"
                  "'video',0.0,1.0)")
     conn.commit()
-    detect_shots(cfg, conn)
+    detect_shots(cfg, conn)                        # resumes: the recording has shots
+    assert conn.execute("SELECT COUNT(*) FROM shots WHERE media_kind='video'"
+                        ).fetchone()[0] == before + 1
+    detect_shots(cfg, conn, redo_all=True)         # re-detects: the ghost goes
     assert conn.execute("SELECT COUNT(*) FROM shots WHERE media_kind='video'"
                         ).fetchone()[0] == before
     assert not conn.execute("SELECT 1 FROM shots WHERE shot_id LIKE '%#0099'").fetchall()

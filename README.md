@@ -574,12 +574,15 @@ instance metadata attribute `anthropic-api-key`, which the startup script
 exports into the `nepal` user's profile; set it with
 `gcloud compute instances add-metadata nepal-cpu --metadata anthropic-api-key=…`.
 
-**The ledger.** `work/reports/spend.json` records every VM hour (written by
-`down`, at the profile's estimated price) and every paid API call (written by
-the stage that made it, from the response's `usage`). `up` and every paid
-stage ask it first and refuse past `cloud.spend_ceiling_usd` (15). The GCP
-billing budget ("nepal", 60 USD, alerts at 50% and 80%) is the warning
-behind the refusal.
+**The ledger.** `work/reports/spend/` holds one small JSON per entry: every
+VM hour (written by `down`, at the profile's estimated price, and pushed to
+the bucket at once) and every paid API call (written on the box by the stage
+that made it, from the response's `usage`). One file per entry because two
+hosts write the ledger and the bucket carries it by rsync both ways; a
+single file would be clobbered by whichever host pushed its older copy
+last. `up` and every paid stage ask it first and refuse past
+`cloud.spend_ceiling_usd` (25). The GCP billing budget ("nepal", 60 USD,
+alerts at 50% and 80%) is the warning behind the refusal.
 
 **A host that holds part of the corpus.** The box never sees the 60 GB of
 camera originals, so the manifest leaves the rows of any source whose
