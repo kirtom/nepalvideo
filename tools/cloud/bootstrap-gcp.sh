@@ -57,8 +57,10 @@ fi
 
 # -- the bucket -> the same paths the config names -----------------------
 if [ -n "$BUCKET" ]; then
+  # All three as the user, not root: the first boot made nepalvideo/data as
+  # root, the rsync into it ran as nepal, and READY was never written.
   mkdir -p $ROOT/nepal_data $ROOT/nepal_work $ROOT/nepalvideo/data
-  chown -R $USER_NAME:$USER_NAME $ROOT/nepal_data $ROOT/nepal_work
+  chown -R $USER_NAME:$USER_NAME $ROOT/nepal_data $ROOT/nepal_work $ROOT/nepalvideo/data
   sudo -u $USER_NAME gcloud storage rsync --recursive "$BUCKET/raw"  $ROOT/nepal_data
   sudo -u $USER_NAME gcloud storage rsync --recursive "$BUCKET/work" $ROOT/nepal_work
   sudo -u $USER_NAME gcloud storage rsync --recursive "$BUCKET/ref/data" $ROOT/nepalvideo/data
