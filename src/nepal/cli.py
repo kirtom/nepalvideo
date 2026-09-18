@@ -12,6 +12,8 @@
     nepal decisions              auto-solved values with confidence
     nepal diagnose               when the checkpoint table looks wrong
     nepal prune [--dry-run]      remove what the pipeline no longer produces
+    nepal remote up|down|status|push|pull|ssh [--gpu]
+    nepal remote run <nepal args> / exec -- <shell command>   on the GCP box
 
 Everything runs through this one entry point on purpose: a console script uses
 the interpreter the package was installed into, so it cannot pick up a
@@ -107,6 +109,15 @@ def main(argv: list[str] | None = None) -> int:
                                           "the pipeline no longer produces")
     pprune.add_argument("--dry-run", action="store_true",
                         help="report what would go without touching anything")
+
+    prem = sub.add_parser("remote", help="run things on the GCP box (Film v2 section 2.2)")
+    prem.add_argument("action", choices=["up", "down", "status", "push", "pull", "run",
+                                         "exec", "ssh"])
+    prem.add_argument("--gpu", action="store_true", help="the GPU profile instead of cpu")
+    prem.add_argument("--delete", action="store_true", help="down: delete rather than stop")
+    prem.add_argument("--no-wait", action="store_true", help="up: do not wait for READY")
+    prem.add_argument("rest", nargs=argparse.REMAINDER,
+                      help="run: nepal arguments; exec: a shell command (after --)")
 
     args = ap.parse_args(argv)
     if getattr(args, "no_progress", False):
@@ -215,6 +226,36 @@ def main(argv: list[str] | None = None) -> int:
               "in the config, or record it with:\n"
               "  nepal decisions   (to see what is stored now)")
         return 0
+
+    if args.cmd == "remote":
+        from nepal.cloud import remote as remote_mod, spend
+        r = remote_mod.Remote(cfg, "gpu" if args.gpu else "cpu")
+        rest = [a for a in args.rest if a != "--"]
+        if args.action == "status":
+            st = r.status()
+            led = spend.ledger(cfg)
+            print(f"{r.profile.name}: {st.state}{' at ' + st.ip if st.ip else ''}; "
+                  f"ledger {led.total():.2f} of {cfg.get('cloud.spend_ceiling_usd')} USD")
+            return 0
+        if args.action == "up":
+            st = r.up(wait=not args.no_wait)
+            print(f"{r.profile.name}: {st.state} at {st.ip}")
+            return 0
+        if args.action == "down":
+            r.down(delete=args.delete)
+            return 0
+        if args.action == "push":
+            r.push()
+            return 0
+        if args.action == "pull":
+            r.pull()
+            return 0
+        if args.action == "run":
+            return r.run_nepal(rest)
+        if args.action == "exec":
+            return r.exec_cmd(" ".join(rest))
+        if args.action == "ssh":
+            return r.ssh()
 
     if args.cmd == "prune":
         from nepal import prune
