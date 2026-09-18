@@ -418,3 +418,52 @@ music:
   # against a cue that will never play there. Matched on file name, stem or
   # title; a name that matches nothing is a warning, never a silent no-op.
   credits_track: "Marusha.Somewhere over the Rainbow.mp3"
+
+# Remote execution (Film v2 section 2.2). The local machine computes nothing;
+# everything runs on one GCP Spot VM with the bucket as the hub.
+cloud:
+  provider: gcp
+  # Hard ceiling on what the pipeline may spend, in USD, across API calls and
+  # VM hours as the ledger (work/reports/spend.json) records them. The
+  # operator approved 15 on 2026-09-16; the GCP billing budget is 60 and
+  # alerts at 50% and 80%, but that is a warning, this is a refusal.
+  spend_ceiling_usd: 15
+  gcp:
+    gcloud: ~/google-cloud-sdk/bin/gcloud
+    project: nepalvideo
+    region: europe-west4
+    zone: europe-west4-a
+    bucket: gs://nepalvideo-29922345852
+    # The branch the box checks out. The box always resets to origin/<branch>,
+    # so push before `nepal remote run`.
+    branch: worktree-film-v2-design
+    repo: https://github.com/kirtom/nepalvideo.git
+    # Two profiles: everything that is CPU, and the GPU minutes. Spot prices
+    # in europe-west4 as of 2026-09-18, for the ledger's estimate only -- the
+    # bill is what GCP says it is.
+    profiles:
+      cpu:
+        name: nepal-cpu
+        machine_type: e2-standard-8
+        disk_gb: 60
+        image_family: ubuntu-2204-lts
+        image_project: ubuntu-os-cloud
+        accelerator: null
+        spot: true
+        usd_per_h: 0.11
+      gpu:
+        name: nepal-gpu
+        machine_type: g2-standard-4
+        disk_gb: 100
+        image_family: ubuntu-2204-lts
+        image_project: ubuntu-os-cloud
+        accelerator: nvidia-l4
+        spot: true
+        usd_per_h: 0.30
+    # Where the box keeps things: the same paths the config names, so
+    # pipeline.yaml needs no change on the box.
+    remote_data_root: /data/projects/nepal_data
+    remote_work_root: /data/projects/nepal_work
+    remote_repo: /data/projects/nepalvideo
+    # How long `up` waits for the startup script to write its READY marker.
+    ready_timeout_s: 1500
