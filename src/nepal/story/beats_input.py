@@ -14,7 +14,6 @@ the model cannot pick what it does not see.
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Sequence
@@ -59,16 +58,6 @@ class Cast:
 
     def author(self, name: str | None) -> str:
         return self.tags.get(name or "", "?")
-
-    def name_words(self) -> list[tuple[str, str]]:
-        """Each word of each author string, with the author's tag: what
-        a chat body has to lose before it leaves the machine."""
-        out: list[tuple[str, str]] = []
-        for author, tag in self.tags.items():
-            for w in re.findall(r"\w+", author):
-                if len(w) >= 3:
-                    out.append((w.lower(), tag))
-        return out
 
     def cluster(self, label: str | None) -> str | None:
         return self.cluster_tags.get(label or "")
@@ -243,32 +232,6 @@ def render_transcripts(rows: Sequence[Mapping[str, Any]], cast: Cast) -> str:
     return "\n".join(lines)
 
 
-_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-_MENTION = re.compile(r"@\w+")
-_PHONE = re.compile(r"\+?\d[\d\s().-]{7,}\d")
-
-
-def scrub_text(text: str, cast: Cast, extra_words: Iterable[str] = ()) -> str:
-    """A chat body names people the author tagging never touches. The
-    first live prompt carried an @mention, a pasted visa email addressed by
-    full name, and a contact card with a phone number and an email. Emails,
-    phone numbers and mentions go; each author's name words become the
-    author's tag (`Kulikova` too: the suffix is kept off); the operator's
-    `beats.scrub_words` become `[name]`. Transcripts are not touched: what
-    was said to the camera is the film."""
-    text = _EMAIL.sub("[email]", text)
-    # nine digits or more, so a date (8) or a price survives
-    text = _PHONE.sub(lambda m: "[phone]" if sum(c.isdigit() for c in m.group()) >= 9
-                      else m.group(), text)
-    text = _MENTION.sub("@someone", text)
-    for word, tag in cast.name_words():
-        text = re.sub(rf"(?<!\w){re.escape(word)}\w*", tag, text, flags=re.IGNORECASE)
-    for word in extra_words:
-        if word:
-            text = re.sub(rf"(?<!\w){re.escape(word)}\w*", "[name]", text, flags=re.IGNORECASE)
-    return text
-
-
 def render_chat(rows: Sequence[Mapping[str, Any]], cast: Cast) -> str:
     lines = ["# The chat (UTC; speakers are A, B, C by first appearance)", ""]
     for r in rows:
@@ -319,11 +282,6 @@ def build_prompt(cfg, conn, *, rules: Mapping[str, Any]) -> Prompt:
     days = day_rows(conn)
     cast = Cast.build([r["author"] for r in chat],
                       [r.get("face_cluster") for r in trans])
-    # Scrubbed in place, so the validator's copy and the cards see the
-    # same text the model saw.
-    extra = [str(w) for w in (cfg.get("beats.scrub_words", []) or [])]
-    for r in chat:
-        r["text"] = scrub_text(r["text"], cast, extra)
     vocab_path = cfg.work_root / "vocab" / "telegram_vocab.json"
     vocab: list[str] = []
     if vocab_path.exists():

@@ -561,10 +561,6 @@ beats:
   estimate_chars_per_token: 3.0
   # long messages are clipped in the prompt; a card is 180 characters anyway
   chat_max_chars: 500
-  # Chat bodies lose emails, phone numbers, @mentions and the authors' own
-  # name words before they leave the machine; words listed here (a first
-  # name in Cyrillic, a nickname) become "[name]" as well.
-  scrub_words: []
 
 # -- the API, priced ---------------------------------------------------------
 # USD per million tokens, for the estimate before the call and the ledger

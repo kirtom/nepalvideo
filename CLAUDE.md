@@ -129,9 +129,9 @@ Each of these cost a wrong diagnosis or a wasted multi-hour run.
 - **Nobody is named in what leaves the machine.** The chat authors are A,
   B, C by first appearance in the prompt and on every card; the test asserts
   the names are absent. Keep it that way in every stage that asks Claude a
-  question. And the bodies, not just the authors: the first live prompt
-  carried an `@mention`, a pasted visa email with a full name and a contact
-  card with a phone number. `scrub_text` runs on every chat body.
+  question. The bodies of the messages are not masked: the operator read
+  what the first live prompt carried (a mention, a pasted visa email, a
+  contact card) and said no masking is needed. Do not add it back.
 - **A script under `set -x` prints every value it holds.** The bootstrap
   read the API key into a variable and traced it into its log, syslog, the
   serial console and Cloud Logging. Nothing on the box holds the key: the

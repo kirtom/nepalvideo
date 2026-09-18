@@ -207,14 +207,12 @@ call: attempt 1 read the prompt and wrote 18.7k tokens for 1.36 USD;
 attempt 2 re-read it **from the cache** (marked on the request) and wrote
 5.4k for 0.23 USD — the cache saved about 0.65 USD on the retry.
 
-**What left the machine that should not have.** The authors are A/B/C,
-but chat *bodies* named people six times: an `@mention`, a pasted visa
-email addressed by full name, and one contact card with a phone number
-and an email. Bodies are now scrubbed (emails, phone numbers, mentions,
-the authors' name words; `beats.scrub_words` for Cyrillic first names and
-nicknames, empty until the operator lists them) before the prompt is
-rendered, and the validator and the cards see the scrubbed text.
-Transcripts are not scrubbed: what was said to the camera is the film.
+**What the chat bodies carry.** The authors are A/B/C, but the message
+bodies named people six times: an `@mention`, a pasted visa email
+addressed by full name, and one contact card with a phone number and an
+email. Reported to the operator, who decided **no masking of bodies is
+needed**; a scrubber written that evening was removed the same evening.
+The cards still carry no author names.
 
 **The key's first boot leaked it too**, into logs only the project owner
 can read: the bootstrap traced it under `set -x` into its log, syslog,
