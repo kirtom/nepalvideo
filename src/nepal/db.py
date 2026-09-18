@@ -238,6 +238,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("assets", "heading_ref", "TEXT"),
     ("assets", "pos_error_m", "REAL"),
     ("assets", "focal_35mm", "REAL"),
+    # The file's mtime at probe time, so a re-probe hashes only what changed.
+    ("assets", "mtime", "REAL"),
     # From the watch: heart rate and barometric altitude per fix, and the
     # activity the fix belongs to. alt_dem_m keeps holding the *resolved*
     # altitude (barometric where it exists, DEM otherwise), as it always did

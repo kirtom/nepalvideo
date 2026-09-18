@@ -36,6 +36,7 @@ class Remote:
         self.branch = str(g["branch"])
         self.remote_repo = str(g["remote_repo"])
         self.remote_work = str(g["remote_work_root"])
+        self.remote_data = str(g["remote_data_root"])
         self.ready_timeout = float(g.get("ready_timeout_s", 1500))
         self.gcloud = gcloud or Gcloud(g.get("gcloud", "gcloud"))
         self.state_path = cfg.work_root / "reports" / "remote_state.json"
@@ -123,7 +124,11 @@ class Remote:
 
     # -- commands ---------------------------------------------------------
     def _wrap(self, command: str) -> str:
-        pull = f"gcloud storage rsync --recursive {self.bucket}/work {self.remote_work}"
+        # raw/ is refreshed too: material lands in the bucket after the box
+        # was first booted (the upload outlives the bootstrap), and an rsync
+        # of an unchanged tree costs a listing.
+        pull = (f"gcloud storage rsync --recursive {self.bucket}/raw {self.remote_data} && "
+                f"gcloud storage rsync --recursive {self.bucket}/work {self.remote_work}")
         push = f"gcloud storage rsync --recursive {self.remote_work} {self.bucket}/work"
         return (f"cd {self.remote_repo} && git fetch -q origin {self.branch} && "
                 f"git reset -q --hard origin/{self.branch} && "

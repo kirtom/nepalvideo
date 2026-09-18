@@ -73,6 +73,11 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
                     "GPS and device timestamps will be far less complete.")
 
     have_ffprobe = proc.have("ffprobe")
+    # A file whose size and mtime match its row has the bytes it had last
+    # time; hashing 8 GB again to learn that costs the re-probe its point.
+    known = {r["s3_key"]: (r["asset_id"], r["bytes"], r["mtime"]) for r in conn.execute(
+        "SELECT s3_key, asset_id, bytes, mtime FROM assets")}
+    reused = 0
     rows: list[dict[str, Any]] = []
     clock_evidence: dict[str, list[float]] = {}
     regstamped: list[dict[str, Any]] = []
@@ -145,13 +150,22 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
         if kind != cls["kind"]:
             demoted += 1
 
+        st = path.stat()
+        prev = known.get(f"raw/{rel}")
+        if prev and prev[1] == st.st_size and prev[2] is not None and \
+                abs(float(prev[2]) - st.st_mtime) < 1.0:
+            asset_id = prev[0]                 # same bytes as last time, by size and mtime
+            reused += 1
+        else:
+            asset_id = sha256_file(path)
         rows.append({
-            "asset_id": sha256_file(path),
+            "asset_id": asset_id,
             "s3_key": f"raw/{rel}",
             "source": cls["source"],
             "kind": kind,
             "container": cls["container"],
-            "bytes": path.stat().st_size,
+            "bytes": st.st_size,
+            "mtime": st.st_mtime,
             "width": width,
             "height": height,
             "fps": fps,
@@ -209,8 +223,12 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
     # messages.media_asset references assets(asset_id), so the link is cleared
     # first rather than letting a foreign key abort the stage.
     keep = {r["asset_id"] for r in unique_rows}
-    orphans = [r["asset_id"] for r in conn.execute("SELECT asset_id FROM assets")
-               if r["asset_id"] not in keep]
+    absent = manifest.absent_sources(root)
+    orphans = [r["asset_id"] for r in conn.execute("SELECT asset_id, source FROM assets")
+               if r["asset_id"] not in keep and r["source"] not in absent]
+    if absent:
+        log.info("S01.1 this host does not hold %s; their rows are left untouched",
+                 ", ".join(sorted(absent)))
     if orphans:
         log.warning("S01.1 %d asset row(s) in the database no longer exist in %s "
                     "and were removed -- a deleted file, or one whose bytes changed",
@@ -266,6 +284,7 @@ def build_manifest(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
 
     return {"n_assets": len(unique_rows), "n_files_seen": len(rows),
             "n_orphans_removed": len(orphans),
+            "n_hash_reused": reused, "sources_absent": sorted(absent),
             "by_source": by_source, "duplicates": duplicates,
             "gps_agreement": gps_agreement,
             "n_restamped_from_gps": len(regstamped),

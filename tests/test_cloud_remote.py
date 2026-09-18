@@ -108,6 +108,7 @@ def test_run_wraps_the_command_with_sync_and_branch_reset(env):
     cmd = [a for a in ssh[-1] if a.startswith("--command=")][0]
     assert "reset -q --hard origin/br" in cmd
     assert "gcloud storage rsync --recursive gs://b/work /data/projects/nepal_work" in cmd
+    assert "gcloud storage rsync --recursive gs://b/raw /data/projects/nepal_data" in cmd
     assert ".venv/bin/nepal s03 --redo place" in cmd
     assert "gcloud storage rsync --recursive /data/projects/nepal_work gs://b/work" in cmd
     assert cmd.index("nepal s03") < cmd.index("/data/projects/nepal_work gs://b/work")

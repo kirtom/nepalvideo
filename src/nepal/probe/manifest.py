@@ -375,6 +375,23 @@ DEFAULT_EXCLUDE_DIRS = frozenset({
     "$RECYCLE.BIN", "System Volume Information", "lost+found",
 })
 
+# Where each source lives under data_root. A host that holds only part of the
+# corpus -- the GCP box has the phones, the chat and the music but not 60 GB
+# of camera originals -- must leave the rows of the sources it cannot see
+# alone rather than treat every one of them as a deleted file.
+SOURCE_DIRS = {
+    "camera": "media_from_camera",
+    "phone_keller": "media_from_phones/keller",
+    "phone_kulikov": "media_from_phones/kulikov",
+    "telegram": "chat_export",
+    "music": "music",
+}
+
+
+def absent_sources(root: Path) -> set[str]:
+    """Sources whose directory does not exist under ``root`` on this host."""
+    return {src for src, sub in SOURCE_DIRS.items() if not (Path(root) / sub).is_dir()}
+
 
 def walk_media(root: Path, *, skip_hidden: bool = True,
                exclude_dirs: frozenset[str] | set[str] | None = None,
