@@ -157,6 +157,7 @@ nepal decisions                     # auto-solved values, with confidence
 nepal s03                           # per-clip processing
 nepal diagnose                      # when the checkpoint table looks wrong
 nepal fov-check                     # Gate 1 seam comparison sheets
+nepal prune [--dry-run]             # remove what the pipeline no longer produces
 ```
 
 **Every stage is resumable.** Each sub-step records completion in
@@ -172,7 +173,17 @@ nepal s03 --redo shots,photos       # re-detect and re-measure; proxies untouche
 nepal s03                           # the gate always re-runs; everything else resumes
 ```
 
-Valid `--redo` steps: `proxies,shots,photos,metrics,audio,asr,gate`.
+Valid `--redo` steps: `proxies,shots,photos,place,metrics,audio,asr,faces,recluster,gate`.
+S01 and S02 take `--redo` too (`manifest,chapters,fov,clock` and
+`gps_track,telegram,geotag,asr,music,acts`), so re-solving the FOV or
+re-reading the Strava export no longer means `--force` and an hour of clock
+correlation.
+
+**`db.upsert` never removes**, so `nepal prune` exists: it re-derives the
+recording grouping from the assets already in the database and deletes the
+recordings, shots, timeline rows and work files that the current rules no
+longer produce. `--dry-run` reports what would go. Run it after any change to
+the grouping rules or to `nepal_data/`.
 
 A re-run without `--force` warns when a completed unit was produced by an older
 version of the code, so a report that changed nothing cannot be mistaken for
@@ -233,8 +244,11 @@ comfortably inside what geotagging and act assignment need.
 
 Builds the story the film will follow.
 
-- **S02.1 GPS track** — merges phone photo EXIF and any shared GPX, drops
-  points implying travel above 60 m/s.
+- **S02.1 GPS track** — merges, in order of trust, the Strava export in
+  `nepal_data/strava/` (an Apple Watch: a fix a second, barometric altitude
+  and heart rate, one FIT file per trekking day), any shared GPX, and phone
+  photo EXIF; drops points implying travel above 60 m/s. The activities
+  become one row per trekking day with the day's name and its real start.
 - **S02.2–.4 Place everything** — interpolates position for assets without
   their own fix, attaches SRTM altitude and a GeoNames place name. Refuses to
   interpolate across gaps longer than `spine.max_interp_gap_s`.
@@ -260,6 +274,12 @@ altitude curve exists).
   `photo_slot_s`, measured on the *same* sharpness and exposure scale as video.
   They were once on a different scale, which let the photo gate pass everything
   and saturated `score_tech`.
+- **`place`** — every shot, video or still, gets a position interpolated from
+  the track, an altitude (barometric between watch fixes, DEM otherwise), a
+  place name and a trek day. Always re-run, because the track and the act
+  boundaries move whenever S02 does; a photograph keeps its own fix and gains
+  only what the fix lacks. Before this existed, video shots had none of it
+  and the context score favoured stills.
 - **S03.1 Proxies** — one decode, multiple encodes: a 1024×512 equirect proxy
   and a 16 kHz mono audio track per recording. Audio is written to its own
   `.wav`, not muxed into the proxy. The four rectilinear yaw views the spec
@@ -625,6 +645,7 @@ Each is a deliberate change with a reason, not an oversight.
 |---|---|---|
 | Bundle an offline Nominatim extract for reverse geocoding | GeoNames country dump plus a KD-tree | Nominatim needs PostgreSQL, PostGIS and a multi-gigabyte OSM import to name about fifty cluster centroids. A GeoNames dump is a few megabytes of text with no service to run, and it returns villages and peaks rather than postal addresses — which is the question a trek actually asks. |
 | Read SRTM tiles (implying a geo stack) | `numpy` directly on `.hgt` | An `.hgt` file is raw big-endian int16 with no header. GDAL and rasterio are a large dependency for one array lookup. Validated against real NASA tiles: Tengboche +2 m, Lukla −10 m, Dingboche −45 m. |
+| Photos are the geolocation spine | Strava first, photos fill the gaps | The operator's watch tracked every trekking day at a fix a second with barometric altitude and heart rate. Photo EXIF still covers the jeep days and the cities, where the watch did not run. |
 | Camera is the reference clock | The GPS-validated phone is | Photos with a GPS fix also carry satellite time, so `DateTimeOriginal` against `GPSDateTime` is direct evidence of which clock to trust. On this corpus the camera is provably the wrong one. |
 | Clock offsets from audio cross-correlation over ±600 s | Coincidence voting proposes candidates, then audio arbitrates | The delivered camera's clock is about fourteen days out — roughly two thousand times the ±600 s search window, so the audio stage alone would never have found it. |
 | Music features from audio files | Also from a playlist export | The delivered `music/` held a playlist CSV and no audio. Spotify audio features cover four of the five dimensions the act assignment needs; the fifth, dynamic range, has no playlist analogue and is masked out of the distance rather than approximated. |

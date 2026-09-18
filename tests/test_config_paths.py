@@ -182,3 +182,15 @@ def test_an_explicit_config_that_does_not_exist_is_reported_clearly(tmp_path):
 
     with pytest.raises(ConfigNotFound):
         Config.load(tmp_path / "nope.yaml")
+
+
+def test_the_shipped_config_declares_every_step1_key():
+    cfg = Config.load(pathlib.Path(__file__).resolve().parents[1] / "config" / "pipeline.yaml")
+    assert cfg.get("probe.exclude_dirs") == ["strava"]
+    assert "*.zip" in cfg.get("probe.ignore_globs")
+    assert cfg.get("probe.capture_time_overrides") == {}
+    assert cfg.get("spine.strava_dir") == "strava"
+    assert cfg.get("spine.strava_sample_s") == 5
+    assert cfg.get("spine.named_peaks")[0]["name"] == "Manaslu"
+    assert cfg.get("effort.hr_rest_bpm") == 60 and cfg.get("effort.hr_max_bpm") == 170
+    assert cfg.get("render.fps") == 30

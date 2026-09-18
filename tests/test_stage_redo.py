@@ -48,3 +48,30 @@ def test_capture_time_override_sets_created_at_utc_by_filename(tmp_path):
     assert n == 1
     got = conn.execute("SELECT created_at_utc FROM assets WHERE asset_id='x'").fetchone()[0]
     assert got == "2024-05-12T03:45:00+00:00"
+
+
+def test_s03_does_not_redetect_faces_when_embeddings_exist(tmp_path, monkeypatch):
+    """Detection ran on another machine and left embeddings.npy; the local DB
+    has no `faces` unit and 667 shots with no face_score. Resuming would be
+    three hours on this machine. The embeddings on disk are the evidence that
+    the step was done."""
+    import numpy as np
+    from nepal.stages import s03_process as s3
+    work = tmp_path / "work"
+    (work / "faces").mkdir(parents=True)
+    np.save(work / "faces" / "embeddings.npy", np.zeros((2, 4)))
+    cfg = Config({"project": {"data_root": str(tmp_path / "data"), "work_root": str(work),
+                              "db_path": str(work / "db" / "nepal.sqlite")}})
+    for name in ("build_proxies", "detect_shots", "build_photo_shots", "place_shots",
+                 "measure_shots", "measure_audio", "transcribe_shots",
+                 "recluster_faces", "apply_gate"):
+        monkeypatch.setattr(s3, name, lambda *a, **k: {})
+
+    def boom(*a, **k):
+        raise AssertionError("detect_faces must not run")
+    monkeypatch.setattr(s3, "detect_faces", boom)
+    monkeypatch.setattr(s3.freshness, "warn_if_stale", lambda *a, **k: [])
+    rep = s3.run(cfg, redo={"place"})
+    assert rep["faces"] == {"skipped": "already done"}
+    conn = db.init(cfg.db_path)
+    assert "faces" in db.done_units(conn, "S03")

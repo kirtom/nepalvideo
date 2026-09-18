@@ -1135,6 +1135,19 @@ def run(cfg: Config, *, force: bool = False,
     report["skipped_stale"] = freshness.warn_if_stale(
         log, conn, STAGE, force=force, rerun_hint="nepal s03 --force")
 
+    # Face detection that ran elsewhere leaves its embeddings on disk but no
+    # `faces` unit in this database, and the step resumes on every shot with
+    # no face_score -- which, once photographs became shots, was 667 of them
+    # at a second each. Marking the unit here, before the step, is what the
+    # recluster step did afterwards; afterwards was three hours too late.
+    if "faces" not in done and not force and \
+            (cfg.work_root / "faces" / "embeddings.npy").exists():
+        db.mark_unit(conn, STAGE, "faces",
+                     detail="embeddings present; detection ran on another machine")
+        done.add("faces")
+        log.info("S03.6 embeddings found on disk; the faces step is taken as done "
+                 "(use --redo faces to detect the shots it never saw)")
+
     steps = [("proxies", lambda: build_proxies(cfg, conn, force=force)),
              ("shots", lambda: detect_shots(cfg, conn)),
              ("photos", lambda: build_photo_shots(cfg, conn)),

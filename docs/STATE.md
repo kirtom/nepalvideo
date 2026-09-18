@@ -58,9 +58,9 @@ Ordered by what they cost the film.
 2. **No CLIP embeddings — MMR ran with no diversity term.** S04.1 is built
    and measured (~6 h on this CPU) but has not completed a run. Without it
    MMR degenerates to score order, and the cut visibly repeats itself.
-3. **The draft on disk is pre-fix.** It was rendered before the slot-clamping
-   fix, so it contains slots that claim footage that does not exist. Re-run
-   `nepal cut` before judging Gate 3.
+3. **The draft on disk is stale.** It predates the slot-clamping fix, the
+   prune and the step-1 fixes below; the timeline in the database is current,
+   the render is not. The next render runs on the remote box.
 
 ### Built but not wired
 
@@ -75,20 +75,18 @@ Ordered by what they cost the film.
 
 ### Correctness traps still open
 
-6. **`db.upsert` never removes, and there is no prune step.** If any source
-   media is deleted, a re-run leaves ghost rows — recordings, shots,
-   transcripts, face clusters — for media that no longer exists, and those
-   ghosts remain eligible for selection. **A pruned-corpus re-run needs
-   either a fresh database or a prune step. Neither exists yet.**
+6. ~~`db.upsert` never removes, and there is no prune step.~~ **Resolved
+   2026-09-18:** `nepal prune` removes what the current rules no longer
+   produce; it took three ghost recordings and 83 shots out of the corpus.
 7. **Gate 1 FOV is unconfirmed.** `fov_deg = 193` is a carried-over fallback:
    the last S01 ran `--skip-fov`, so the value predates frame-shape
    classification and was measured on flat proxies that are not fisheye at
    all. Re-solving needs `nepal s01 --force`, and a materially different
    answer means rebuilding the 22 dual-fisheye proxies.
 8. **`spine.whisper_language: ru` is still marked "confirm".**
-9. **`awscliv2.zip` was ingested as an asset** (71 MB, `unknown / other /
-   zip`). The manifest walks `data_root` and the AWS CLI installer was in it.
-   Harmless, but it means the manifest has no ignore list.
+9. ~~`awscliv2.zip` was ingested as an asset.~~ **Resolved 2026-09-18:**
+   `probe.ignore_globs` and `probe.exclude_dirs`; the row goes at the next
+   manifest re-probe.
 
 ### Consequences to decide, not bugs
 
@@ -105,6 +103,82 @@ Ordered by what they cost the film.
     11 GB RAM, and measured **6.3 GB into swap** — which is why loading a
     1.7 GB checkpoint took 455 s. Closing browsers tripled S02.6's speed and
     is worth as much again.
+
+## Film v2 — step 1: data hygiene and the Strava spine (2026-09-18)
+
+The design in `docs/superpowers/specs/2026-09-16-film-v2-voice-spine-design.md`
+is approved; the eight-step order of work is in its §11. Step 1 is the data
+foundation, and it ran on the real corpus today. Everything below was
+measured, not estimated.
+
+**Pruned.** `nepal prune` removed the three ghost recordings the old chapter
+rule had produced (`phone_kulikov_IMG`, `phone_keller_IMG`, `telegram_IMG`):
+3 recordings, 83 shots, 219 files, 300 MB. Act 1 no longer contains Larke
+Pass; every Act 1 slot is now dated February to 13 April.
+
+**Strava is the spine.** `nepal_data/strava/` holds eleven activities, one
+per trekking day, from an Apple Watch. Ingested at 5 s spacing: **43,499 track
+points, 8,969 with heart rate**, barometric altitude, summit 5,154 m. Photo
+EXIF now contributes 608 points for the days the watch did not run. The act
+boundaries came out the same as before, which is the right answer. The
+activities table carries each day's name and real start: *Dharmasala to
+Larkya Pass* began 22:22 UTC on 5 May, 04:07 local.
+
+**Every shot placed.** The new `place` sub-step (always re-run, seconds):
+
+| Kind | Surviving | Positioned | With altitude | Named | On a trek day | Face |
+|---|---:|---:|---:|---:|---:|---:|
+| video | 847 | 668 (was 0) | 654 | 654 | 801 | 342 (was 0) |
+| photo | 702 | 640 | 614 | 614 | 640 | 0 |
+
+The unpositioned video is planning-phase Telegram, Kathmandu and home
+material outside the track. Photographs have never had face detection: the
+EC2 face pass covered video only, and the 667 shots it never saw are a
+three-hour job for this machine, so they wait for the remote box.
+
+**The cut, rescored and rebuilt (not rendered):** 176 slots, 14.8 min.
+
+| Act | Slots | Stills | Faces | Placed | Speech | Seconds |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 21 | 5 | 13 | 0 | 15 | 78 |
+| 2 | 32 | 23 | 1 | 32 | 2 | 140 |
+| 3 | 66 | 25 | 21 | 57 | 33 | 344 |
+| 4 | 9 | 1 | 7 | 9 | 7 | 29 |
+| 5 | 48 | 7 | 28 | 18 | 39 | 298 |
+
+Same-recording runs of three or more consecutive slots fell from 11 to 5.
+Two things the numbers now say plainly, both owned by step 4 (constraints):
+
+- **Act 4 starved to 9 slots** because the place cap of three per place
+  finally has place names to act on, and the summit act is three places
+  (Bimtākothi 33 shortlisted, Lārke Bhañjyāṅ 25, Lārke Glacier 6). The spec
+  says relax diversity before chronology; the assembler does not yet relax.
+- **Act 2 is still 23 stills of 32.** The context score no longer favours
+  photographs (photo 0.043 against video 0.251), but the photo budget in
+  `select.py` is still not called, so nothing caps them.
+
+**Other fixes in this step:** `db.upsert` refuses rows that do not share
+keys (a first row without `lat` had silently dropped the column for 930
+shots); `has_face` is derived at gate time from the stored score; the
+manifest has an ignore list and asks exiftool for the heading and the lens
+(`GPSImgDirection`, `FocalLengthIn35mmFormat`), stored on `assets` once the
+manifest is re-probed; `--redo` on S01 and S02; `probe.capture_time_overrides`
+for the three undated Kulikov clips; the draft renders at one rate
+(`render.fps: 30`); heart rate is half the effort score where the watch
+recorded one. 867 fast tests collected (was 827), all passing.
+
+**Two traps met on the way, both now in CLAUDE.md:** a worktree has no
+`data/` (SRTM, GeoNames), so the first spine re-run wrote null altitudes and
+collapsed the acts until `data/` was symlinked; and the faces step, finding
+embeddings on disk but no `faces` unit, resumed a three-hour detection on
+this machine before the marking that should have prevented it — that marking
+now runs before the step.
+
+**Still to do locally-cheap:** nothing. **Waiting for the remote box (step
+2):** the manifest re-probe (`nepal s01 --redo manifest,chapters`, which
+also ingests the 35 new Keller photos added 2026-09-17: 27–28 April and
+11–12 May), face detection on the 667 unseen shots, the FOV re-solve
+(`nepal s01 --redo fov`), the draft render.
 
 ## The last full run
 
@@ -255,6 +329,13 @@ the operator's.
 
 ## Do these next, in order
 
+0. **Film v2, steps 2–8** per the spec's §11. Step 2 (GCP remote execution
+   and the spend guard) is next; its first remote jobs are the manifest
+   re-probe with the 35 new photos, the faces pass on the 667 unseen shots,
+   and the draft render. Locally, after any change to `nepal_data/`: `nepal
+   prune`, then `nepal s02 --redo gps_track,geotag,acts`, `nepal s03 --redo
+   place`, `nepal cut --redo score,timeline`.
+
 1. ~~Editable reinstall~~ — **done 2026-09-15.** `nepal doctor` says
    `(editable -- this checkout is what runs)`. `nepal` is not on PATH unless
    `.venv` is activated; use `.venv/bin/nepal`.
@@ -359,8 +440,12 @@ the operator's.
 
 ## The cloud move
 
-**The AWS account is suspended** (2026-09-15) pending document verification;
-the operator has submitted them. While it is down, Bedrock is unreachable, so
+**The AWS account was suspended for good on 2026-09-18**, without
+notification ("account details couldn't be verified"), after the 2026-09-15
+hold. Nothing more is planned on AWS. **Step 2 of Film v2 moves remote
+execution to GCP** (project 29922345852; the SDK is installed under
+`~/google-cloud-sdk`; bucket and VM to come). What follows is the AWS
+history, kept for the measurements. While it is down, Bedrock is unreachable, so
 S04.2 framing, S04.3 captioning and S06's ordering refinement are all blocked.
 Nothing else is: every remaining stage runs on this machine.
 

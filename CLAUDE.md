@@ -74,6 +74,31 @@ Each of these cost a wrong diagnosis or a wasted multi-hour run.
   assets, recordings, shots — survives unless it is explicitly deleted.
 - **Do not optimise speculatively.** This pipeline runs once. A measured 3x is
   worth taking; a plausible one is not worth the turn.
+- **Every row of an upsert must carry every column.** `db.upsert` takes its
+  columns from the first row. A row that lacked `lat` when the first row had
+  it once dropped the column for the whole batch and left 930 video shots
+  unpositioned; the upsert now refuses mismatched rows, so write `None`
+  rather than omitting a key.
+- **A flag written by one sub-step and wiped by another must be derived, not
+  stored.** `has_face` was set by S03.6 and lost when S03.2 replaced the
+  rows; it now joins `stability`, `has_speech` and `wind` as something the
+  gate re-derives from the stored measurement every run.
+- **A worktree has no `data/`.** Relative reference paths (`spine.srtm_dir`,
+  `spine.geonames_path`) resolve against the project root, and a worktree is
+  its own root with no fetched tiles. The first spine re-run from a worktree
+  wrote null altitude for every point and collapsed the acts to one day.
+  Symlink `data/` from the main checkout before running anything from a
+  worktree, and read `nepal doctor` first.
+- **A resumable step resumes everything it never saw.** S03.6 resumes on
+  `face_score IS NULL`; once photographs became shots, that was 667 rows and
+  three hours on this machine, started by a run that only asked for `place`.
+  The marking that says "done elsewhere" must happen before the step, not
+  after, and a step that can cost hours should say how much it is about to
+  resume before it starts.
+- **A ghost survives until something deletes it.** The chapter-grouping fix
+  landed after S01.2 had run, and three merged "recordings" with 83 surviving
+  shots stayed eligible for selection through two draft cuts. `nepal prune`
+  exists for this; run it after any change to what the pipeline produces.
 - **A status whitelist stops matching the moment a later stage promotes a
   row.** S04.1 selected `status = 'candidate'`; S05 promotes its picks to
   `'shortlisted'`, so once a cut existed the stage skipped exactly the shots

@@ -105,6 +105,17 @@ probe:
     coarse_max_offset_s: 3888000     # 45 days
   # S01.2 chapter grouping acceptance
   max_chapter_gap_s: 1.0
+  # Directories under data_root that are not media. The Strava export is read
+  # by S02.1 directly; walked by the manifest it would become 12 "assets".
+  exclude_dirs: [strava]
+  # Files that are not media wherever they sit: an installer, the thumbnail
+  # Telegram writes beside every PDF, a spreadsheet lock file.
+  ignore_globs: ["*.zip", "*_thumb.jpg", ".~lock*"]
+  # A capture time the operator knows and the file does not, by file name.
+  # Three phone clips on this corpus carry only an export date (2025-11-22),
+  # and no clock offset can recover a time that was never recorded.
+  #   video_1_902aaa.mp4: "2024-05-12T09:30:00+05:45"
+  capture_time_overrides: {}
 
 spine:
   # Reference data. Both are optional: absent, altitude and place names stay
@@ -132,7 +143,18 @@ spine:
   card_max_chars: 180         # "short, self-contained, quotable"
   # S02.6
   whisper_model: large-v3
-  whisper_language: ru        # OPEN QUESTION 3 — confirm
+  whisper_language: ru        # confirmed by the operator, 2026-09-16: Russian natives
+  # S02.1 Strava. One FIT file per trekking day from an Apple Watch: a fix a
+  # second, barometric altitude, heart rate. Sampled to this spacing on the
+  # way in -- one fix in five seconds is 56k points for the trek, which the
+  # interpolation handles in milliseconds; one a second is five times that
+  # for nothing the film can see.
+  strava_dir: strava
+  strava_sample_s: 5
+  # Summits the film may label in the frame (Film v2 section 13.3).
+  # Coordinates from GeoNames; altitude in metres.
+  named_peaks:
+    - {name: Manaslu, lat: 28.5497, lon: 84.5597, alt_m: 8163}
   # S02.7
   music_segments: 8
   swell_percentile: 75
@@ -303,6 +325,13 @@ gate:
   speech_sharpness_factor: 0.6
   speech_min_duration_s: 1.0
 
+# Effort from the watch. The band that maps heart rate onto 0..1: rest is a
+# fit adult at breakfast, the top is what the watch recorded on day one of
+# this trek. Read by spine/effort.py and, later, by the S06 scene targets.
+effort:
+  hr_rest_bpm: 60
+  hr_max_bpm: 170
+
 semantic:
   max_caption_shots: 2500     # THE ONLY UNBOUNDED COST — spec section 8.1
   frames_per_caption: 4
@@ -356,6 +385,9 @@ assemble:
 
 render:
   draft: {width: 960, height: 540, crf: 23}
+  # One rate for every leg of the concat. The proxies are 15 fps, the phones
+  # 30 or 60, and a concat of mixed rates produced a 120 fps draft.
+  fps: 30
   music_lufs: -14.0            # the music bed
   duck_lufs: -28.0             # location audio under the bed
   duck_lufs_speech: -22.0      # music under speech
