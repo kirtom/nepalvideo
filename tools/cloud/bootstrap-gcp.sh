@@ -54,7 +54,7 @@ sudo -u $USER_NAME git fetch -q origin "$BRANCH"
 sudo -u $USER_NAME git reset -q --hard "origin/$BRANCH"
 [ -d .venv ] || sudo -u $USER_NAME python3 -m venv .venv
 sudo -u $USER_NAME .venv/bin/pip install -q --upgrade pip
-sudo -u $USER_NAME .venv/bin/pip install -q -e '.[vision,music,asr,faces,semantic,dev]'
+sudo -u $USER_NAME .venv/bin/pip install -q -e '.[vision,music,asr,faces,semantic,api,dev]'
 
 # -- the agent's config, every boot: it lives in the repo and may change --
 if [ -f tools/cloud/ops-agent.yaml ] && [ -d /etc/google-cloud-ops-agent ]; then

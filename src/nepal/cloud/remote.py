@@ -21,7 +21,7 @@ from nepal.cloud.gcloud import Gcloud
 
 log = logging.getLogger(__name__)
 
-EXTRAS = "vision,music,asr,faces,semantic,dev"
+EXTRAS = "vision,music,asr,faces,semantic,api,dev"
 
 
 class Remote:
