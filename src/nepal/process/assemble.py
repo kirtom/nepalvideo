@@ -22,13 +22,18 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Iterable, Mapping, Sequence
+from datetime import datetime
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
+
+from nepal import db
 
 log = logging.getLogger(__name__)
 
 MMR_LAMBDA = 0.30
+
+SLOT_KEYS = db.TIMELINE_V2_COLUMNS + ("locked",)
 
 
 def slot_budget(act_seconds: float, duration_range: Sequence[float]) -> int:
@@ -54,23 +59,62 @@ def snap_to_beat(t: float, beats: Sequence[float], *,
     return float(arr[int(np.argmin(np.abs(arr - float(t))))])
 
 
-def _similarity(a: str, b: str, embeddings: Mapping[str, np.ndarray]) -> float:
-    ea, eb = embeddings.get(a), embeddings.get(b)
-    if ea is None or eb is None:
-        return 0.0                     # unknown similarity must not veto a shot
-    return float(np.dot(ea, eb))
+def _utc_seconds(row: Mapping[str, Any]) -> float | None:
+    ts = row.get("start_utc")
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts)).timestamp()
+    except ValueError:
+        return None
+
+
+def fallback_similarity(a: Mapping[str, Any], b: Mapping[str, Any], *,
+                        weights: Mapping[str, float]) -> float:
+    """What two shots share when nothing has looked at their pictures. The
+    first draft's runs of one recording came from a similarity of 0.0 for
+    every pair; this alone breaks them up."""
+    if a.get("recording_id") and a.get("recording_id") == b.get("recording_id"):
+        ta, tb = _utc_seconds(a), _utc_seconds(b)
+        if ta is not None and tb is not None and abs(ta - tb) <= 60.0:
+            return float(weights.get("same_recording_60s", 1.0))
+        return float(weights.get("same_recording", 0.6))
+    if a.get("place_name") and a.get("place_name") == b.get("place_name"):
+        ta, tb = _utc_seconds(a), _utc_seconds(b)
+        if ta is not None and tb is not None and abs(ta - tb) <= 3600.0:
+            return float(weights.get("same_place_hour", 0.3))
+    return 0.0
+
+
+def make_similarity(embeddings: Mapping[str, np.ndarray], *,
+                    fallback_weights: Mapping[str, float]
+                    ) -> Callable[[Mapping[str, Any], Mapping[str, Any]], float]:
+    """CLIP cosine when both shots have an embedding, else the deterministic
+    fallback -- so a shortlist that ran thin on embeddings still gets MMR's
+    diversity pressure instead of silently degrading to score order."""
+    def sim(a: Mapping[str, Any], b: Mapping[str, Any]) -> float:
+        ea, eb = embeddings.get(a.get("shot_id")), embeddings.get(b.get("shot_id"))
+        if ea is not None and eb is not None:
+            return float(np.dot(ea, eb))
+        return fallback_similarity(a, b, weights=fallback_weights)
+    return sim
 
 
 def mmr_select(candidates: Sequence[Mapping[str, Any]], *, budget: int,
-               embeddings: Mapping[str, np.ndarray],
+               similarity: Callable[[Mapping[str, Any], Mapping[str, Any]], float],
                lam: float = MMR_LAMBDA,
-               admissible=None) -> list[Mapping[str, Any]]:
+               admissible=None,
+               prefer=None) -> list[Mapping[str, Any]]:
     """Greedy MMR fill under a per-step admissibility filter.
 
     ``admissible(candidate, chosen)`` returns whether a shot may be taken
     given what is already there -- the hard constraints. It is consulted at
     every step rather than checked at the end, because a constraint that can
     only be repaired afterwards is a constraint that reorders the film.
+
+    ``prefer(candidate, chosen)`` is a soft bonus added to the MMR value --
+    used for source alternation, which should nudge the fill rather than
+    veto a shot the way ``admissible`` does.
 
     When nothing is admissible the fill stops rather than forcing a shot in:
     the caller decides what to relax, and the spec says what order to relax in.
@@ -82,9 +126,10 @@ def mmr_select(candidates: Sequence[Mapping[str, Any]], *, budget: int,
         for c in remaining:
             if admissible is not None and not admissible(c, chosen):
                 continue
-            penalty = max((_similarity(c["shot_id"], s["shot_id"], embeddings)
-                           for s in chosen), default=0.0)
+            penalty = max((similarity(c, s) for s in chosen), default=0.0)
             val = float(c["score_total"]) - lam * penalty
+            if prefer is not None:
+                val += prefer(c, chosen)
             if best_val is None or val > best_val:
                 best, best_val = c, val
         if best is None:
@@ -117,6 +162,42 @@ def place_count_ok(candidate: Mapping[str, Any], chosen: Sequence[Mapping[str, A
     return sum(1 for s in chosen if s.get("place_name") == place) < limit
 
 
+def recording_run_ok(candidate: Mapping[str, Any], chosen: Sequence[Mapping[str, Any]],
+                     *, limit: int) -> bool:
+    """No more than ``limit`` consecutive chosen shots from one recording.
+
+    Only the tail of ``chosen`` counts as a run: a recording that appeared
+    earlier and was already broken up by something else is not repeating.
+    """
+    rid = candidate.get("recording_id")
+    if not rid:
+        return True
+    run = 0
+    for s in reversed(chosen):
+        if s.get("recording_id") == rid:
+            run += 1
+        else:
+            break
+    return run < limit
+
+
+def source_alternation_bonus(candidate: Mapping[str, Any], chosen: Sequence[Mapping[str, Any]],
+                             *, after: int, bonus: float = 0.05) -> float:
+    """A soft nudge toward alternating source once one has run for a while.
+
+    Soft, not a veto: a single source holding the only good shot of a moment
+    must still be selectable, just without the bonus that would tip a
+    near-tie toward it.
+    """
+    if len(chosen) < after:
+        return 0.0
+    tail = chosen[-after:]
+    sources = {s.get("source") for s in tail}
+    if len(sources) == 1 and candidate.get("source") not in sources:
+        return bonus
+    return 0.0
+
+
 def needs_subject(chosen: Sequence[Mapping[str, Any]], *, runtime_s: float,
                   every_s: float) -> bool:
     """Whether the act is short of its person-every-N-seconds quota."""
@@ -131,6 +212,49 @@ def missing_levity(chosen: Sequence[Mapping[str, Any]], *, minimum: int) -> int:
     """How many levity-tagged shots the act still owes."""
     have = sum(1 for s in chosen if s.get("tag_levity"))
     return max(0, int(minimum) - have)
+
+
+def source_share_repair(chosen: list, pool: Sequence, *, min_share: float,
+                        phones: Sequence[str] = ("phone_keller", "phone_kulikov")) -> list:
+    """Give a starved phone its share of an act after the fill, not during it.
+
+    MMR fills by score and diversity; it has no notion of "belongs to
+    Keller" or "belongs to Kulikov" and shouldn't gain one, because a phone
+    that shot fewer good moments must not be padded with weak ones to look
+    even. This runs once, after selection: for each phone below
+    ``min_share`` of the act's phone slots, swap the weakest slot of the
+    phone currently ahead for the best material the starved phone still has
+    in the pool, until the share holds or the pool runs dry. A phone is
+    never swapped down to zero slots -- that would erase it rather than
+    balance it. Chronology is the caller's job (``chronological`` re-sorts
+    what this returns); this only decides membership.
+    """
+    chosen = list(chosen)
+    pool_by_phone = {p: sorted((s for s in pool if s.get("source") == p),
+                               key=lambda s: -float(s.get("score_total") or 0.0))
+                     for p in phones}
+
+    for phone in phones:
+        others = [p for p in phones if p != phone]
+        while True:
+            slots = [s for s in chosen if s.get("source") in phones]
+            if not slots:
+                break
+            share = sum(1 for s in slots if s.get("source") == phone) / len(slots)
+            if share >= min_share:
+                break
+            available = pool_by_phone.get(phone) or []
+            if not available:
+                break                   # the pool is dry; the share cannot be repaired
+            over_source = max(others, default=None,
+                              key=lambda p: sum(1 for s in slots if s.get("source") == p))
+            over_slots = [s for s in chosen if s.get("source") == over_source]
+            if len(over_slots) <= 1:
+                break                   # never drop the other phone to zero
+            weakest = min(over_slots, key=lambda s: float(s.get("score_total") or 0.0))
+            chosen.remove(weakest)
+            chosen.append(available.pop(0))
+    return chosen
 
 
 # `speech_first` lived here until Film v2 step 3: speech-carrying shots ahead
@@ -195,10 +319,17 @@ def lay_out(shots: Sequence[Mapping[str, Any]], *, start_s: float,
         if end - t > avail:             # the nearest beat overran the footage
             end = snap_within(t, t + avail, beats)
         src_in = float(s.get("start_s") or 0.0)
-        out.append({"shot_id": s["shot_id"], "act": s.get("act"),
-                    "t_in": round(t, 3), "t_out": round(end, 3),
-                    "src_in": round(src_in, 3),
-                    "src_out": round(src_in + (end - t), 3),
-                    "yaw": s.get("chosen_yaw")})
+        out.append({
+            "act": s.get("act"),
+            "t_in": round(t, 3), "t_out": round(end, 3),
+            "kind": "photo" if s.get("media_kind") == "photo" else "video",
+            "shot_id": s["shot_id"],
+            "src_in": round(src_in, 3),
+            "src_out": round(src_in + (end - t), 3),
+            "secondary_shot_id": None, "secondary_src_in": None,
+            "motion": None, "speed": 1.0, "transition": "cut",
+            "beat_id": None, "scene_id": None, "msg_id": None,
+            "yaw": s.get("chosen_yaw"), "locked": 0,
+        })
         t = end
     return out

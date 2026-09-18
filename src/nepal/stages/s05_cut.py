@@ -162,8 +162,11 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         # Until that lands, the fill is by score alone, ties by id.
         by_score = sorted(act_rows, key=lambda r: (-float(r.get("score_total") or 0.0),
                                                    str(r.get("shot_id"))))
-        picked = asm.mmr_select(by_score, budget=budget,
-                                embeddings=embeddings, lam=lam, admissible=admissible)
+        picked = asm.mmr_select(
+            by_score, budget=budget,
+            similarity=asm.make_similarity(
+                embeddings, fallback_weights=cfg.get("assemble.similarity_fallback")),
+            lam=lam, admissible=admissible)
         ordered = asm.chronological(picked)
         laid = asm.lay_out(ordered, start_s=t, duration_range=rng,
                            beats=beats, downbeats=downs)

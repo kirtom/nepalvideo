@@ -5,6 +5,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 import numpy as np
 import pytest
 
+from nepal import db
 from nepal.process import assemble
 
 
@@ -52,9 +53,16 @@ def _emb(mapping):
             for k, v in mapping.items()}
 
 
+_FALLBACK_W = {"same_recording_60s": 1.0, "same_recording": 0.6, "same_place_hour": 0.3}
+
+
+def _sim(embeddings):
+    return assemble.make_similarity(embeddings, fallback_weights=_FALLBACK_W)
+
+
 def test_without_diversity_pressure_the_best_shots_win():
     cands = [shot("a", 0.9), shot("b", 0.8), shot("c", 0.7)]
-    got = assemble.mmr_select(cands, budget=2, embeddings={}, lam=0.0)
+    got = assemble.mmr_select(cands, budget=2, similarity=_sim({}), lam=0.0)
     assert [s["shot_id"] for s in got] == ["a", "b"]
 
 
@@ -63,31 +71,83 @@ def test_mmr_refuses_a_second_shot_that_looks_like_the_first():
     slightly lower. A plain greedy fill takes a then b; MMR takes a then c."""
     E = _emb({"a": [1, 0], "b": [0.99, 0.01], "c": [0, 1]})
     cands = [shot("a", 0.90), shot("b", 0.89), shot("c", 0.80)]
-    plain = assemble.mmr_select(cands, budget=2, embeddings=E, lam=0.0)
-    diverse = assemble.mmr_select(cands, budget=2, embeddings=E, lam=0.5)
+    plain = assemble.mmr_select(cands, budget=2, similarity=_sim(E), lam=0.0)
+    diverse = assemble.mmr_select(cands, budget=2, similarity=_sim(E), lam=0.5)
     assert [s["shot_id"] for s in plain] == ["a", "b"]
     assert [s["shot_id"] for s in diverse] == ["a", "c"]
 
 
 def test_an_unknown_similarity_does_not_veto_a_shot():
-    """A shot missing from the embedding index must still be selectable --
-    it is footage we know less about, not footage that repeats."""
+    """A shot missing from the embedding index, with no fallback signal
+    either (no shared recording or place), must still be selectable -- it is
+    footage we know less about, not footage that repeats."""
     cands = [shot("a", 0.9), shot("nope", 0.8)]
-    got = assemble.mmr_select(cands, budget=2, embeddings=_emb({"a": [1, 0]}), lam=0.9)
+    got = assemble.mmr_select(cands, budget=2, similarity=_sim(_emb({"a": [1, 0]})), lam=0.9)
     assert [s["shot_id"] for s in got] == ["a", "nope"]
 
 
 def test_the_fill_stops_rather_than_forcing_an_inadmissible_shot():
     cands = [shot("a", 0.9), shot("b", 0.8)]
-    got = assemble.mmr_select(cands, budget=2, embeddings={},
+    got = assemble.mmr_select(cands, budget=2, similarity=_sim({}),
                               admissible=lambda c, chosen: not chosen)
     assert len(got) == 1
 
 
 def test_unscored_candidates_are_never_selected():
     cands = [shot("a", None), shot("b", 0.1)]
-    got = assemble.mmr_select(cands, budget=5, embeddings={})
+    got = assemble.mmr_select(cands, budget=5, similarity=_sim({}))
     assert [s["shot_id"] for s in got] == ["b"]
+
+
+# -- similarity without embeddings, and the constraint ladder ----------
+
+def test_fallback_similarity_is_deterministic_and_graded():
+    w = {"same_recording_60s": 1.0, "same_recording": 0.6, "same_place_hour": 0.3}
+    a = {"recording_id": "r1", "start_utc": "2024-05-01T04:00:00+00:00", "place_name": "Deng"}
+    b = {"recording_id": "r1", "start_utc": "2024-05-01T04:00:30+00:00", "place_name": "Deng"}
+    c = {"recording_id": "r1", "start_utc": "2024-05-01T05:30:00+00:00", "place_name": "Deng"}
+    d = {"recording_id": "r2", "start_utc": "2024-05-01T04:20:00+00:00", "place_name": "Deng"}
+    e = {"recording_id": "r3", "start_utc": "2024-05-02T04:20:00+00:00", "place_name": "Bihi"}
+    assert assemble.fallback_similarity(a, b, weights=w) == 1.0
+    assert assemble.fallback_similarity(a, c, weights=w) == 0.6
+    assert assemble.fallback_similarity(a, d, weights=w) == 0.3
+    assert assemble.fallback_similarity(a, e, weights=w) == 0.0
+
+
+def test_the_fill_breaks_up_a_run_of_one_recording_without_embeddings():
+    """The first draft's runs of one recording: with no CLIP, similarity was
+    0.0 and MMR was score order. The fallback alone prevents it."""
+    cands = [{"shot_id": f"r1#{i}", "recording_id": "r1", "score_total": 0.9 - i * 0.01,
+              "start_utc": f"2024-05-01T04:0{i}:00+00:00", "place_name": "Deng"} for i in range(4)]
+    cands += [{"shot_id": "r2#0", "recording_id": "r2", "score_total": 0.5,
+               "start_utc": "2024-05-01T06:00:00+00:00", "place_name": "Bihi"}]
+    sim = assemble.make_similarity({}, fallback_weights={"same_recording_60s": 1.0,
+                                                          "same_recording": 0.6, "same_place_hour": 0.3})
+    picked = assemble.mmr_select(cands, budget=3, similarity=sim, lam=0.5)
+    assert "r2#0" in {p["shot_id"] for p in picked}
+
+
+def test_recording_run_limit_and_source_alternation():
+    chosen = [{"recording_id": "r1", "source": "phone_keller"}] * 2
+    assert not assemble.recording_run_ok({"recording_id": "r1"}, chosen, limit=2)
+    assert assemble.recording_run_ok({"recording_id": "r9"}, chosen, limit=2)
+    chosen3 = [{"source": "camera"}] * 3
+    assert assemble.source_alternation_bonus({"source": "phone_keller"}, chosen3, after=3) > 0
+    assert assemble.source_alternation_bonus({"source": "camera"}, chosen3, after=3) == 0
+
+
+def test_source_share_repair_gives_the_starved_phone_its_quarter():
+    chosen = [{"shot_id": f"k{i}", "source": "phone_kulikov", "score_total": 0.9 - i * 0.05}
+              for i in range(8)]
+    pool = [{"shot_id": f"e{i}", "source": "phone_keller", "score_total": 0.4} for i in range(3)]
+    out = assemble.source_share_repair(chosen, pool, min_share=0.25)
+    keller = [s for s in out if s["source"] == "phone_keller"]
+    assert len(out) == 8 and len(keller) == 2          # 2 of 8 = 0.25
+    assert {s["shot_id"] for s in out} >= {"k0", "k1", "k2"}   # the best of kulikov stay
+
+
+def test_slot_keys_matches_the_timeline_v2_schema_plus_locked():
+    assert assemble.SLOT_KEYS == db.TIMELINE_V2_COLUMNS + ("locked",)
 
 
 # -- constraints -------------------------------------------------------
@@ -137,6 +197,25 @@ def test_speech_is_no_longer_a_claim_on_a_slot_in_the_fill():
 
 
 # -- layout ------------------------------------------------------------
+
+def test_lay_out_emits_every_slot_key_except_slot_index():
+    beats = [i * 0.5 for i in range(40)]
+    out = assemble.lay_out([shot("a", 0.5), shot("p", 0.5, media_kind="photo")],
+                           start_s=0.0, duration_range=[4.0, 6.0], beats=beats)
+    expected = set(assemble.SLOT_KEYS) - {"slot_index"}
+    for row in out:
+        assert set(row.keys()) == expected
+    video_row, photo_row = out[0], out[1]
+    assert video_row["kind"] == "video"
+    assert photo_row["kind"] == "photo"
+    for row in out:
+        assert row["locked"] == 0
+        assert row["speed"] == 1.0
+        assert row["transition"] == "cut"
+        for key in ("secondary_shot_id", "secondary_src_in", "motion",
+                   "beat_id", "scene_id", "msg_id"):
+            assert row[key] is None
+
 
 def test_shots_are_laid_end_to_end_on_the_grid():
     beats = [i * 0.5 for i in range(40)]
