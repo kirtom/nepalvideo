@@ -87,6 +87,23 @@ def _seed(tmp_path):
     return cfg, conn
 
 
+def test_chat_bodies_lose_contacts_mentions_and_the_authors_names():
+    """The first live prompt carried an @mention, a visa email addressed by
+    full name, and a contact card with a phone number and an email."""
+    cast = bi.Cast.build(["Kirill Keller", "Sasha Kulikov"], [])
+    s = bi.scrub_text
+    assert s("@SashaKulikov шо думаешь?", cast) == "@someone шо думаешь?"
+    assert s("Mariia Kulikova, +79151301705, manycan@gmail.com", cast) \
+        == "Mariia B, [phone], [email]"
+    assert s("Dear ALEKSANDR KULIKOV , thank you", cast) == "Dear ALEKSANDR B , thank you"
+    assert s("keller и Kirill идут", cast) == "A и A идут"
+    # what must survive: a price, a date, a sum, a time
+    for keep in ("995+92+55 = 1142 USD", "вылет 20.04.2024 в 06:35", "20 км в день"):
+        assert s(keep, cast) == keep
+    # the operator's extra words
+    assert s("Саша и Кирюха ушли", cast, ["Саша", "Кирюх"]) == "[name] и [name] ушли"
+
+
 def test_the_prompt_names_nobody_hides_hallucinations_and_carries_the_facts_back(tmp_path):
     cfg, conn = _seed(tmp_path)
     rules = beats_schema.Rules.from_cfg(cfg).as_prompt_dict()

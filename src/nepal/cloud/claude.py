@@ -60,11 +60,18 @@ def usage_usd(usage: Any, price: Price) -> float:
 class Completion:
     text: str
     data: Any                 # the parsed JSON
-    input_tokens: int
+    input_tokens: int         # uncached only: a cached prompt reports "2 in"
     output_tokens: int
     stop_reason: str
     usd: float
     model: str
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+
+    @property
+    def prompt_tokens(self) -> int:
+        """What the model read, cached or not."""
+        return self.input_tokens + self.cache_write_tokens + self.cache_read_tokens
 
 
 class ClaudeError(RuntimeError):
@@ -169,7 +176,9 @@ class Claude:
                           input_tokens=int(msg.usage.input_tokens),
                           output_tokens=int(msg.usage.output_tokens),
                           stop_reason=str(msg.stop_reason),
-                          usd=usage_usd(msg.usage, self.price), model=self.model)
+                          usd=usage_usd(msg.usage, self.price), model=self.model,
+                          cache_write_tokens=int(getattr(msg.usage, "cache_creation_input_tokens", 0) or 0),
+                          cache_read_tokens=int(getattr(msg.usage, "cache_read_input_tokens", 0) or 0))
 
 
 class FakeClaude:

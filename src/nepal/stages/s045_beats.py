@@ -261,14 +261,15 @@ def run(cfg: Config, *, force: bool = False, dry_run: bool = False,
             raise
         completions.append(comp)
         ledger.record("beats", comp.usd,
-                      detail=f"{comp.model} attempt {attempt}: {comp.input_tokens} in, "
-                             f"{comp.output_tokens} out")
+                      detail=f"{comp.model} attempt {attempt}: {comp.prompt_tokens} in "
+                             f"({comp.cache_read_tokens} from cache), {comp.output_tokens} out")
         (out_dir / f"response_{attempt}.json").write_text(comp.text)
         doc = comp.data
         errors = beats_schema.validate(doc, shot_info=prompt.meta["shot_info"],
                                        msg_info=prompt.meta["msg_info"], rules=rules)
-        log.info("S04.5 attempt %d: %d in, %d out, %.2f USD, %d rule(s) broken",
-                 attempt, comp.input_tokens, comp.output_tokens, comp.usd, len(errors))
+        log.info("S04.5 attempt %d: %d in (%d from cache), %d out, %.2f USD, %d rule(s) broken",
+                 attempt, comp.prompt_tokens, comp.cache_read_tokens, comp.output_tokens,
+                 comp.usd, len(errors))
         for err in errors[:12]:
             log.info("S04.5   - %s", err)
         if not errors:

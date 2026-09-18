@@ -182,11 +182,47 @@ also ingests the 35 new Keller photos added 2026-09-17: 27–28 April and
 
 ## Film v2 — step 3: the voice spine (2026-09-18)
 
-Built and tested against recorded answers; run on the box up to the dry
-run. **The live call waits on one thing the operator holds:** the API key
-as instance metadata (`gcloud compute instances add-metadata nepal-cpu
---zone europe-west4-a --metadata anthropic-api-key=…`), after which
-`nepal remote run beats` makes the call, about a dollar.
+Built, tested against recorded answers, and **called live on the box:
+the beat sheet exists** (`work/beats/beats.json`, `story_beats`, Gate 2 at
+`work/gates/gate2/index.html`). Title **«Плачу и иду»**, from the line
+that is the film's thesis. 15 speech beats (Act 2: 3, Act 3: 7, Act 4: 1,
+Act 5: 4, none in Act 6 by design), 7 planning quotes in Act 1, 5
+planning-to-trail pairs, closing chat line «надо в горы чувак» on black,
+8 stat-card ideas, trailer hook = the Dharmasala cold (b17), cliffhanger =
+the honest low (b16). Validator: 2 rules broken on the first answer (two
+Act 5 shots filed as Act 6), none after the retry. **Gate 2 is the
+operator's read.**
+
+**What the two live calls cost and taught** (2026-09-18, ~1.6 h of box
+time, ledger 3.83 of 25 USD). The prompt counts **141,737 tokens** for
+real; the character estimate (3/token) had said 89k — Russian tokenises
+closer to 1.9 chars per token, `beats.estimate_chars_per_token` should
+say so. The first call stopped at the 16,000 output cap with no sheet:
+thinking counts against the cap and a prompt this size spends a small
+cap thinking. **1.11 USD, and the ledger never saw it** — the wrapper
+raised before the stage recorded; every failed call now records its cost
+and keeps its partial text, and the cap is 64,000 (the documented
+setting; it bounds the estimate at 2.3 USD, not the bill). The second
+call: attempt 1 read the prompt and wrote 18.7k tokens for 1.36 USD;
+attempt 2 re-read it **from the cache** (marked on the request) and wrote
+5.4k for 0.23 USD — the cache saved about 0.65 USD on the retry.
+
+**What left the machine that should not have.** The authors are A/B/C,
+but chat *bodies* named people six times: an `@mention`, a pasted visa
+email addressed by full name, and one contact card with a phone number
+and an email. Bodies are now scrubbed (emails, phone numbers, mentions,
+the authors' name words; `beats.scrub_words` for Cyrillic first names and
+nicknames, empty until the operator lists them) before the prompt is
+rendered, and the validator and the cards see the scrubbed text.
+Transcripts are not scrubbed: what was said to the camera is the film.
+
+**The key's first boot leaked it too**, into logs only the project owner
+can read: the bootstrap traced it under `set -x` into its log, syslog,
+the serial console and Cloud Logging. The profile now fetches the key
+from the metadata server at login and nothing on disk holds it; the
+copies in Cloud Logging (`syslog`, `google_metadata_script_runner`,
+`nepal_pipeline`) and the serial console are the operator's to delete,
+and rotating the key makes them worthless — see the notes below.
 
 **What changed.** Whisper's segments now live in the row
 (`shots.transcript_json`) with `no_speech_prob`, `compression_ratio` and word

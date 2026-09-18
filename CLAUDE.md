@@ -129,7 +129,18 @@ Each of these cost a wrong diagnosis or a wasted multi-hour run.
 - **Nobody is named in what leaves the machine.** The chat authors are A,
   B, C by first appearance in the prompt and on every card; the test asserts
   the names are absent. Keep it that way in every stage that asks Claude a
-  question.
+  question. And the bodies, not just the authors: the first live prompt
+  carried an `@mention`, a pasted visa email with a full name and a contact
+  card with a phone number. `scrub_text` runs on every chat body.
+- **A script under `set -x` prints every value it holds.** The bootstrap
+  read the API key into a variable and traced it into its log, syslog, the
+  serial console and Cloud Logging. Nothing on the box holds the key: the
+  profile fetches it from the metadata server at login.
+- **`max_tokens` is a backstop, not a budget, and thinking counts against
+  it.** A 16,000 cap on a 140k-token prompt was spent entirely on thinking:
+  1.11 USD, no answer, and nothing on the ledger because the wrapper raised
+  before the stage recorded. The cap is 64,000, and every failed paid call
+  records its cost and keeps its partial text before it raises.
 
 ## Decisions that are not yours
 
