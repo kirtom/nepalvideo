@@ -60,3 +60,34 @@ def test_assets_carry_the_heading_columns(tmp_path):
     conn = db.init(tmp_path / "t.sqlite")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(assets)")}
     assert {"heading_deg", "heading_ref", "pos_error_m", "focal_35mm"} <= cols
+
+
+def test_a_fresh_db_has_the_voice_spine_columns_and_table(tmp_path):
+    """Film v2 section 3: segment times live in the row, a hallucinated shot
+    says so, and the beat sheet has a table of its own -- `story_beats`,
+    because `beats` is the music grid S02.7 writes and S05 reads."""
+    conn = db.init(tmp_path / "t.sqlite")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(shots)")}
+    assert {"transcript_json", "hallucinated"} <= cols
+    beat_cols = {r[1] for r in conn.execute("PRAGMA table_info(story_beats)")}
+    assert {"beat_id", "kind", "act", "shot_id", "msg_id", "src_in", "src_out",
+            "text", "levity", "effect", "rationale", "rank"} <= beat_cols
+    music = {r[1] for r in conn.execute("PRAGMA table_info(beats)")}
+    assert music == {"track_id", "t_s", "is_downbeat"}          # untouched
+
+
+def test_an_older_db_gains_the_voice_spine_columns(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.sqlite"
+    raw = sqlite3.connect(path)
+    # the columns the schema's indexes need, and nothing from Film v2
+    raw.executescript("CREATE TABLE shots (shot_id TEXT PRIMARY KEY, recording_id TEXT, "
+                      "asset_id TEXT, media_kind TEXT, start_s REAL, end_s REAL, "
+                      "start_utc TEXT, act INTEGER, status TEXT);")
+    raw.execute("INSERT INTO shots VALUES ('r#0001','r',NULL,'video',0,5,NULL,2,'candidate')")
+    raw.commit()
+    raw.close()
+    conn = db.init(path)
+    row = conn.execute("SELECT transcript_json, hallucinated FROM shots").fetchone()
+    assert row["transcript_json"] is None and row["hallucinated"] is None
+    assert conn.execute("SELECT COUNT(*) FROM story_beats").fetchone()[0] == 0

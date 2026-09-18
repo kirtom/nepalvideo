@@ -157,6 +157,23 @@ CREATE TABLE IF NOT EXISTS beats (
   track_id TEXT, t_s REAL, is_downbeat INTEGER
 );
 
+-- Film v2 section 3.2: the voice spine. Named story_beats rather than the
+-- spec's `beats`, which is the music grid above and is read by S05.
+CREATE TABLE IF NOT EXISTS story_beats (
+  beat_id     TEXT PRIMARY KEY,
+  kind        TEXT NOT NULL,                      -- speech | quote | closing | title
+  act         INTEGER,
+  shot_id     TEXT REFERENCES shots(shot_id),     -- speech: the recording it comes from
+  msg_id      TEXT REFERENCES messages(msg_id),   -- quote/closing: the message
+  src_in      REAL, src_out REAL,                 -- on the recording's clock
+  text        TEXT,                               -- what is said or shown
+  levity      INTEGER DEFAULT 0,
+  effect      TEXT,                               -- freeze | burst | ramp | none
+  rationale   TEXT,                               -- why Claude picked it, for Gate 2
+  rank        INTEGER,                            -- Claude's order of importance
+  created_utc TEXT
+);
+
 CREATE TABLE IF NOT EXISTS timeline (
   slot_index  INTEGER PRIMARY KEY,
   act         INTEGER,
@@ -247,6 +264,14 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("gps_points", "hr_bpm", "REAL"),
     ("gps_points", "alt_baro_m", "REAL"),
     ("gps_points", "activity_id", "TEXT"),
+    # Film v2 section 3.1: whisper's segments, with their times on the
+    # recording's clock and their confidence, in the row rather than only in
+    # a file under work/transcripts -- a beat is cut at an utterance, and
+    # 166 shots had a transcript in the table with no file beside it.
+    ("shots", "transcript_json", "TEXT"),
+    # Set by the deterministic filter (section 4.1); has_speech is 0 for
+    # every downstream purpose when this is 1.
+    ("shots", "hallucinated", "INTEGER"),
 )
 
 

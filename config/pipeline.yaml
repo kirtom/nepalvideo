@@ -492,3 +492,63 @@ cloud:
     ssh_user: nepal
     # How long `up` waits for the startup script to write its READY marker.
     ready_timeout_s: 1500
+
+# -- S03.5b the hallucination filter (Film v2 section 4.1) ------------------
+# Whisper invents text where there is none to hear: subtitle credits, "thanks
+# for watching", one phrase looped. Every rule here is deterministic and cheap,
+# so the filter is re-run on every S03 pass and the transcripts are never
+# re-made for it. no_speech_prob and compression_ratio are what faster-whisper
+# reports per segment; transcripts made before those were stored fall through
+# to the phrase and repetition rules alone.
+asr:
+  hallucination_phrases:
+    - "Субтитры сделал"
+    - "Субтитры создавал"
+    - "DimaTorzok"
+    - "Продолжение следует"
+    - "Редактор субтитров"
+    - "Спасибо за просмотр"
+    - "Подписывайтесь"
+    - "Корректор"
+  max_no_speech_prob: 0.6
+  max_compression_ratio: 2.4
+  # the same n-gram this many times inside one segment is a loop, not speech
+  ngram_n: 3
+  ngram_min_repeats: 3
+  # Word-level times let a beat start and end on a word rather than on the
+  # segment whisper happened to draw -- which, at 20 s a shot and no previous
+  # text to condition on, is usually the whole shot.
+  word_timestamps: true
+
+# -- S04.5 the beat sheet (Film v2 section 4.2) -----------------------------
+beats:
+  model: claude-opus-5
+  effort: high                 # low | medium | high | xhigh | max
+  max_output_tokens: 16000
+  # what the prompt states and the validator enforces
+  min_speech_beats: 10
+  max_speech_beats: 16
+  max_speech_s: 25
+  min_act1_quotes: 4
+  max_act1_quotes: 8
+  max_act4_beats: 1
+  max_pairs: 5
+  # a cut point must sit on a segment or word boundary this close
+  cut_tolerance_s: 0.05
+  # one more call with the validator's complaints, then give up
+  retries: 1
+  # the two refusals before any money is spent
+  max_input_tokens: 200000
+  estimate_usd_cap: 3.0
+  # long messages are clipped in the prompt; a card is 180 characters anyway
+  chat_max_chars: 500
+
+# -- the API, priced ---------------------------------------------------------
+# USD per million tokens, for the estimate before the call and the ledger
+# entry after it. The key is never here: ANTHROPIC_API_KEY in the environment,
+# which on the box the bootstrap fills from instance metadata.
+api:
+  prices_usd_per_mtok:
+    claude-opus-5:   {input: 5.0,  output: 25.0}
+    claude-sonnet-5: {input: 2.0,  output: 10.0}
+    claude-haiku-4-5: {input: 1.0, output: 5.0}
