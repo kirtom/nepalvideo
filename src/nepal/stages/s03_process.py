@@ -616,12 +616,37 @@ def measure_audio(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
             "footage_s": round(shot_s, 1), "distribution": dist}
 
 
-def transcribe_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
-    """S03.5 -- transcribe every candidate shot that carries speech.
+def shots_to_transcribe(conn, *, force: bool, word_times: bool) -> list[dict[str, Any]]:
+    """Which speech shots S03.5 owes a transcript.
 
-    Resumable through the data: a shot with a transcript (even an empty one)
-    has been done. Only candidates: a rejected shot is not worth a model's
-    time, and if a threshold change brings it back it is picked up then.
+    Not rejected, rather than 'candidate': S05 promotes its picks to
+    'shortlisted', and once a cut existed the whitelist skipped exactly the
+    218 shots the film was made of -- the trap CLAUDE.md already names,
+    met again. Resumable through the data: a shot with a transcript has
+    been done, unless words were asked for and its transcript has none
+    (made before word times were kept), in which case it is owed the
+    better one. An empty transcript is not re-made: whisper heard nothing.
+    """
+    if force:
+        where = ""
+    else:
+        where = " AND (s.transcript IS NULL"
+        if word_times:
+            where += (" OR (s.transcript <> '' AND (s.transcript_json IS NULL "
+                      "OR s.transcript_json NOT LIKE '%\"words\"%'))")
+        where += ")"
+    return [dict(r) for r in conn.execute(
+        "SELECT s.shot_id, s.recording_id, s.start_s, s.end_s, s.speech_s "
+        "FROM shots s WHERE s.media_kind = 'video' AND s.has_speech = 1 "
+        f"AND s.status <> 'rejected'{where} ORDER BY s.recording_id, s.start_s")]
+
+
+def transcribe_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
+    """S03.5 -- transcribe every surviving shot that carries speech.
+
+    Resumable through the data (``shots_to_transcribe``). A rejected shot is
+    not worth a model's time, and if a threshold change brings it back it is
+    picked up then.
 
     Logs the realtime factor as it goes. On a CPU this stage is the slowest
     thing in the pipeline by an order of magnitude and the number that
@@ -629,11 +654,8 @@ def transcribe_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any
     has run for a few minutes.
     """
     audio_dir = cfg.work_root / "audio"
-    where = "" if force else " AND s.transcript IS NULL"
-    rows = [dict(r) for r in conn.execute(
-        "SELECT s.shot_id, s.recording_id, s.start_s, s.end_s, s.speech_s "
-        "FROM shots s WHERE s.media_kind = 'video' AND s.has_speech = 1 "
-        f"AND s.status = 'candidate'{where} ORDER BY s.recording_id, s.start_s")]
+    word_times = bool(cfg.get("asr.word_timestamps", True))
+    rows = shots_to_transcribe(conn, force=force, word_times=word_times)
     if not rows:
         return {"n_shots": 0, "note": "every speech shot already transcribed"}
 
@@ -641,7 +663,6 @@ def transcribe_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any
     language = cfg.get("spine.whisper_language")
     beam = int(cfg.get("process.asr_beam_size", 5))
     threads = int(cfg.get("process.asr_cpu_threads", 0))
-    word_times = bool(cfg.get("asr.word_timestamps", True))
     speech_total = sum(float(r["speech_s"] or 0) for r in rows)
     log.info("S03.5 transcribing %d shot(s), %.1f min of speech, with %s (%s), beam %d",
              len(rows), speech_total / 60, model_name, language or "auto", beam)
@@ -1228,6 +1249,42 @@ def build_photo_shots(cfg: Config, conn) -> dict[str, Any]:
             "n_needs_heif": missing_heif}
 
 
+def refresh_shot_times(conn, bounds) -> int:
+    """Re-derive every shot's moment and act from its recording or asset.
+
+    ``start_utc`` and ``act`` were written at detection time and stayed put
+    when the clocks moved: a corrected camera offset (S01.5) reached the
+    assets and the recordings and stopped there, leaving 564 shots four
+    days from their footage. A derived value is derived every time -- the
+    same rule as stability, the audio flags and has_face. Returns how many
+    shots changed.
+    """
+    from datetime import timedelta
+    moved = 0
+    updates: list[tuple[str | None, int | None, str]] = []
+    for r in conn.execute(
+            "SELECT s.shot_id, s.media_kind, s.start_s, s.start_utc, s.act, "
+            "r.start_utc AS rec_utc, a.created_at_utc AS asset_utc FROM shots s "
+            "LEFT JOIN recordings r ON r.recording_id = s.recording_id "
+            "LEFT JOIN assets a ON a.asset_id = s.asset_id"):
+        if r["media_kind"] == "photo":
+            ts = _dt(r["asset_utc"])
+        else:
+            base = _dt(r["rec_utc"])
+            ts = base + timedelta(seconds=float(r["start_s"] or 0.0)) if base else None
+        if ts is None:
+            continue
+        utc = ts.isoformat()
+        act = acts_mod.act_for(ts, bounds) if bounds else r["act"]
+        if utc != r["start_utc"] or act != r["act"]:
+            updates.append((utc, act, r["shot_id"]))
+            moved += 1
+    if updates:
+        conn.executemany("UPDATE shots SET start_utc=?, act=? WHERE shot_id=?", updates)
+        conn.commit()
+    return moved
+
+
 def place_shots(cfg: Config, conn) -> dict[str, Any]:
     """S03 `place` -- position, altitude, place name and trek day for every
     shot, from its moment against the track.
@@ -1238,6 +1295,9 @@ def place_shots(cfg: Config, conn) -> dict[str, Any]:
     beats an interpolation -- and gains only what the fix lacks.
     """
     bounds = _bounds(conn)
+    moved = refresh_shot_times(conn, bounds)
+    if moved:
+        log.info("S03 place: %d shot(s) moved in time with their recording's clock", moved)
     span = place_mod.trek_span(bounds) if bounds else None
     track = place_mod.load_track(conn)
     max_gap = float(cfg.get("spine.max_interp_gap_s"))

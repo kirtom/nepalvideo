@@ -630,6 +630,25 @@ def _measure_pairs(cfg, root: Path, work: Path, ref_clips, pairs, coarse: float,
     return out
 
 
+def override_offset(cfg, device: str) -> float | None:
+    """The operator's clock offset for a device, when one is set.
+
+    `probe.clock.offset_overrides_s` maps a source (`camera`) or its label
+    (`keller`) to seconds. Gate 1 says the clock offsets are confirmed by a
+    person regardless of confidence; this is where that confirmation lands.
+    On this corpus the solver put the camera +18.00 days from an audio match
+    on 3 of 60 pairs, while the words on the clips -- departure lunch,
+    the monastery above Samagaon, the eve of the pass -- all say +14.00,
+    one of the histogram's own candidates. Four days moved 564 shots.
+    """
+    table = cfg.get("probe.clock.offset_overrides_s", None) or {}
+    label = device.replace("phone_", "")
+    for key in (device, label):
+        if key in table and table[key] is not None:
+            return float(table[key])
+    return None
+
+
 def solve_clocks(cfg, conn, *, work: Path | None = None) -> dict[str, clock.ClockResult]:
     """S01.5 -- one offset per device, measured against the reference clock.
 
@@ -660,6 +679,16 @@ def solve_clocks(cfg, conn, *, work: Path | None = None) -> dict[str, clock.Cloc
             results[label] = clock.ClockResult(
                 device=label, offset_s=0.0, confidence=1.0,
                 method=f"reference clock ({ref_why})")
+            continue
+
+        forced = override_offset(cfg, device)
+        if forced is not None:
+            results[label] = clock.ClockResult(
+                device=label, offset_s=round(forced, 3), confidence=1.0,
+                method=f"operator override (probe.clock.offset_overrides_s): "
+                       f"{forced / 86400:+.2f} d")
+            log.info("S01.5 %s offset=%+.2fs (%+.2f d) by operator override; no solve",
+                     label, forced, forced / 86400)
             continue
 
         # A device carrying GPS already tells us its clock error directly:

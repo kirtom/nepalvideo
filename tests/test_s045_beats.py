@@ -64,10 +64,10 @@ def _seed(cfg):
 def _sheet(text2="Я вот на этом курумнике прям сдох"):
     return json.dumps({
         "title": "Перевал", "beats": [
-            {"beat_id": "b01", "kind": "speech", "act": 2, "shot_id": "r#0001", "msg_id": None,
+            {"beat_id": "b01", "kind": "speech", "act": 2, "shot_id": "S0001", "msg_id": None,
              "src_in": 0.0, "src_out": 4.9, "text": "Мы приехали", "levity": True,
              "effect": "none", "rank": 2, "rationale": "arrival"},
-            {"beat_id": "b02", "kind": "speech", "act": 3, "shot_id": "r#0002", "msg_id": None,
+            {"beat_id": "b02", "kind": "speech", "act": 3, "shot_id": "S0002", "msg_id": None,
              "src_in": 40.0, "src_out": 48.0, "text": text2, "levity": True,
              "effect": "freeze", "rank": 1, "rationale": "the cost"},
             {"beat_id": "q01", "kind": "quote", "act": 1, "shot_id": None, "msg_id": "m1",
@@ -91,7 +91,7 @@ def test_a_wrong_sheet_is_sent_back_once_and_the_right_one_is_written(tmp_path):
     # the second call carried the answer and the complaint
     second = fake.calls[-1]["messages"]
     assert [m["role"] for m in second] == ["user", "assistant", "user"]
-    assert "not a verbatim part of r#0002" in second[-1]["content"]
+    assert "not a verbatim part of S0002" in second[-1]["content"]
     assert fake.calls[-1]["schema"]["required"][:2] == ["title", "beats"]
     # both calls are on the ledger
     led = spend.ledger(cfg)
@@ -102,10 +102,13 @@ def test_a_wrong_sheet_is_sent_back_once_and_the_right_one_is_written(tmp_path):
     rows = {r["beat_id"]: dict(r) for r in conn.execute("SELECT * FROM story_beats")}
     assert set(rows) == {"b01", "b02", "q01", "closing", "title"}
     assert rows["b02"]["src_out"] == 48.0 and rows["b02"]["levity"] == 1
+    assert rows["b02"]["shot_id"] == "r#0002"             # the handle resolved to the shot
     assert rows["closing"]["msg_id"] == "m4" and rows["title"]["text"] == "Перевал"
     # the files, with nobody named
     sheet = json.loads((cfg.work_root / "beats" / "beats.json").read_text())
     assert sheet["meta"]["attempts"] == 2 and sheet["sheet"]["title"] == "Перевал"
+    assert sheet["sheet"]["beats"][1]["handle"] == "S0002"
+    assert sheet["sheet"]["beats"][1]["shot_id"] == "r#0002"
     page = (cfg.work_root / "gates" / "gate2" / "index.html").read_text()
     prompt = (cfg.work_root / "beats" / "prompt.txt").read_text()
     for n in NAMES:

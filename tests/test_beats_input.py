@@ -18,6 +18,8 @@ def test_cast_tags_by_first_appearance_and_matches_faces_to_chat_voices():
     assert cast.cluster("kulikov") == "A" and cast.cluster("keller") == "B"
     assert cast.cluster("dharma") == "guide" and cast.cluster(None) is None
     assert cast.cluster("stranger") == "other"            # a label never leaks
+    assert cast.source("phone_keller") == "phone of B" and cast.source("camera") == "camera"
+    assert cast.source("telegram") == "telegram" and cast.source(None) == "?"
     for n in NAMES:
         assert n not in json.dumps(cast.tags.values().__repr__())
 
@@ -42,7 +44,8 @@ def _seed(tmp_path):
                   "beats": {"chat_max_chars": 40}, "spine": {"card_max_chars": 180}})
     cfg.db_path.parent.mkdir(parents=True)
     conn = db.init(cfg.db_path)
-    conn.execute("INSERT INTO recordings(recording_id, source, is_360) VALUES ('r', 'camera', 0)")
+    conn.execute("INSERT INTO recordings(recording_id, source, is_360) "
+                 "VALUES ('phone_keller_IMG_1', 'phone_keller', 0)")
     conn.execute("INSERT INTO assets(asset_id, s3_key, source, kind, created_at_utc, alt_dem_m, "
                  "place_name) VALUES ('a1', 'k1', 'camera', 'video360', "
                  "'2024-05-03T04:00:00+00:00', 3500, 'Samagaon')")
@@ -64,10 +67,12 @@ def _seed(tmp_path):
         "INSERT INTO shots(shot_id, recording_id, media_kind, start_s, end_s, start_utc, act, "
         "day_index, place_name, alt_dem_m, face_cluster, face_score, status, transcript, "
         "transcript_json, hallucinated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        [("r#0001", "r", "video", 40.0, 52.8, "2024-05-03T04:10:00+00:00", 3, 5, "Samagaon",
-          3520, "keller", 0.91, "candidate", good["text"], json.dumps(good), 0),
-         ("r#0002", "r", "video", 60.0, 62.0, "2024-05-03T04:11:00+00:00", 3, 5, "Samagaon",
-          3520, None, None, "rejected", bad["text"], json.dumps(bad), 1)])
+        [("phone_keller_IMG_1#0001", "phone_keller_IMG_1", "video", 40.0, 52.8,
+          "2024-05-03T04:10:00+00:00", 3, 5, "Samagaon", 3520, "keller", 0.91, "candidate",
+          good["text"], json.dumps(good), 0),
+         ("phone_keller_IMG_1#0002", "phone_keller_IMG_1", "video", 60.0, 62.0,
+          "2024-05-03T04:11:00+00:00", 3, 5, "Samagaon", 3520, None, None, "rejected",
+          bad["text"], json.dumps(bad), 1)])
     conn.executemany(
         "INSERT INTO messages(msg_id, ts_utc, author, text, phase) VALUES (?,?,?,?,?)",
         [("m1", "2024-02-11T19:02:00+00:00", "Kirill Keller",
@@ -90,7 +95,9 @@ def test_the_prompt_names_nobody_hides_hallucinations_and_carries_the_facts_back
     for n in NAMES + ("Keller", "Kulikov", "Карташкин", "keller", "kulikov"):
         assert n not in text, n
     assert "DimaTorzok" not in p.user                       # the hallucination is not offered
-    assert "r#0001" in p.user and "r#0002" not in p.user
+    assert "## shot S0001 |" in p.user and "S0002" not in p.user
+    assert "IMG_1" not in p.user                             # the file name never travels
+    assert "| phone of A |" in p.user
     assert "on screen: A (face fills the frame)" in p.user   # the first chat voice is A
     assert "[m1 2024-02-11 19:02 planning] A:" in p.user
     assert "B: ну посмотрим" in p.user and "…" in p.user      # clipped at chat_max_chars
@@ -99,8 +106,9 @@ def test_the_prompt_names_nobody_hides_hallucinations_and_carries_the_facts_back
     assert "Manaslu, Larke" in p.user
     assert "⟨48|48.4⟩" in p.user                            # the pause after "сдох."
     assert p.meta["n_shots"] == 1 and p.meta["n_messages"] == 4 and p.meta["n_days"] == 1
-    assert p.meta["shot_info"]["r#0001"]["cuts"] == [40.0, 48.0, 48.4, 52.8]
-    assert p.meta["shot_info"]["r#0001"]["act"] == 3
+    assert p.meta["shot_info"]["S0001"]["cuts"] == [40.0, 48.0, 48.4, 52.8]
+    assert p.meta["shot_info"]["S0001"]["act"] == 3
+    assert p.meta["shot_info"]["S0001"]["shot_id"] == "phone_keller_IMG_1#0001"
     assert p.meta["msg_info"]["m4"] == {"phase": "after", "text": "Скучаю по горам"}
     assert p.meta["acts_present"] == [3]
     assert p.messages() == [{"role": "user", "content": p.user}]

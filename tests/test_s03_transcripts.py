@@ -52,6 +52,36 @@ def test_backfill_reads_the_file_when_there_is_one_and_invents_a_segment_otherwi
     assert s03_process.backfill_transcript_json(cfg, conn) == {"n_rows": 0}
 
 
+def test_transcription_is_owed_to_every_surviving_speech_shot_without_words(tmp_path):
+    """The whitelist trap, met again: 'candidate' skipped the 218 shortlisted
+    shots the film was made of. And a transcript made before word times were
+    kept is owed the better one; an empty one is not."""
+    cfg = _cfg(tmp_path)
+    conn = _db_with_shots(cfg, [
+        {"shot_id": "r#0001", "start_s": 0.0, "end_s": 10.0, "transcript": None},
+        {"shot_id": "r#0002", "start_s": 10.0, "end_s": 20.0, "transcript": "старый"},
+        {"shot_id": "r#0003", "start_s": 20.0, "end_s": 30.0, "transcript": "с словами"},
+        {"shot_id": "r#0004", "start_s": 30.0, "end_s": 40.0, "transcript": ""},
+        {"shot_id": "r#0005", "start_s": 40.0, "end_s": 50.0, "transcript": None},
+        {"shot_id": "r#0006", "start_s": 50.0, "end_s": 60.0, "transcript": None}])
+    conn.execute("UPDATE shots SET transcript_json=? WHERE shot_id='r#0003'",
+                 (json.dumps({"segments": [{"start_s": 20, "end_s": 30, "text": "с словами",
+                                            "words": [{"start_s": 20, "end_s": 30,
+                                                       "word": "с словами"}]}]}),))
+    conn.execute("UPDATE shots SET status='shortlisted' WHERE shot_id='r#0005'")
+    conn.execute("UPDATE shots SET status='rejected' WHERE shot_id='r#0006'")
+    conn.commit()
+    owed = [r["shot_id"] for r in s03_process.shots_to_transcribe(conn, force=False,
+                                                                     word_times=True)]
+    assert owed == ["r#0001", "r#0002", "r#0005"]          # shortlisted is owed too
+    owed = [r["shot_id"] for r in s03_process.shots_to_transcribe(conn, force=False,
+                                                                     word_times=False)]
+    assert owed == ["r#0001", "r#0005"]                    # words not asked for
+    owed = [r["shot_id"] for r in s03_process.shots_to_transcribe(conn, force=True,
+                                                                     word_times=True)]
+    assert owed == ["r#0001", "r#0002", "r#0003", "r#0004", "r#0005"]   # never the rejected
+
+
 def test_the_filter_marks_the_shot_and_takes_its_speech_flag_away(tmp_path):
     """Two credits and a real line. The credits are hallucinated, lose
     has_speech, and their reasons are written into the segments; the real

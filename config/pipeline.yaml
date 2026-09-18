@@ -103,6 +103,15 @@ probe:
     # clock is days out (a flat battery resets an action camera's clock).
     coarse_bin_s: 3600
     coarse_max_offset_s: 3888000     # 45 days
+    # The operator's word at Gate 1, per source, in seconds; a device named
+    # here is not solved. The camera: the solver said +18.00 d from an audio
+    # match on 3 of 60 pairs, and its own histogram offered +14.00 d twice.
+    # The clips decide it -- "Подготовка к выезду... Шереметьево" is
+    # departure day (27 Apr, file says 13 Apr), the monastery 250 m above
+    # Samagaon is 3 May (file says 19 Apr), "Сейчас попиздуем на перевал"
+    # is the eve of the pass (5 May, file says 21 Apr): +14 days, every time.
+    offset_overrides_s:
+      camera: 1209600                # +14.00 d
   # S01.2 chapter grouping acceptance
   max_chapter_gap_s: 1.0
   # Directories under data_root that are not media. The Strava export is read

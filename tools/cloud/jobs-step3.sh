@@ -31,14 +31,29 @@ stage() {  # stage <name> <grep pattern> -- <command...>
   echo "    ($name exit $rc, $(date -u +%T))"
 }
 
+MODE=${1:-full}       # full | resume: the corrected chain after the first pass
 {
-echo "=== jobs start $(date -u +%FT%TZ) on $(hostname), $(nproc) cores, step 3"
+echo "=== jobs start $(date -u +%FT%TZ) on $(hostname), $(nproc) cores, step 3 ($MODE)"
+if [ "$MODE" = "full" ]; then
 TAIL=4 stage tests "passed|failed|error" -- \
   .venv/bin/python -m pytest -q -p no:cacheprovider -m "slow or not slow"
 TAIL=8 stage beats-dry-1 "S04\.5|WARN|ERROR" -- $N --no-progress beats --dry-run
 # The filter and the gate run inside S03 after the transcription; every
 # other sub-step resumes through the data and costs nothing.
 TAIL=24 stage s03 "S03\.[0-9]|S03 place|WARN|ERROR" -- $N --no-progress s03 --redo asr
+else
+# The camera clock by operator override (+14 d, not the solver's +18), the
+# assets geotagged again at their real moments, the shots moved with their
+# recordings by the place step, and the 218 transcriptions the status
+# whitelist skipped -- shots_to_transcribe now owes them. The suite again,
+# since the code changed.
+TAIL=4 stage tests "passed|failed|error" -- \
+  .venv/bin/python -m pytest -q -p no:cacheprovider -m "slow or not slow"
+TAIL=10 stage s01 "S01\.5|clock|WARN|ERROR" -- $N --no-progress s01 --redo clock --skip-fov
+TAIL=10 stage s02 "S02\.[1-4]|trek window|WARN|ERROR" -- \
+  $N --no-progress s02 --redo geotag,acts
+TAIL=24 stage s03 "S03\.[0-9]|S03 place|WARN|ERROR" -- $N --no-progress s03
+fi
 TAIL=8 stage beats-dry-2 "S04\.5|WARN|ERROR" -- $N --no-progress beats --dry-run
 echo "--- push $(date -u +%T)"
 $N status-page >/dev/null 2>&1

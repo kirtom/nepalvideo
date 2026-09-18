@@ -74,6 +74,21 @@ def retry_messages(prompt: beats_input.Prompt, answer_text: str,
                                 {"role": "user", "content": complaint}]
 
 
+def resolve_handles(doc: Mapping[str, Any],
+                    shot_info: Mapping[str, Mapping[str, Any]]) -> None:
+    """Put the real shot ids back where the model wrote handles.
+
+    The model only ever saw ``S0001``-style handles (the recording ids carry
+    surnames). Once the sheet is valid, every speech beat gets its shot id
+    back and keeps the handle beside it, so the rows, the JSON and the page
+    all name the recording and the input can still be traced.
+    """
+    for b in doc.get("beats") or []:
+        if b.get("kind") == "speech" and b.get("shot_id") in shot_info:
+            b["handle"] = b["shot_id"]
+            b["shot_id"] = shot_info[b["shot_id"]]["shot_id"]
+
+
 def rows_from_doc(doc: Mapping[str, Any], *, created_utc: str) -> list[dict[str, Any]]:
     """story_beats rows: every column on every row (db.upsert insists)."""
     def row(**kw: Any) -> dict[str, Any]:
@@ -125,8 +140,8 @@ def render_gate2(doc: Mapping[str, Any], meta: Mapping[str, Any],
     for act in acts:
         out.append(f"<h2>Act {act}</h2>")
         for b in sorted((b for b in speech if int(b['act']) == act),
-                        key=lambda b: (shot_info.get(b['shot_id'], {}).get('utc', ''),
-                                       float(b.get('src_in') or 0))):
+                        key=lambda b: (shot_info.get(b.get('handle') or b['shot_id'], {})
+                                       .get('utc', ''), float(b.get('src_in') or 0))):
             rid = str(b.get("shot_id", "")).split("#")[0]
             href = f"../../proxies/{e(rid)}_eq.mp4#t={float(b.get('src_in') or 0):.1f}"
             cls = "beat levity" if b.get("levity") else "beat"
@@ -258,6 +273,7 @@ def run(cfg: Config, *, force: bool = False, dry_run: bool = False,
         raise BeatsInvalid(errors, out_dir / f"response_{len(completions)}.json")
 
     created = db.utcnow()
+    resolve_handles(doc, prompt.meta["shot_info"])
     rows = rows_from_doc(doc, created_utc=created)
     conn.execute("DELETE FROM story_beats")
     db.upsert(conn, "story_beats", ["beat_id"], rows)

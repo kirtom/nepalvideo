@@ -62,6 +62,15 @@ class Cast:
     def cluster(self, label: str | None) -> str | None:
         return self.cluster_tags.get(label or "")
 
+    def source(self, source: str | None) -> str:
+        """A source name with a surname in it (`phone_keller`) becomes
+        "phone of B"; camera and telegram stay what they are."""
+        s = (source or "").lower()
+        for name, tag in self.tags.items():
+            if any(len(tok) >= 3 and tok in s for tok in name.lower().split()):
+                return f"phone of {tag}"
+        return source or "?"
+
 
 # -- cut points -----------------------------------------------------------
 
@@ -127,6 +136,9 @@ def transcript_rows(conn) -> list[dict[str, Any]]:
         d["synthetic"] = bool(doc.get("synthetic"))
         d["text"] = " ".join(str(s.get("text") or "") for s in segs)
         d["cuts"] = cut_points(segs)
+        # The model sees an opaque handle, never the shot id: recording ids
+        # carry the source folder's name, and the folders are surnames.
+        d["handle"] = f"S{len(rows) + 1:04d}"
         rows.append(d)
     return rows
 
@@ -208,9 +220,9 @@ def render_transcripts(rows: Sequence[Mapping[str, Any]], cast: Cast) -> str:
         alt = f"{r['alt_dem_m']:.0f} m" if r.get("alt_dem_m") is not None else "-"
         pic = "ok" if r.get("status") != "rejected" else "poor (audio still usable)"
         lines.append(
-            f"## shot {r['shot_id']} | act {r.get('act') or '?'} | day {r.get('day_index') or '-'}"
+            f"## shot {r['handle']} | act {r.get('act') or '?'} | day {r.get('day_index') or '-'}"
             f" | {_utc_local(r.get('start_utc'))} | {r.get('place_name') or '-'} | {alt}"
-            f" | {r.get('source')} | on screen: {face} | picture: {pic}")
+            f" | {cast.source(r.get('source'))} | on screen: {face} | picture: {pic}")
         if r.get("synthetic"):
             lines.append("  (timing: whole shot only; no cut points inside it)")
         for i, seg in enumerate(r["segments"]):
@@ -283,8 +295,9 @@ def build_prompt(cfg, conn, *, rules: Mapping[str, Any]) -> Prompt:
         parts.append(render_vocab(vocab[:80]))
     parts.append(brief.OUTPUT_HINT)
     user = "\n\n".join(parts)
-    shot_info = {r["shot_id"]: {"act": r.get("act"), "utc": r.get("start_utc") or "",
-                                "cuts": r["cuts"], "text": r["text"]} for r in trans}
+    shot_info = {r["handle"]: {"shot_id": r["shot_id"], "act": r.get("act"),
+                               "utc": r.get("start_utc") or "", "cuts": r["cuts"],
+                               "text": r["text"]} for r in trans}
     msg_info = {r["msg_id"]: {"phase": r["phase"], "text": r["text"]} for r in chat}
     meta = {"n_shots": len(trans), "n_segments": sum(len(r["segments"]) for r in trans),
             "n_synthetic": sum(1 for r in trans if r["synthetic"]),
