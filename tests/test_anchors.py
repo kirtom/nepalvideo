@@ -68,6 +68,27 @@ def test_speech_anchors_preroll_utc_and_own_picture():
     assert a3.utc == "2024-05-03T04:20:00.200000+00:00"
 
 
+def test_speech_anchors_survive_a_malformed_or_missing_start_utc():
+    shots = {
+        "bad": _shot("bad", "r1", "not a date"),
+        "missing": _shot("missing", "r1", None),
+        "good": _shot("good", "r1", "2024-05-03T04:00:00+00:00"),
+    }
+    beats = [
+        _beat("b_bad", shot_id="bad", src_in=1.0, src_out=2.0),
+        _beat("b_missing", shot_id="missing", src_in=1.0, src_out=2.0),
+        _beat("b_good", shot_id="good", src_in=1.0, src_out=2.0),
+    ]
+    anchors = speech_anchors(beats, shots, face_hold_s=2.5, pre_roll_s=0.4,
+                             own_picture_below=0.35)
+    by_id = {a.beat_id: a for a in anchors}
+    assert set(by_id) == {"b_bad", "b_missing", "b_good"}    # the batch survived
+    assert by_id["b_bad"].utc is None
+    assert by_id["b_missing"].utc is None
+    assert by_id["b_good"].utc == "2024-05-03T04:00:01+00:00"   # the rest is unaffected
+    assert by_id["b_bad"].src_in == 0.6 and by_id["b_bad"].duration_s == 1.4
+
+
 def test_quote_anchors_have_no_picture_and_zero_duration():
     anchors = quote_anchors([QUOTE])
     assert len(anchors) == 1
@@ -115,6 +136,21 @@ def test_place_anchors_crowds_against_act_t0_never_before_it():
     assert [a.beat_id for a in placed] == ["x1", "x2"]
     assert placed[0].t_in == 0.0                                 # never before act_t0
     assert placed[-1].t_in + placed[-1].duration_s <= 8.0 + 1e-9
+
+
+def test_place_anchors_spreads_evenly_in_input_order_with_no_utc_at_all():
+    anchors = [
+        Anchor(beat_id=f"y{i}", act=3, kind="speech", utc=None, recording_id="r1",
+              shot_id=f"s{i}", src_in=0.0, src_out=5.0, duration_s=5.0, own_picture=False,
+              face_hold_s=2.5, text=f"y{i}", effect="none")
+        for i in (1, 2, 3)
+    ]
+    placed = place_anchors(anchors, act_t0=0.0, act_len_s=90.0, act_utc0=None, act_utc1=None)
+    assert [a.beat_id for a in placed] == ["y1", "y2", "y3"]     # input order kept
+    assert [round(a.t_in, 3) for a in placed] == [15.0, 45.0, 75.0]   # spread evenly
+    for prev, nxt in zip(placed, placed[1:]):
+        assert nxt.t_in >= prev.t_in + prev.duration_s + 4.0 - 1e-9   # the gap held
+    assert placed[-1].t_in + placed[-1].duration_s <= 90.0 + 1e-9
 
 
 # -- broll_candidates --------------------------------------------------

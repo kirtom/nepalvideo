@@ -74,8 +74,11 @@ def speech_anchors(beats: Sequence[Mapping[str, Any]],
         utc = None
         start_utc = shot.get("start_utc")
         if start_utc:
-            utc = (datetime.fromisoformat(str(start_utc)) +
-                  timedelta(seconds=beat_src_in - shot_start)).isoformat()
+            try:
+                utc = (datetime.fromisoformat(str(start_utc)) +
+                      timedelta(seconds=beat_src_in - shot_start)).isoformat()
+            except ValueError:
+                pass                    # a malformed stamp is this anchor's fact, not the batch's
         own_picture = float(shot.get("face_score") or 0.0) < float(own_picture_below)
         hold = 0.0 if own_picture else min(float(face_hold_s), duration)
         out.append(Anchor(beat_id=b["beat_id"], act=b.get("act"), kind="speech", utc=utc,
