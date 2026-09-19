@@ -86,40 +86,50 @@ def find_pairs(rows: Sequence[Mapping[str, Any]], *, window_s: float,
                 continue
             if not (is_portrait(a) or is_portrait(b)):
                 continue
-            gap = max(a0, b0) - min(a1, b1)   # negative/zero when spans overlap
-            if gap > float(window_s):
+            # window_s bounds how far apart the two starts may be -- what
+            # "the same moment" means for two people pulling out phones --
+            # but a split screen also needs both clips to actually hold
+            # footage at the aligned instant, so the spans must truly
+            # overlap (common duration > 0), not just fall within window_s
+            # of each other with a gap between them.
+            if abs(a0 - b0) > float(window_s):
+                continue
+            common = min(a1, b1) - max(a0, b0)
+            if common <= 0:
                 continue
             rank = _score(a) + _score(b)
             fc_a, fc_b = a.get("face_cluster"), b.get("face_cluster")
             if fc_a is not None and fc_b is not None and fc_a != fc_b:
                 rank += FACE_CLUSTER_BONUS
-            candidates.append((rank, a, a0, b, b0))
+            candidates.append((rank, a, a0, b, b0, common))
 
     candidates.sort(key=lambda c: c[0], reverse=True)
 
     used_shots: set[Any] = set()
     per_act_count: dict[Any, int] = {}
     pairs: list[dict[str, Any]] = []
-    for rank, a, a0, b, b0 in candidates:
+    for rank, a, a0, b, b0, common in candidates:
         if a["shot_id"] in used_shots or b["shot_id"] in used_shots:
             continue
         primary, secondary = (a, b) if _score(a) >= _score(b) else (b, a)
-        act = primary.get("act")               # the two shots agree in practice; primary breaks ties
+        act = primary.get("act")               # paired shots are simultaneous, so they share an act; the primary's is taken
         if per_act_count.get(act, 0) >= per_act:
             continue
         later0 = max(a0, b0)
         primary_src_in = float(primary["start_s"]) + (later0 - (a0 if primary is a else b0))
         secondary_src_in = float(secondary["start_s"]) + (later0 - (a0 if secondary is a else b0))
-        primary_remaining = float(primary["end_s"]) - primary_src_in
-        secondary_remaining = float(secondary["end_s"]) - secondary_src_in
-        src_out = primary_src_in + min(primary_remaining, secondary_remaining)
+        # common is the true overlap duration, computed once at candidate
+        # time -- by construction it never exceeds either shot's remaining
+        # footage, so src_out can't run past what either clip actually has.
+        src_out = primary_src_in + common
 
         slot = {k: None for k in SLOT_KEYS if k != "slot_index"}
         slot.update(kind="video", act=act, shot_id=primary["shot_id"],
                    secondary_shot_id=secondary["shot_id"],
                    src_in=primary_src_in, secondary_src_in=secondary_src_in,
                    src_out=src_out, motion='{"type":"split"}', speed=1.0,
-                   transition="cut", locked=0)
+                   transition="cut",  # a split needs no transition of its own; the cut is instant
+                   locked=0)
         pairs.append(slot)
         used_shots.add(a["shot_id"])
         used_shots.add(b["shot_id"])

@@ -81,6 +81,14 @@ def test_landscape_landscape_never_pairs():
     assert find_pairs([a, b], window_s=60, per_act=2) == []
 
 
+def test_gap_within_window_but_no_overlap_never_pairs():
+    # A ends before B starts; the starts are 5s apart (inside window_s=10)
+    # but the spans share no footage, so this must not become a pair.
+    a = _shot("a", "phone_keller", "2024-05-03T04:00:00+00:00", start_s=0.0, end_s=4.0)
+    b = _shot("b", "phone_kulikov", "2024-05-03T04:00:05+00:00", start_s=0.0, end_s=60.0)
+    assert find_pairs([a, b], window_s=10, per_act=2) == []
+
+
 def test_is_portrait():
     assert is_portrait({"width": 1080, "height": 1920}) is True
     assert is_portrait({"width": 1920, "height": 1080}) is False
