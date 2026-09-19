@@ -741,3 +741,193 @@ def test_the_credits_track_does_not_compete_for_an_act():
     scored = [t for t in pool if t is not credits]
     assignment = assign_acts(scored)
     assert credits.track_id not in assignment.by_act.values()
+
+
+# -- scene assignment (Viterbi), film v2 section 5.6 --------------------
+
+from nepal.spine.music import assign_scenes, pair_cost, music_map_from_scenes
+from nepal.spine.scenes import Scene, scene_target
+
+SCENE_WEIGHTS = {"energy": 1.0, "tempo": 0.6, "dynamics": 0.5, "brightness": 0.4}
+
+
+def scene_track(track_id, artist, tempo, section_energies, centroid=1500.0, dyn=0.3,
+                duration=600.0, key=None):
+    """A track built with explicit, hand-picked per-section energies -- the
+    act-mode fixtures above only need one number per track, but the Viterbi
+    pass compares *sections*, so the test fixtures need to control those
+    directly rather than deriving them from a single scalar."""
+    e_p95, e_p10 = max(section_energies) + dyn / 2, min(section_energies) - dyn / 2
+    t = Track(track_id=track_id, s3_key=f"raw/music/{track_id}.mp3", title=track_id.title(),
+              artist=artist, duration_s=duration, tempo_bpm=tempo, key_est=key,
+              energy_mean=sum(section_energies) / len(section_energies),
+              energy_p95=e_p95, energy_p10=e_p10, centroid=centroid, onset_rate=2.0)
+    n = len(section_energies)
+    seg = duration / n
+    t.sections = [{"section_id": f"{track_id}_s{i}", "track_id": track_id,
+                   "start_s": i * seg, "end_s": (i + 1) * seg, "energy": section_energies[i],
+                   "is_swell": 1 if i == n - 1 else 0}
+                  for i in range(n)]
+    t.beats = [i * 60.0 / tempo for i in range(int(duration * tempo / 60))]
+    t.downbeats = t.beats[::4]
+    return t
+
+
+def two_track_library():
+    """calm: quiet, slow; driving: loud, fast -- the step 1 brief's two-track
+    library. Centroid and dyn-range are equal across both tracks on purpose,
+    so brightness/dynamics (which the library normalises to a track-constant
+    0..1) never confound the energy/tempo story these tests are about."""
+    calm = scene_track("calm", "ArtistA", 60, [0.02, 0.03, 0.04, 0.05])
+    driving = scene_track("driving", "ArtistB", 140, [0.3, 0.5, 0.7, 0.9])
+    return [calm, driving]
+
+
+def trek_scene(scene_id, act, t_in, t_out, activity, hr, speed=0.5, alt=2000.0, hour=10.0):
+    return Scene(scene_id=scene_id, act=act, t_in=t_in, t_out=t_out, slot_indices=(),
+                activity=activity, speed_ms=speed, hr_bpm=hr, gain_m_per_h=0.0, alt_m=alt,
+                hour=hour, voice_share=0.0, levity=False, picture_energy=0.5)
+
+
+def four_scenes():
+    """village -> climb -> summit -> village, one scene per act 1/2/4/5 (the
+    brief's Step 1 fixture)."""
+    return [
+        trek_scene(1, 1, 0.0, 60.0, "village", hr=60, speed=0.1, alt=2000, hour=10),
+        trek_scene(2, 2, 60.0, 180.0, "climbing", hr=119, speed=1.4, alt=3500, hour=8),
+        trek_scene(3, 4, 180.0, 240.0, "summit", hr=190, speed=0.5, alt=5000, hour=7),
+        trek_scene(4, 5, 240.0, 300.0, "village", hr=60, speed=0.1, alt=1800, hour=16),
+    ]
+
+
+def scene_targets_for(scenes):
+    return {sc.scene_id: scene_target(sc, hr_rest=60, hr_max=190) for sc in scenes}
+
+
+def assign_four_scenes(tracks=None, **kw):
+    scenes = four_scenes()
+    tracks = two_track_library() if tracks is None else tracks
+    params = dict(switch_cost=0.05, continuity_bonus=0.2, repeat_penalty=0.1,
+                 reuse_gap_s=300, preferred=[], preferred_bonus=0.0, exclude=[],
+                 act4_swell=False)
+    params.update(kw)
+    return scenes, tracks, assign_scenes(scenes, tracks, targets=scene_targets_for(scenes),
+                                         weights=SCENE_WEIGHTS, **params)
+
+
+def test_climb_and_summit_get_the_driving_track_villages_get_calm():
+    _, _, a = assign_four_scenes()
+    assert a.by_scene[1][0] == "calm"    # village
+    assert a.by_scene[2][0] == "driving"  # climb
+    assert a.by_scene[3][0] == "driving"  # summit
+    assert a.by_scene[4][0] == "calm"    # village
+
+
+def test_continuity_keeps_the_summit_on_the_section_after_the_climbs():
+    scenes, tracks, a = assign_four_scenes()
+    order = {t.track_id: [s["section_id"] for s in t.sections] for t in tracks}
+    climb_track, climb_section = a.by_scene[2]
+    summit_track, summit_section = a.by_scene[3]
+    assert summit_track == climb_track
+    ids = order[climb_track]
+    assert ids.index(summit_section) == ids.index(climb_section) + 1
+
+
+def test_the_excluded_credits_track_never_appears():
+    # would win every scene on energy alone if it were not withdrawn first
+    credits = scene_track("credits", "Marusha", 140, [0.9, 0.95, 0.97, 0.99])
+    _, _, a = assign_four_scenes(tracks=two_track_library() + [credits],
+                                 exclude=["credits.mp3"])
+    assert all(track_id != "credits" for track_id, _ in a.by_scene.values())
+
+
+def test_preferred_bonus_tilts_a_near_tie():
+    scene = trek_scene(1, 3, 0.0, 60.0, "climbing", hr=130, speed=1.0, alt=3000, hour=9)
+    targets = scene_targets_for([scene])
+    plain = scene_track("plain", "X", 100, [0.5])
+    liked = scene_track("liked", "Y", 100, [0.5])   # identical fit -- a true tie
+
+    tied = assign_scenes([scene], [plain, liked], targets=targets, weights=SCENE_WEIGHTS,
+                         switch_cost=0.3, continuity_bonus=0.3, repeat_penalty=0.5,
+                         reuse_gap_s=300, preferred=[], preferred_bonus=0.2, exclude=[])
+    assert tied.by_scene[1][0] == "plain", "first-seen wins an exact tie with no preference"
+
+    tilted = assign_scenes([scene], [plain, liked], targets=targets, weights=SCENE_WEIGHTS,
+                           switch_cost=0.3, continuity_bonus=0.3, repeat_penalty=0.5,
+                           reuse_gap_s=300, preferred=["liked"], preferred_bonus=0.2, exclude=[])
+    assert tilted.by_scene[1][0] == "liked"
+
+
+def test_the_map_covers_each_acts_span_and_the_beat_grid_is_on_the_film_timeline():
+    scenes, tracks, a = assign_four_scenes()
+    act_spans = {1: (0.0, 60.0), 2: (60.0, 180.0), 4: (180.0, 240.0), 5: (240.0, 300.0)}
+    m = music_map_from_scenes(scenes, a, tracks, act_spans=act_spans, silence_s=3.0)
+    assert len(m["acts"]) == 4
+    for act in m["acts"]:
+        t_start, t_end = act_spans[act["act"]]
+        segs = act["segments"]
+        assert segs, f"act {act['act']} got no segments"
+        assert abs(segs[0]["t_in"] - t_start) <= 0.5
+        assert abs(segs[-1]["t_end"] - t_end) <= 0.5
+        for b in act["beat_grid"]:
+            assert b >= act["t_start"] - 1e-9
+
+
+def test_act0_takes_the_act4_swell_segment():
+    scenes, tracks, a = assign_four_scenes(act4_swell=True)
+    act_spans = {1: (30.0, 60.0), 2: (60.0, 180.0), 4: (180.0, 240.0), 5: (240.0, 300.0)}
+    m = music_map_from_scenes(scenes, a, tracks, act_spans=act_spans, silence_s=3.0,
+                              act0_span=(0.0, 20.0))
+    act0 = next(x for x in m["acts"] if x["act"] == 0)
+    act4 = next(x for x in m["acts"] if x["act"] == 4)
+    assert act0["segments"][0]["track_id"] == act4["segments"][0]["track_id"]
+    assert act0["t_start"] == 0.0 and act0["t_end"] == 20.0
+
+
+def test_music_map_from_scenes_has_the_same_keys_as_build_music_map():
+    """Ruling: the two assignment modes must plug into the same consumer."""
+    old_map = build_music_map(library(), assign_acts(library()), ACT_SPECS, total_s=1200)
+    scenes, tracks, a = assign_four_scenes()
+    act_spans = {1: (0.0, 60.0), 2: (60.0, 180.0), 4: (180.0, 240.0), 5: (240.0, 300.0)}
+    new_map = music_map_from_scenes(scenes, a, tracks, act_spans=act_spans, silence_s=3.0)
+    assert set(new_map) == set(old_map)
+    assert set(new_map["acts"][0]) == set(old_map["acts"][0])
+    assert set(new_map["acts"][0]["segments"][0]) == set(old_map["acts"][0]["segments"][0])
+
+
+# -- edge cases ----------------------------------------------------------
+
+def test_assign_scenes_with_a_single_scene():
+    scene = trek_scene(1, 2, 0.0, 60.0, "climbing", hr=140, speed=1.2, alt=3000, hour=9)
+    tracks = two_track_library()
+    a = assign_scenes([scene], tracks, targets=scene_targets_for([scene]), weights=SCENE_WEIGHTS,
+                      switch_cost=0.3, continuity_bonus=0.3, repeat_penalty=0.5,
+                      reuse_gap_s=300, preferred=[], preferred_bonus=0.0, exclude=[])
+    assert set(a.by_scene) == {1}
+    assert a.by_scene[1][0] in ("calm", "driving")
+
+
+def test_assign_scenes_with_a_single_track():
+    _, _, a = assign_four_scenes(tracks=[two_track_library()[0]])
+    assert {tid for tid, _ in a.by_scene.values()} == {"calm"}
+
+
+def test_assign_scenes_with_no_swell_in_the_library():
+    tracks = two_track_library()
+    for t in tracks:
+        for s in t.sections:
+            s["is_swell"] = 0
+    _, _, a = assign_four_scenes(tracks=tracks, act4_swell=True)
+    assert len(a.by_scene) == 4          # falls back to the full state set
+
+
+def test_exclude_that_removes_every_track():
+    _, _, a = assign_four_scenes(exclude=["calm.mp3", "driving.mp3"])
+    assert a.by_scene == {}
+    assert a.cost == math.inf
+
+
+def test_pair_cost_ignores_a_none_valued_target_term():
+    target = {"energy": None, "tempo_bpm": None, "dynamics": 0.5, "brightness": None}
+    feat = {"energy_pct": 0.9, "tempo_bpm": 120.0, "dynamics": 0.5, "brightness": 0.1}
+    assert pair_cost(target, feat, weights=SCENE_WEIGHTS) == pytest.approx(0.0)

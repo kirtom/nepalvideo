@@ -22,9 +22,11 @@ import collections
 import statistics
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
+
+from nepal.spine.scenes import Scene
 
 log = logging.getLogger(__name__)
 
@@ -696,6 +698,440 @@ def check_music_map(mmap: dict[str, Any], *, target_s: float,
     if not mmap.get("silence_window"):
         problems.append("no silence_window after the Act 4 peak")
     return problems
+
+
+# -- scene assignment (Viterbi over scenes, film v2 section 5.6) -------
+#
+# The act-mode functions above pick one Hungarian solve per act, from five
+# averaged features. This block picks a *section* of a track per *scene*, so
+# a track can turn over inside a long act instead of being stuck with
+# whichever cue won the act's average. Callers precompute each scene's
+# ``scene_target`` (spine/scenes.py) and hand the map in; this module never
+# calls it and never learns the heart-rate band -- it only ever compares two
+# already-computed feature dicts.
+
+# The summit is the one act whose last scene must land on a swell before the
+# hard cut to silence (the brief's single most powerful move), whatever the
+# rest of the act structure is called or how many acts it grows to.
+SUMMIT_ACT = 4
+
+
+def _named_track_ids(tracks: Sequence[Track], names: Sequence[str]) -> set[str]:
+    """Resolve a configured name list (``preferred``/``exclude``) to track ids,
+    reusing ``pick_credits_track``'s file-name/stem/title matching so a second,
+    looser matcher cannot quietly diverge from the one the credits track relies
+    on."""
+    ids = set()
+    for name in names:
+        t = pick_credits_track(tracks, name)
+        if t is not None:
+            ids.add(t.track_id)
+    return ids
+
+
+def _library_stats(tracks: Sequence[Track]) -> tuple[list[float], list[float], list[float]]:
+    energies = [float(s.get("energy", 0.0)) for t in tracks for s in t.sections]
+    return energies, [t.dyn_range for t in tracks], [t.centroid for t in tracks]
+
+
+def _percentile_rank(value: float, values: Sequence[float]) -> float:
+    """Fraction of ``values`` at or below ``value`` -- an empty library (every
+    track excluded) has nothing to rank against, so it reads as the middle."""
+    values = list(values)
+    if not values:
+        return 0.5
+    below = sum(1 for v in values if v < value)
+    equal = sum(1 for v in values if v == value)
+    return (below + 0.5 * equal) / len(values)
+
+
+def _normalise(value: float, values: Sequence[float]) -> float:
+    values = list(values)
+    lo, hi = min(values), max(values)
+    if hi - lo < 1e-9:                # every track alike on this dimension
+        return 0.5
+    return _clamp01((value - lo) / (hi - lo))
+
+
+def _clamp01(x: float) -> float:
+    return max(0.0, min(1.0, x))
+
+
+def _section_role(track: Track, section: Mapping[str, Any]) -> str:
+    """intro/build/swell/outro from ``is_swell`` and the section's position in
+    its own piece -- the two facts the spec names, nothing derived further."""
+    if section.get("is_swell"):
+        return "swell"
+    ids = [s.get("section_id") for s in track.sections]
+    sid = section.get("section_id")
+    idx = ids.index(sid) if sid in ids else 0
+    if idx == 0:
+        return "intro"
+    if idx == len(ids) - 1:
+        return "outro"
+    return "build"
+
+
+def section_features(track: Track, section: Mapping[str, Any], *,
+                     energies: Sequence[float] | None = None,
+                     dyn_ranges: Sequence[float] | None = None,
+                     centroids: Sequence[float] | None = None) -> dict[str, Any]:
+    """A section's own place in the library, not just in its track -- the same
+    absolute energy reads as urgent against a library of solo piano and as
+    nothing against one of post-rock, and ``scene_target``'s energy is scaled
+    the same 0..1 way. ``energies``/``dyn_ranges``/``centroids`` are the whole
+    pool's numbers, precomputed once per assignment; omitted, the section is
+    ranked against its own track alone so the function still stands on its
+    own for a single-track call."""
+    energies = list(energies) if energies is not None else \
+        [float(s.get("energy", 0.0)) for s in track.sections]
+    dyn_ranges = list(dyn_ranges) if dyn_ranges is not None else [track.dyn_range]
+    centroids = list(centroids) if centroids is not None else [track.centroid]
+    return {
+        "energy_pct": _percentile_rank(float(section.get("energy", 0.0)), energies),
+        "tempo_bpm": track.tempo_bpm,
+        "dynamics": _normalise(track.dyn_range, dyn_ranges),
+        "brightness": _normalise(track.centroid, centroids),
+        "role": _section_role(track, section),
+        "length_s": float(section.get("end_s", 0.0)) - float(section.get("start_s", 0.0)),
+    }
+
+
+def _term(a: float | None, b: float | None) -> float:
+    """A term whose target or feature side is missing contributes nothing --
+    a scene target built by hand for a test, or a future feature source that
+    cannot supply a dimension, must not be scored against a fabricated 0."""
+    return abs(a - b) if a is not None and b is not None else 0.0
+
+
+def _tempo_term(t: float | None, f: float | None) -> float:
+    """Half and double time read as the same cadence to a listener; a scene
+    walking at 70 bpm should not be marked a mismatch against a 140 bpm cue."""
+    if not t or not f:
+        return 0.0
+    return min(abs(math.log2(t / f)), abs(math.log2(t / (2 * f))), abs(math.log2(2 * t / f)))
+
+
+def pair_cost(target: Mapping[str, Any], feat: Mapping[str, Any], *,
+             weights: Mapping[str, float]) -> float:
+    """Weighted distance between a scene's target and a candidate section's
+    features. ``weights`` is ``music.scene_targets`` from config: energy,
+    tempo, dynamics, brightness."""
+    return (weights.get("energy", 0.0) * _term(target.get("energy"), feat.get("energy_pct")) +
+           weights.get("tempo", 0.0) * _tempo_term(target.get("tempo_bpm"), feat.get("tempo_bpm")) +
+           weights.get("dynamics", 0.0) * _term(target.get("dynamics"), feat.get("dynamics")) +
+           weights.get("brightness", 0.0) * _term(target.get("brightness"), feat.get("brightness")))
+
+
+@dataclass
+class SceneAssignment:
+    by_scene: dict[int, tuple[str, str]]
+    cost: float
+    note: str = ""
+
+
+def _is_continuation(prev: tuple[str, str], cand: tuple[str, str],
+                     order: Mapping[str, list[str]]) -> bool:
+    """Whether ``cand`` is the section that follows ``prev`` in the same
+    piece -- the continuity bonus is for picking up where the last scene left
+    off, not merely staying on the same track."""
+    if prev[0] != cand[0]:
+        return False
+    ids = order[prev[0]]
+    return cand[1] in ids and prev[1] in ids and ids.index(cand[1]) == ids.index(prev[1]) + 1
+
+
+def _repeated_within_gap(prev_state: tuple[str, str], candidate_track: str, i: int,
+                         scenes: Sequence[Scene],
+                         back: list[dict[tuple[str, str], tuple[str, str] | None]],
+                         reuse_gap_s: float) -> bool:
+    """Whether ``candidate_track`` was already playing recently enough to
+    count as a repeat, walking the *chosen* path back from the previous scene
+    rather than every scene the piece ever touched.
+
+    This is an approximation, not the true audio calendar: it only sees the
+    single best path into ``prev_state``, so a piece that played on a path
+    Viterbi didn't keep is invisible to it. That is the brief's own
+    "approximated by the previous scenes' spans" -- exact would mean carrying
+    every track's last-heard time as part of the state, which multiplies the
+    state space by the size of the library for a penalty that is already a
+    soft nudge, not a hard rule.
+    """
+    current_t_in = scenes[i].t_in
+    state, j = prev_state, i - 1
+    while j >= 0:
+        if current_t_in - scenes[j].t_out > reuse_gap_s:
+            return False
+        if state[0] == candidate_track:
+            return True
+        state = back[j].get(state)
+        j -= 1
+        if state is None:
+            return False
+    return False
+
+
+def _act1_track_along_path(state: tuple[str, str], step: int,
+                           back: list[dict[tuple[str, str], tuple[str, str] | None]],
+                           act1_idx: int) -> str | None:
+    """The piece already playing at the first Act 1 scene, along the specific
+    path ending in ``state`` at ``step`` -- the callback bonus is judged
+    against what *this* path opened Act 1 with, not the single globally best
+    Act 1 choice (that combinatorial search is ``assign_acts``'s problem, for
+    a different assignment)."""
+    while step > act1_idx:
+        prev = back[step].get(state)
+        if prev is None:
+            return None
+        state, step = prev, step - 1
+    return state[0] if step == act1_idx else None
+
+
+def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
+                  targets: Mapping[int, Mapping[str, Any]],
+                  weights: Mapping[str, float], switch_cost: float,
+                  continuity_bonus: float, repeat_penalty: float,
+                  reuse_gap_s: float, preferred: Sequence[str],
+                  preferred_bonus: float, exclude: Sequence[str],
+                  act4_swell: bool = True) -> SceneAssignment:
+    """A Viterbi pass over ``scenes`` with (track, section) pairs as states.
+
+    ``scenes`` must already be in chronological order (as ``group_scenes``
+    returns them) -- the transition costs below (continuity, repeats, the
+    callback) all read "the previous scene" positionally, not by timestamp.
+    ``targets`` is ``scene_target(...)`` per scene, precomputed by the caller;
+    this function never calls it.
+    """
+    excluded_ids = _named_track_ids(tracks, exclude)
+    preferred_ids = _named_track_ids(tracks, preferred)
+    pool = [t for t in tracks if t.track_id not in excluded_ids]
+
+    states: list[tuple[str, str]] = []
+    section_of: dict[tuple[str, str], dict] = {}
+    by_id: dict[str, Track] = {}
+    for t in pool:
+        by_id[t.track_id] = t
+        for sec in t.sections:
+            state = (t.track_id, sec["section_id"])
+            states.append(state)
+            section_of[state] = sec
+
+    if not scenes:
+        return SceneAssignment({}, 0.0, "no scenes to assign")
+    if not states:
+        return SceneAssignment({}, math.inf,
+                               f"no track sections available -- {len(excluded_ids)} track(s) excluded")
+
+    energies, dyn_ranges, centroids = _library_stats(pool)
+    feat_of = {s: section_features(by_id[s[0]], section_of[s], energies=energies,
+                                   dyn_ranges=dyn_ranges, centroids=centroids)
+              for s in states}
+    order = {t.track_id: [sec["section_id"] for sec in t.sections] for t in pool}
+    swell_states = [s for s in states if section_of[s].get("is_swell")]
+
+    acts_present = [sc.act for sc in scenes]
+    act1 = min((a for a in acts_present if a >= 1), default=None)
+    last_act = max(acts_present, default=None)
+    act1_idx = next((i for i, sc in enumerate(scenes) if sc.act == act1), None) \
+        if act1 is not None else None
+    act4_positions = [i for i, sc in enumerate(scenes) if sc.act == SUMMIT_ACT]
+    act4_last_idx = act4_positions[-1] if act4_positions else None
+
+    dp: dict[tuple[str, str], float] = {}
+    back: list[dict[tuple[str, str], tuple[str, str] | None]] = []
+
+    for i, scene in enumerate(scenes):
+        target = targets[scene.scene_id]
+        candidates = swell_states if (act4_swell and i == act4_last_idx and swell_states) else states
+
+        new_dp: dict[tuple[str, str], float] = {}
+        step_back: dict[tuple[str, str], tuple[str, str] | None] = {}
+        wants_callback = last_act is not None and scene.act == last_act \
+            and act1_idx is not None and act1_idx < i
+
+        for cand in candidates:
+            emission = pair_cost(target, feat_of[cand], weights=weights)
+            if cand[0] in preferred_ids:
+                emission -= preferred_bonus
+
+            if i == 0:
+                new_dp[cand] = emission
+                step_back[cand] = None
+                continue
+
+            best_cost, best_prev = math.inf, None
+            for prev, prev_cost in dp.items():
+                cost = prev_cost + emission
+                if cand[0] != prev[0]:
+                    cost += switch_cost
+                    if _repeated_within_gap(prev, cand[0], i, scenes, back, reuse_gap_s):
+                        cost += repeat_penalty
+                elif _is_continuation(prev, cand, order):
+                    cost -= continuity_bonus
+                if wants_callback:
+                    act1_track = _act1_track_along_path(prev, i - 1, back, act1_idx)
+                    if act1_track is not None:
+                        cost -= callback_affinity(by_id[act1_track], by_id[cand[0]])
+                if cost < best_cost:
+                    best_cost, best_prev = cost, prev
+            new_dp[cand] = best_cost
+            step_back[cand] = best_prev
+
+        dp = new_dp
+        back.append(step_back)
+
+    best_final = min(dp, key=dp.get)
+    total_cost = dp[best_final]
+
+    path: list[tuple[str, str]] = [best_final] * len(scenes)
+    state = best_final
+    for i in range(len(scenes) - 1, -1, -1):
+        path[i] = state
+        state = back[i][state]
+
+    by_scene = {scenes[i].scene_id: path[i] for i in range(len(scenes))}
+    note = f"{len(scenes)} scenes over {len(states)} states ({len(excluded_ids)} track(s) excluded)"
+    return SceneAssignment(by_scene, round(total_cost, 4), note)
+
+
+def _segments_for_act(act_scenes: Sequence[Scene], assignment: SceneAssignment,
+                      by_id: dict[str, Track],
+                      section_of: dict[tuple[str, str], dict]) -> list[dict[str, Any]]:
+    """Each scene becomes a segment; consecutive scenes assigned the same
+    (track, section) merge into one, since nothing about the music actually
+    changed at that cut."""
+    runs: list[dict[str, Any]] = []
+    for sc in act_scenes:
+        state = assignment.by_scene.get(sc.scene_id)
+        if state is None:
+            continue
+        if runs and runs[-1]["state"] == state:
+            runs[-1]["t_end"] = sc.t_out
+        else:
+            runs.append({"state": state, "t_in": sc.t_in, "t_end": sc.t_out})
+
+    segments = []
+    for r in runs:
+        track_id, section_id = r["state"]
+        track = by_id[track_id]
+        src_in = float(section_of[r["state"]]["start_s"])
+        length = r["t_end"] - r["t_in"]
+        # fill_act/build_music_map never let a segment claim more of a track
+        # than the track has (`take = min(candidate.duration_s, remaining)`);
+        # a scene that outlasts what is left of its section's piece follows
+        # the same rule here rather than reporting a source position past the
+        # end of the file.
+        src_out = min(src_in + length, track.duration_s) if track.duration_s else src_in + length
+        segments.append({
+            "track_id": track_id, "title": track.title, "artist": track.artist,
+            "t_in": round(r["t_in"], 3), "t_end": round(r["t_end"], 3),
+            "src_in": round(src_in, 3), "src_out": round(src_out, 3),
+        })
+    return segments
+
+
+def _act_entry(act: int, name: str | None, segments: list[dict[str, Any]],
+              t_start: float, t_end: float, by_id: dict[str, Track]) -> dict[str, Any]:
+    """Same act-dict shape ``build_music_map`` emits, built from segments that
+    already carry their own film-timeline position rather than an act-local
+    cursor."""
+    swells: list[float] = []
+    beat_grid: list[float] = []
+    downbeats: list[float] = []
+    for seg in segments:
+        track = by_id.get(seg["track_id"])
+        if not track:
+            continue
+        base = seg["t_in"] - seg["src_in"]
+        swells += [round(base + float(x["start_s"]), 3) for x in track.sections
+                  if x.get("is_swell") and seg["src_in"] <= float(x["start_s"]) < seg["src_out"]]
+        beat_grid += [round(base + b, 3) for b in track.beats if seg["src_in"] <= b < seg["src_out"]]
+        downbeats += [round(base + b, 3) for b in track.downbeats
+                     if seg["src_in"] <= b < seg["src_out"]]
+
+    covered = (segments[-1]["t_end"] - t_start) if segments else 0.0
+    grid_end = max(beat_grid) - t_start if beat_grid else 0.0
+    plays = collections.Counter(seg["track_id"] for seg in segments)
+    return {
+        "act": act, "name": name,
+        "track_id": segments[0]["track_id"] if segments else None,
+        "segments": segments,
+        "t_start": round(t_start, 3), "t_end": round(t_end, 3),
+        "music_covered_s": round(covered, 3),
+        "beat_grid_covers_s": round(grid_end, 3),
+        "n_distinct_tracks": len(plays),
+        "max_track_repeats": max(plays.values()) if plays else 0,
+        "swells": sorted(swells),
+        "beat_grid": sorted(beat_grid),
+        "downbeats": sorted(downbeats),
+    }
+
+
+def _act0_entry(act0_span: tuple[float, float], act4: Mapping[str, Any],
+               by_id: dict[str, Track]) -> dict[str, Any]:
+    """Act 0 plays the piece Act 4 opens with, starting from Act 4's own
+    swell, so the summit music is heard first and recognised when it
+    returns (spec section 5.6)."""
+    t_start, t_end = act0_span
+    length = t_end - t_start
+    if not act4["segments"]:
+        return _act_entry(0, None, [], t_start, t_end, by_id)
+    seg = act4["segments"][0]
+    track = by_id[seg["track_id"]]
+    swell_t = act4["swells"][0] if act4["swells"] else seg["t_in"]
+    src_in = seg["src_in"] + (swell_t - seg["t_in"])
+    src_out = min(src_in + length, track.duration_s) if track.duration_s else src_in + length
+    segment = {
+        "track_id": track.track_id, "title": track.title, "artist": track.artist,
+        "t_in": round(t_start, 3), "t_end": round(t_end, 3),
+        "src_in": round(src_in, 3), "src_out": round(src_out, 3),
+    }
+    return _act_entry(0, None, [segment], t_start, t_end, by_id)
+
+
+def music_map_from_scenes(scenes: Sequence[Scene], assignment: SceneAssignment,
+                          tracks: Sequence[Track], *,
+                          act_spans: Mapping[int, tuple[float, float]],
+                          silence_s: float,
+                          act0_span: tuple[float, float] | None = None) -> dict[str, Any]:
+    """``music_map.json`` in the same shape ``build_music_map`` emits, filled
+    from a per-scene assignment instead of a per-act one: every field
+    ``check_music_map`` and the audio graph (S06) read is still here, so
+    either assignment mode can be dropped into the same consumer."""
+    by_id = {t.track_id: t for t in tracks}
+    section_of = {(t.track_id, s["section_id"]): s for t in tracks for s in t.sections}
+
+    acts_out = []
+    for act in sorted(act_spans):
+        t_start, t_end = act_spans[act]
+        act_scenes = [sc for sc in scenes if sc.act == act]
+        segments = _segments_for_act(act_scenes, assignment, by_id, section_of)
+        acts_out.append(_act_entry(act, None, segments, t_start, t_end, by_id))
+
+    act4 = next((a for a in acts_out if a["act"] == SUMMIT_ACT), None)
+    if act0_span is not None and act4 is not None:
+        acts_out.insert(0, _act0_entry(act0_span, act4, by_id))
+    acts_out.sort(key=lambda a: a["t_start"])
+
+    total = max((a["t_end"] for a in acts_out), default=0.0)
+    silence = ({"t_start": round(act4["t_end"], 3), "t_end": round(act4["t_end"] + silence_s, 3)}
+              if act4 else {})
+    used = {seg["track_id"] for a in acts_out for seg in a["segments"]}
+
+    return {
+        "total_duration_s": round(total, 3),
+        "acts": acts_out,
+        "silence_window": silence,
+        "assignment_cost": assignment.cost if assignment.cost != math.inf else None,
+        # ponytail: SceneAssignment folds the callback bonus into `cost`
+        # rather than tracking it apart as act-mode's Assignment does; the
+        # key stays for shape parity with build_music_map, unpopulated.
+        "callback_bonus": 0.0,
+        "assignment_note": assignment.note,
+        "n_tracks_available": len(tracks),
+        "n_tracks_used": len(used),
+        "library_duration_s": round(sum(t.duration_s or 0.0 for t in tracks), 1),
+    }
 
 
 # -- feature extraction (needs librosa) --------------------------------
