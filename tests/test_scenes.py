@@ -144,6 +144,53 @@ def test_short_scene_merges_with_the_shorter_of_two_same_act_neighbours():
     assert scenes[1].activity == "resting"          # 40s outweighs the 20s village
 
 
+def test_short_scene_with_neighbours_in_other_acts_is_kept_as_is():
+    slots = [_slot(0, act=1, t_in=0.0, t_out=50.0),
+            _slot(1, act=2, t_in=50.0, t_out=70.0),      # 20s, too short, but no same-act neighbour
+            _slot(2, act=3, t_in=70.0, t_out=140.0)]
+    attrs_by_id = {"s0": _attrs(act=1, speed_ms=1.5),
+                  "s1": _attrs(act=2, speed_ms=0.5),
+                  "s2": _attrs(act=3, speed_ms=1.5, gain_m_per_h=200.0)}
+    attrs = lambda slot: attrs_by_id[slot["shot_id"]]
+    scenes = group_scenes(slots, attrs, min_scene_s=45.0, max_scene_s=1000.0,
+                          beats_spans=[], cities=[])
+    assert len(scenes) == 3
+    assert (scenes[1].t_in, scenes[1].t_out) == (50.0, 70.0)
+
+
+def test_speed_band_boundary_keeps_scenes_separate():
+    slots = [_slot(0, act=2, t_in=0.0, t_out=60.0), _slot(1, act=2, t_in=60.0, t_out=120.0)]
+    attrs_by_id = {"s0": _attrs(act=2, speed_ms=1.5), "s1": _attrs(act=2, speed_ms=3.0)}
+    attrs = lambda slot: attrs_by_id[slot["shot_id"]]
+    # Same act, same activity ("walking" either way), but different speed
+    # bands -- both scenes clear min_scene_s so no short-scene merge can
+    # paper over the band split.
+    scenes = group_scenes(slots, attrs, min_scene_s=45.0, max_scene_s=1000.0,
+                          beats_spans=[], cities=[])
+    assert len(scenes) == 2
+
+
+def test_hr_band_boundary_keeps_scenes_separate():
+    slots = [_slot(0, act=2, t_in=0.0, t_out=60.0), _slot(1, act=2, t_in=60.0, t_out=120.0)]
+    attrs_by_id = {"s0": _attrs(act=2, speed_ms=1.5, hr_bpm=75.0),
+                  "s1": _attrs(act=2, speed_ms=1.5, hr_bpm=95.0)}
+    attrs = lambda slot: attrs_by_id[slot["shot_id"]]
+    scenes = group_scenes(slots, attrs, min_scene_s=45.0, max_scene_s=1000.0,
+                          beats_spans=[], cities=[])
+    assert len(scenes) == 2
+
+
+def test_missing_heart_rate_groups_with_missing_heart_rate():
+    slots = [_slot(0, act=2, t_in=0.0, t_out=30.0), _slot(1, act=2, t_in=30.0, t_out=60.0)]
+    attrs_by_id = {"s0": _attrs(act=2, speed_ms=1.5, hr_bpm=None),
+                  "s1": _attrs(act=2, speed_ms=1.5, hr_bpm=None)}
+    attrs = lambda slot: attrs_by_id[slot["shot_id"]]
+    scenes = group_scenes(slots, attrs, min_scene_s=1.0, max_scene_s=1000.0,
+                          beats_spans=[], cities=[])
+    assert len(scenes) == 1
+    assert scenes[0].t_in == 0.0 and scenes[0].t_out == 60.0
+
+
 def test_long_scene_splits_outside_a_beat_span():
     slots, attrs_by_id = [], {}
     t = 0.0
@@ -160,6 +207,7 @@ def test_long_scene_splits_outside_a_beat_span():
     assert all((s.t_out - s.t_in) <= 200.0 for s in scenes)
     boundaries = sorted({s.t_in for s in scenes} | {s.t_out for s in scenes})
     assert not any(190.0 < b < 210.0 for b in boundaries)
+    assert [s.scene_id for s in scenes] == [1, 2, 3]
 
 
 def test_beat_span_covering_every_boundary_leaves_the_scene_unsplit():
@@ -273,3 +321,8 @@ def test_tempo_rises_with_speed_and_stays_bounded():
     fast_target = scene_target(fast, hr_rest=60.0, hr_max=170.0)
     assert slow_target["tempo_bpm"] == pytest.approx(60.0)
     assert fast_target["tempo_bpm"] == pytest.approx(150.0)   # 60 + 60*1.5 cap
+
+
+def test_missing_speed_takes_the_walking_norm_not_standing_still():
+    no_gps = _scene(speed_ms=None)
+    assert scene_target(no_gps, hr_rest=60.0, hr_max=170.0)["tempo_bpm"] == pytest.approx(120.0)

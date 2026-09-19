@@ -102,6 +102,8 @@ def activity_class(a: Mapping[str, Any], *, cities: Sequence[str]) -> str:
 # activity_class has no use for that distinction, but two "walking" slots at
 # very different paces should still not read as one scene.
 SPEED_BAND_CUTS_MS = (RESTING_SPEED_MS, VILLAGE_SPEED_MS, 2.0, TRANSPORT_SPEED_MS)
+# Roughly one heart-rate training zone -- two slots 20 bpm apart are working
+# at a different intensity even when the trail and the pace look identical.
 HR_BAND_WIDTH_BPM = 20.0
 
 
@@ -267,7 +269,10 @@ def group_scenes(slots: Sequence[Mapping[str, Any]], attrs: _Attrs, *,
     for i, slot in enumerate(slots):
         a = attrs(slot)
         act = slot["act"]
-        activity = activity_class(a, cities=cities)
+        # The slot is authoritative for act, not attrs()'s own copy of it --
+        # a missing/stale act in attrs must not silently disable summit/city
+        # classification.
+        activity = activity_class({**a, "act": act}, cities=cities)
         band = (_speed_band(_num(a, "speed_ms")), _hr_band(_num(a, "hr_bpm")))
         if groups and groups[-1]["act"] == act and groups[-1]["activity"] == activity \
                 and groups[-1]["band"] == band:
@@ -289,7 +294,9 @@ def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
-# Base energy any scene starts at before its own facts move it.
+# No shot in this film is truly inert -- even the calmest walk earns a
+# track -- so the floor sits above zero; the three terms below carry the
+# rest of the 0..1 range.
 ENERGY_BASE = 0.3
 # Weight of the hr-or-gain effort term -- the single biggest lever, since
 # effort is what the film's energy curve is actually tracking.
@@ -302,6 +309,10 @@ ENERGY_ACT_ADJUST = 0.2
 DRAMATIC_ACTS = (3, 4)
 CALM_ACTIVITIES = (VILLAGE, RESTING, CITY)
 
+# A still scene sits at a resting pulse's tempo (60 bpm); the same span
+# again (another 60) is what a scene moving at TEMPO_SPEED_NORM_MS reaches --
+# the trek's own walking cadence, roughly 120 bpm -- before the cap takes
+# over for anything faster.
 TEMPO_BASE_BPM = 60.0
 TEMPO_SPAN_BPM = 60.0
 # Normalises around a brisk walking pace; S07 is told it may accept half or
@@ -310,14 +321,23 @@ TEMPO_SPAN_BPM = 60.0
 TEMPO_SPEED_NORM_MS = 1.4
 TEMPO_SPEED_CAP = 1.5
 
+# The swell is the point of the climb -- a high dynamic range is what makes
+# the act's music sound like it costs something.
 DYNAMICS_CLIMB = 0.8
+# Quiet and compressed enough that the cue does not fight what is being said.
 DYNAMICS_SPEECH = 0.3
+# The unmarked middle: neither the climb's swell nor speech's flattened bed.
 DYNAMICS_NEUTRAL = 0.5
 # A scene the audience is meant to be listening through, not over.
 VOICE_SHARE_THRESHOLD = 0.5
 
+# Dark: a pre-dawn start and thin high-altitude air both call for a cue that
+# does not sound sunlit.
 BRIGHTNESS_LOW = 0.2
+# The brightest picture the film has -- a village or city seen by daylight --
+# so the cue is allowed to sound the most open here.
 BRIGHTNESS_HIGH = 0.9
+# Everything else: neither a golden village noon nor a pre-dawn climb.
 BRIGHTNESS_NEUTRAL = 0.5
 # effort.py's light_quality treats 3:00-5:00 as the alpine start and 5:00-7:00
 # as sunrise; a music target only needs the coarser "before real light"
@@ -354,7 +374,10 @@ def scene_target(scene: Scene, *, hr_rest: float, hr_max: float) -> dict[str, fl
         energy -= ENERGY_ACT_ADJUST
     energy = _clamp01(energy)
 
-    speed = scene.speed_ms if scene.speed_ms is not None else 0.0
+    # A scene with no GPS fix is not thereby the film's slowest moment -- it
+    # takes the walking norm the tempo formula is itself calibrated to, the
+    # cadence the film follows by default, not silence.
+    speed = scene.speed_ms if scene.speed_ms is not None else TEMPO_SPEED_NORM_MS
     tempo_bpm = TEMPO_BASE_BPM + TEMPO_SPAN_BPM * min(speed / TEMPO_SPEED_NORM_MS, TEMPO_SPEED_CAP)
 
     if scene.activity in (CLIMBING, SUMMIT):
