@@ -50,6 +50,13 @@ def bridge_candidates(shots: Sequence[Mapping[str, Any]],
 
     out: list[dict[str, Any]] = []
     for rec in recordings:
+        # A recording with no measured duration can't be weighed against
+        # length_range at all, so it can never become a candidate -- not
+        # "duration 0", which would just make it lose the rank, since
+        # long_take_slot would still need a real number to slice against.
+        duration_s = rec.get("duration_s")
+        if duration_s is None:
+            continue
         rec_id = rec["recording_id"]
         rec_shots = shots_by_recording.get(rec_id, [])
         keyword_shots = [s for s in rec_shots if _has_keyword(s, keywords)]
@@ -57,8 +64,8 @@ def bridge_candidates(shots: Sequence[Mapping[str, Any]],
             continue
         first = min(keyword_shots, key=lambda s: float(s["start_s"]))
         n_faces = sum(1 for s in rec_shots if s.get("has_face"))
-        face_share = n_faces / len(rec_shots) if rec_shots else 0.0
-        score = (min(float(rec["duration_s"]), DURATION_RANK_CAP_S),
+        face_share = n_faces / len(rec_shots)
+        score = (min(float(duration_s), DURATION_RANK_CAP_S),
                 len(keyword_shots), -face_share)
         out.append({"recording_id": rec_id, "first_shot_id": first["shot_id"],
                    "act": first.get("act"), "score": score})
@@ -81,11 +88,14 @@ def long_take_slot(candidate: Mapping[str, Any],
     number derived from the timeline would be wrong)."""
     lo, hi = float(length_range[0]), float(length_range[1])
     rec = recordings_by_id[candidate["recording_id"]]
+    duration_s = rec.get("duration_s")
+    if duration_s is None:                 # nothing to slice a slot from
+        return None
     first_shot_id = candidate["first_shot_id"]
     first = next(s for s in shots_by_recording[candidate["recording_id"]]
                 if s["shot_id"] == first_shot_id)
     src_in = float(first["start_s"])
-    remaining = float(rec["duration_s"]) - src_in
+    remaining = float(duration_s) - src_in
 
     if remaining >= hi:
         length = hi

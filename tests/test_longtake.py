@@ -77,8 +77,7 @@ def test_more_keyword_shots_breaks_a_duration_tie():
     ]
     recordings = [_recording("recA", 150.0), _recording("recB", 150.0)]
     candidates = bridge_candidates(shots, recordings, keywords=KEYWORDS)
-    by_id = {c["recording_id"]: c for c in candidates}
-    assert list(by_id) == ["recB", "recA"] or candidates[0]["recording_id"] == "recB"
+    assert candidates[0]["recording_id"] == "recB"
 
 
 def test_face_share_breaks_a_tie_the_lower_share_wins():
@@ -93,6 +92,29 @@ def test_face_share_breaks_a_tie_the_lower_share_wins():
     recordings = [_recording("recA", 150.0), _recording("recB", 150.0)]
     candidates = bridge_candidates(shots, recordings, keywords=KEYWORDS)
     assert candidates[0]["recording_id"] == "recA"
+
+
+def test_recording_with_no_duration_is_excluded_and_yields_no_slot():
+    # A recording with duration_s: None can't be weighed against
+    # length_range at all -- it must be dropped from candidates, and if it
+    # somehow reached long_take_slot anyway, that must also return None
+    # rather than crash on float(None).
+    shots = [
+        _shot("s1", "rec_no_duration", transcript="bridge"),
+        _shot("s2", "rec_short", transcript="bridge"),
+    ]
+    recordings = [
+        _recording("rec_no_duration", None),
+        _recording("rec_short", 70.0),
+    ]
+    candidates = bridge_candidates(shots, recordings, keywords=KEYWORDS)
+    assert [c["recording_id"] for c in candidates] == ["rec_short"]
+
+    shots_by_recording = {"rec_no_duration": [shots[0]]}
+    recordings_by_id = {"rec_no_duration": recordings[0]}
+    candidate = {"recording_id": "rec_no_duration", "first_shot_id": "s1", "act": 3, "score": 0.0}
+    assert long_take_slot(candidate, recordings_by_id, shots_by_recording,
+                          length_range=[60, 90]) is None
 
 
 def test_slot_shape_matches_slot_keys():
