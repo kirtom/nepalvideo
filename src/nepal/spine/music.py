@@ -1165,9 +1165,17 @@ def _act0_entry(act0_span: tuple[float, float], act4: Mapping[str, Any],
     returns (spec section 5.6)."""
     t_start, t_end = act0_span
     length = t_end - t_start
+    if not act4["segments"]:
+        return _act_entry(0, None, [], t_start, t_end, by_id), None
     seg, swell_src = _last_swell_in_act(act4, by_id)
     if seg is None:
-        return _act_entry(0, None, [], t_start, t_end, by_id), None
+        # No section anywhere in Act 4 is marked is_swell -- act4_swell may
+        # be off, or mark_swells needs *rising* energy and a
+        # monotonically-decaying track earns none either way. The cold open
+        # must never go silent, so it takes Act 4's own last segment as it
+        # already plays, rather than a swell that does not exist.
+        seg = act4["segments"][-1]
+        swell_src = seg["src_in"]
     track = by_id[seg["track_id"]]
     src_out = swell_src + length
     segment = {

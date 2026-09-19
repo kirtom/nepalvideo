@@ -916,6 +916,31 @@ def test_act0_takes_the_act4_swell_segment():
     assert act0["swells"][0] == pytest.approx(act0["t_start"])
     assert act0["t_start"] == 0.0 and act0["t_end"] == 20.0
 
+    # the map's own callback_bonus must be the real number applied, not a
+    # placeholder -- cross-checked against callback_affinity directly on the
+    # tracks the assignment actually chose for Act 1 and the last act
+    by_id = {t.track_id: t for t in tracks}
+    expected_bonus = callback_affinity(by_id[a.by_scene[1][0]], by_id[a.by_scene[3][0]])
+    assert m["callback_bonus"] == pytest.approx(expected_bonus)
+
+
+def test_act0_is_never_silent_when_act4_has_no_swell():
+    """Reachable with act4_swell=False, or with any library where
+    mark_swells marked nothing (it requires *rising* energy, so a
+    monotonically-decaying track earns zero swells either way) -- Act 0 must
+    still play Act 4's own music rather than come back empty."""
+    tracks = two_track_library()
+    for t in tracks:
+        for s in t.sections:
+            s["is_swell"] = 0
+    scenes, tracks, a = assign_four_scenes(tracks=tracks, act4_swell=False)
+    act_spans = {1: (30.0, 60.0), 2: (60.0, 180.0), 4: (180.0, 240.0), 5: (240.0, 300.0)}
+    m = music_map_from_scenes(scenes, a, tracks, act_spans=act_spans, silence_s=3.0,
+                              act0_span=(0.0, 20.0))
+    act0 = next(x for x in m["acts"] if x["act"] == 0)
+    assert act0["track_id"] is not None
+    assert len(act0["segments"]) == 1
+
 
 def test_music_map_from_scenes_has_the_same_keys_as_build_music_map():
     """Ruling: the two assignment modes must plug into the same consumer."""
