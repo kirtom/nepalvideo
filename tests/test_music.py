@@ -10,7 +10,9 @@ from nepal.spine.music import (Track, parse_artist_title, estimate_key, mark_swe
                                allocate_act_durations, choose_total_duration,
                                build_music_map, check_music_map,
                                detect_licence, ACT_WEIGHTS, PITCH_CLASSES,
-                               MAJOR_PROFILE, MINOR_PROFILE)
+                               MAJOR_PROFILE, MINOR_PROFILE,
+                               assign_scenes, pair_cost, music_map_from_scenes)
+from nepal.spine.scenes import Scene, scene_target
 
 ACT_SPECS = [
     {"act": 1, "name": "Planning", "min_s": 120, "max_s": 180},
@@ -745,9 +747,6 @@ def test_the_credits_track_does_not_compete_for_an_act():
 
 # -- scene assignment (Viterbi), film v2 section 5.6 --------------------
 
-from nepal.spine.music import assign_scenes, pair_cost, music_map_from_scenes
-from nepal.spine.scenes import Scene, scene_target
-
 SCENE_WEIGHTS = {"energy": 1.0, "tempo": 0.6, "dynamics": 0.5, "brightness": 0.4}
 
 
@@ -824,6 +823,11 @@ def test_climb_and_summit_get_the_driving_track_villages_get_calm():
 
 
 def test_continuity_keeps_the_summit_on_the_section_after_the_climbs():
+    """act4_swell is off here on purpose: under the default (see
+    test_the_summit_lands_on_a_swell_by_default below) this fixture's summit
+    scene is restricted to the track's one swell section, which leaves no
+    room for continuity to pick a *different* "next" section -- the two
+    behaviours are independent and this isolates the continuity one."""
     scenes, tracks, a = assign_four_scenes()
     order = {t.track_id: [s["section_id"] for s in t.sections] for t in tracks}
     climb_track, climb_section = a.by_scene[2]
@@ -867,20 +871,49 @@ def test_the_map_covers_each_acts_span_and_the_beat_grid_is_on_the_film_timeline
         t_start, t_end = act_spans[act["act"]]
         segs = act["segments"]
         assert segs, f"act {act['act']} got no segments"
-        assert abs(segs[0]["t_in"] - t_start) <= 0.5
-        assert abs(segs[-1]["t_end"] - t_end) <= 0.5
+        # segment t_in/t_end are act-local (build_music_map's own convention),
+        # so the first starts near 0 and the last ends near the act's own span
+        assert abs(segs[0]["t_in"] - 0.0) <= 0.5
+        assert abs(segs[-1]["t_end"] - (t_end - t_start)) <= 0.5
+        for seg in segs:
+            assert seg["t_end"] - seg["t_in"] == pytest.approx(seg["src_out"] - seg["src_in"])
         for b in act["beat_grid"]:
             assert b >= act["t_start"] - 1e-9
+    # every act needs a swell timestamp; this fixture's scenes never land on
+    # one directly, so the loudest-section fallback must be doing its job
+    assert not [p for p in check_music_map(m, target_s=300.0) if "swell" in p]
 
 
 def test_act0_takes_the_act4_swell_segment():
-    scenes, tracks, a = assign_four_scenes(act4_swell=True)
-    act_spans = {1: (30.0, 60.0), 2: (60.0, 180.0), 4: (180.0, 240.0), 5: (240.0, 300.0)}
+    """Two Act 4 scenes landing on different sections -- the swell only
+    lives on the second one (the one act4_swell restricts to a swell state),
+    so Act 0 must not blindly pair the *first* segment with *a* swell
+    timestamp, which is only right when Act 4 happens to have one segment."""
+    scenes = [
+        trek_scene(1, 1, 0.0, 60.0, "village", hr=60, speed=0.1, alt=2000, hour=10),
+        trek_scene(2, 2, 60.0, 180.0, "climbing", hr=119, speed=1.4, alt=3500, hour=8),
+        trek_scene(3, 4, 180.0, 210.0, "summit", hr=150, speed=0.8, alt=4200, hour=7),
+        trek_scene(4, 4, 210.0, 240.0, "summit", hr=190, speed=0.5, alt=5000, hour=7),
+    ]
+    tracks = two_track_library()
+    a = assign_scenes(scenes, tracks, targets=scene_targets_for(scenes), weights=SCENE_WEIGHTS,
+                      switch_cost=0.05, continuity_bonus=0.05, repeat_penalty=0.1,
+                      reuse_gap_s=300, preferred=[], preferred_bonus=0.0, exclude=[],
+                      act4_swell=True)
+    act_spans = {1: (30.0, 60.0), 2: (60.0, 180.0), 4: (180.0, 240.0)}
     m = music_map_from_scenes(scenes, a, tracks, act_spans=act_spans, silence_s=3.0,
                               act0_span=(0.0, 20.0))
-    act0 = next(x for x in m["acts"] if x["act"] == 0)
     act4 = next(x for x in m["acts"] if x["act"] == 4)
-    assert act0["segments"][0]["track_id"] == act4["segments"][0]["track_id"]
+    assert len(act4["segments"]) == 2, "the two summit scenes must land on different sections"
+
+    swell_seg = act4["segments"][-1]
+    swell_track = next(t for t in tracks if t.track_id == swell_seg["track_id"])
+    swell_section = next(s for s in swell_track.sections if s.get("is_swell"))
+
+    act0 = next(x for x in m["acts"] if x["act"] == 0)
+    assert act0["segments"][0]["track_id"] == swell_seg["track_id"]
+    assert act0["segments"][0]["src_in"] == pytest.approx(swell_section["start_s"])
+    assert act0["swells"][0] == pytest.approx(act0["t_start"])
     assert act0["t_start"] == 0.0 and act0["t_end"] == 20.0
 
 
@@ -893,6 +926,70 @@ def test_music_map_from_scenes_has_the_same_keys_as_build_music_map():
     assert set(new_map) == set(old_map)
     assert set(new_map["acts"][0]) == set(old_map["acts"][0])
     assert set(new_map["acts"][0]["segments"][0]) == set(old_map["acts"][0]["segments"][0])
+    # semantics, not only keys: segment t_in is act-local in both shapes
+    assert new_map["acts"][0]["segments"][0]["t_in"] == 0.0
+    assert old_map["acts"][0]["segments"][0]["t_in"] == 0.0
+
+
+def test_the_summit_lands_on_a_swell_by_default():
+    """act4_swell defaults to True in production; every test above turns it
+    off to isolate continuity from this restriction (see the docstring on
+    test_continuity_keeps_the_summit_on_the_section_after_the_climbs). Under
+    the default, the fixture's summit scene must go to the swell section."""
+    scenes, tracks, a = assign_four_scenes(act4_swell=True)
+    section_of = {(t.track_id, s["section_id"]): s for t in tracks for s in t.sections}
+    assert section_of[a.by_scene[3]]["is_swell"]
+
+
+def test_the_callback_bonus_applies_once_not_to_every_last_act_scene():
+    """callback_affinity is calibrated in assign_acts for a single whole-act
+    decision. Subtracting it from every scene of the last act would let a
+    poor-fitting same-artist track win the whole act on the strength of one
+    bonus, repeated -- so only the first last-act scene ever receives it."""
+    open_track = scene_track("open", "Shared", 60, [0.1])   # uniquely best fit for scene 1
+    echo = scene_track("echo", "Shared", 100, [0.5])        # same artist, mediocre fit for scenes 2/3
+    fit = scene_track("fit", "Other", 150, [0.9])           # best fit for scenes 2/3, no bonus
+
+    scenes = [
+        trek_scene(1, 1, 0.0, 60.0, "village", hr=60),
+        trek_scene(2, 5, 60.0, 120.0, "descent", hr=190),
+        trek_scene(3, 5, 120.0, 180.0, "descent", hr=190),
+    ]
+    targets = {
+        1: {"energy": 0.1, "tempo_bpm": 60.0, "dynamics": 0.2, "brightness": 0.2},
+        2: {"energy": 0.9, "tempo_bpm": 150.0, "dynamics": 0.9, "brightness": 0.9},
+        3: {"energy": 0.9, "tempo_bpm": 150.0, "dynamics": 0.9, "brightness": 0.9},
+    }
+    a = assign_scenes(scenes, [open_track, echo, fit], targets=targets, weights=SCENE_WEIGHTS,
+                      switch_cost=0.1, continuity_bonus=0.1, repeat_penalty=0.1,
+                      reuse_gap_s=300, preferred=[], preferred_bonus=0.0, exclude=[])
+    assert a.by_scene[1][0] == "open"
+    assert a.by_scene[2][0] == "echo", "the bonus may win the first last-act scene"
+    assert a.by_scene[3][0] == "fit", "but not the second -- fit alone decides there"
+
+
+def test_a_scene_that_outlasts_its_track_reports_the_overrun_without_capping():
+    """Every fixture above uses 600s tracks against scenes under 120s, so a
+    scene never actually runs past its track's own end; build one on
+    purpose. Capping src_out there would make t_end-t_in disagree with
+    src_out-src_in, so the length is never capped -- the overrun is named
+    in the note instead."""
+    short = scene_track("short", "Z", 100, [0.5], duration=30.0)
+    scene = trek_scene(1, 2, 0.0, 90.0, "climbing", hr=140, speed=1.2, alt=3000, hour=9)
+    a = assign_scenes([scene], [short], targets=scene_targets_for([scene]), weights=SCENE_WEIGHTS,
+                      switch_cost=0.3, continuity_bonus=0.3, repeat_penalty=0.5,
+                      reuse_gap_s=300, preferred=[], preferred_bonus=0.0, exclude=[])
+    m = music_map_from_scenes([scene], a, [short], act_spans={2: (0.0, 90.0)}, silence_s=3.0)
+    seg = m["acts"][0]["segments"][0]
+    assert seg["t_end"] - seg["t_in"] == pytest.approx(seg["src_out"] - seg["src_in"])
+    assert seg["src_out"] == pytest.approx(90.0)          # not capped at the 30s track length
+    assert "short" in m["assignment_note"] and "overrun" in m["assignment_note"]
+
+
+def test_unmatched_preferred_and_exclude_names_are_reported_in_the_note():
+    _, _, a = assign_four_scenes(exclude=["nonexistent.mp3"], preferred=["also-missing.mp3"])
+    assert "nonexistent.mp3" in a.note
+    assert "also-missing.mp3" in a.note
 
 
 # -- edge cases ----------------------------------------------------------
