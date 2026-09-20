@@ -364,6 +364,37 @@ def test_a_split_in_the_middle_keeps_the_legs_in_row_order(tmp_path):
     assert "concat=n=3:v=1:a=0[vout]" in fc
 
 
+@pytest.mark.slow
+def test_ffmpeg_renders_a_split_between_two_shots_at_the_frame_size(tmp_path):
+    """At the boundary: a landscape clip and a portrait one stacked into one
+    960x540 leg between two plain shots. hstack refuses halves that differ
+    in height or format, and concat refuses a leg that differs from the
+    others -- both only visible when ffmpeg runs the graph."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("needs ffmpeg")
+    srcs = {}
+    for name, size in (("wide", "640x480"), ("tall", "1080x1920")):
+        p = tmp_path / f"{name}.mp4"
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", f"testsrc=size={size}:rate=25:duration=6",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(p)], check=True)
+        srcs[name] = p
+    rows = [{"shot_id": "wide", "t_in": 0.0, "t_out": 2.0, "src_in": 0.0},
+            {"shot_id": "wide", "t_in": 2.0, "t_out": 5.0, "src_in": 2.0,
+             "secondary_shot_id": "tall", "secondary_src_in": 1.0,
+             "motion": json.dumps({"type": "split"})},
+            {"shot_id": "tall", "t_in": 5.0, "t_out": 7.0, "src_in": 0.0}]
+    out = tmp_path / "draft.mp4"
+    subprocess.run(render.build_command(rows, sources=srcs, out_path=out), check=True)
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=width,height:format=duration", "-of", "default=nw=1", str(out)],
+        capture_output=True, text=True, check=True).stdout
+    assert "width=960" in probe and "height=540" in probe
+    dur = float([l for l in probe.splitlines() if l.startswith("duration=")][0].split("=")[1])
+    assert dur == pytest.approx(7.0, abs=0.3), f"expected 7 s, got {dur}"
+
+
 @pytest.mark.skipif(not render.has_drawtext(), reason="ffmpeg has no drawtext")
 def test_a_card_takes_its_caption_from_the_caller_over_the_row():
     row = {"kind": "card", "t_in": 0.0, "t_out": 2.0,
