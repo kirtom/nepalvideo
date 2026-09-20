@@ -297,6 +297,38 @@ def _gap_candidates(free: Sequence[Mapping[str, Any]], lo: float | None, hi: flo
     return sorted(free, key=lambda r: _utc_distance(r, lo, hi))[:2 * budget], len(inside)
 
 
+def _select(cands: Sequence[Mapping[str, Any]], *, budget: int, similarity, lam: float,
+            existing: Sequence[Mapping[str, Any]], prev_photo: bool, place_cap: int,
+            run_cap: int, after: int) -> tuple[list[Mapping[str, Any]], int]:
+    """MMR under the hard constraints, in selection order, and how many of
+    the picks needed the place cap lifted. The cap holds for a first pass;
+    when that leaves the budget short, a second pass takes the rest from
+    what the first left with only the photo rule and the recording run in
+    force, both still counting what the first pass chose."""
+    def admissible(c, chosen, *, place):
+        if _is_photo(c) and (_is_photo(chosen[-1]) if chosen else prev_photo):
+            return False
+        return ((not place or asm.place_count_ok(c, list(existing) + chosen, limit=place_cap))
+                and asm.recording_run_ok(c, chosen, limit=run_cap))
+
+    def prefer(c, chosen):
+        return asm.source_alternation_bonus(c, chosen, after=after)
+
+    chosen = asm.mmr_select(cands, budget=budget, similarity=similarity, lam=lam,
+                            admissible=lambda c, ch: admissible(c, ch, place=True), prefer=prefer)
+    if len(chosen) >= budget:
+        return chosen, 0
+    # A geocoded place is a whole day -- act 4 has four names for 151 shots,
+    # act 5 one village for 95 -- so three per place is what a gap prefers,
+    # not a ceiling on the film (spec 5.2: relax diversity before chronology).
+    taken = {c["shot_id"] for c in chosen}
+    relaxed = asm.mmr_select([c for c in cands if c["shot_id"] not in taken],
+                             budget=budget - len(chosen), similarity=similarity, lam=lam,
+                             admissible=lambda c, ch: admissible(c, chosen + ch, place=False),
+                             prefer=lambda c, ch: prefer(c, chosen + ch))
+    return chosen + relaxed, len(relaxed)
+
+
 def _fill_gap(cfg: Config, free: Sequence[Mapping[str, Any]], *, act: int, t0: float, t1: float,
               lo: float | None, hi: float | None, similarity,
               existing: Sequence[Mapping[str, Any]], prev_photo: bool,
@@ -315,20 +347,10 @@ def _fill_gap(cfg: Config, free: Sequence[Mapping[str, Any]], *, act: int, t0: f
     cands, n_inside = _gap_candidates(free, lo, hi, budget=budget)
     place_cap = int(cfg.get("assemble.max_shots_per_place_per_act"))
     run_cap = int(cfg.get("assemble.max_consecutive_recording"))
-    after = int(cfg.get("assemble.source_alternation_after"))
-
-    def admissible(c, chosen):
-        if _is_photo(c) and (_is_photo(chosen[-1]) if chosen else prev_photo):
-            return False
-        return (asm.place_count_ok(c, list(existing) + chosen, limit=place_cap)
-                and asm.recording_run_ok(c, chosen, limit=run_cap))
-
-    def prefer(c, chosen):
-        return asm.source_alternation_bonus(c, chosen, after=after)
-
-    chosen = asm.mmr_select(cands, budget=budget, similarity=similarity,
-                            lam=float(cfg.get("assemble.mmr_lambda")),
-                            admissible=admissible, prefer=prefer)
+    chosen, n_relaxed = _select(cands, budget=budget, similarity=similarity,
+                                lam=float(cfg.get("assemble.mmr_lambda")), existing=existing,
+                                prev_photo=prev_photo, place_cap=place_cap, run_cap=run_cap,
+                                after=int(cfg.get("assemble.source_alternation_after")))
     taken = {c["shot_id"] for c in chosen}
     if log.isEnabledFor(logging.DEBUG):
         left = [c for c in cands if c["shot_id"] not in taken]
@@ -336,9 +358,9 @@ def _fill_gap(cfg: Config, free: Sequence[Mapping[str, Any]], *, act: int, t0: f
                    "place_cap": sum(1 for c in left if not asm.place_count_ok(c, list(existing) + list(chosen), limit=place_cap)),
                    "recording_run": sum(1 for c in left if not asm.recording_run_ok(c, list(chosen), limit=run_cap))}
         log.debug("S06 act %d fill %.1f-%.1fs: budget %d, %d candidate(s) of %d free (%d inside the "
-                  "utc window, %d by distance), chose %d, %d left of which refused %s", act, t0, t1,
-                  budget, len(cands), len(free), n_inside, len(cands) - n_inside, len(chosen),
-                  len(left), refused)
+                  "utc window, %d by distance), chose %d (%d by relaxing the place cap), %d left of "
+                  "which refused %s", act, t0, t1, budget, len(cands), len(free), n_inside,
+                  len(cands) - n_inside, len(chosen), n_relaxed, len(left), refused)
     chosen = asm.source_share_repair(chosen, [c for c in cands if c["shot_id"] not in taken],
                                      min_share=float(cfg.get("assemble.source_share_min")))
     ordered = _no_adjacent_photos(asm.chronological(chosen), prev_photo=prev_photo,

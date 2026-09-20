@@ -431,6 +431,25 @@ def test_gap_candidates_widen_an_empty_window_by_utc_distance():
     assert (ids(cands), n_inside) == (["u", "s0", "s1", "s2", "s3", "s4"], 6)
 
 
+def test_fill_lifts_the_place_cap_only_for_what_the_cap_left_short():
+    """A geocoded place is a whole day, so three per place is what a gap
+    prefers, not a ceiling on the film: the cap holds for the first pass,
+    and the rest of the budget comes from what that pass left without it."""
+    def rows(places):
+        return [{"shot_id": f"s{i}", "recording_id": f"r{i}", "place_name": p, "media_kind": "video",
+                 "source": "camera", "score_total": 0.9 - 0.01 * i} for i, p in enumerate(places)]
+    select = lambda cands: s05_cut._select(cands, budget=6, similarity=lambda a, b: 0.0, lam=0.3,
+                                           existing=[], prev_photo=False, place_cap=3, run_cap=2, after=3)
+    chosen, n_relaxed = select(rows(["Manang"] * 10))
+    assert len(chosen) == 6 and n_relaxed == 3
+    # the first pass took the three the cap allows, best first; the rest came without it
+    assert [c["shot_id"] for c in chosen[:3]] == ["s0", "s1", "s2"]
+    assert [c["shot_id"] for c in chosen[3:]] == ["s3", "s4", "s5"]
+    # with places to spare the cap never bites and the second pass never runs
+    chosen, n_relaxed = select(rows([f"place{i}" for i in range(10)]))
+    assert len(chosen) == 6 and n_relaxed == 0
+
+
 def test_two_locked_slots_never_cut_each_other():
     """A crowded act's anchors are clamped onto each other by place_anchors;
     the later beat then follows the earlier one, and neither loses a frame."""
