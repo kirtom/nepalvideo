@@ -41,9 +41,10 @@ CARD_FONTSIZE = 36
 # loudnorm's own default, written out so both passes visibly ask for the
 # same range.
 SPEECH_TP_DB, LRA = -1.5, 11
-# The draft is watched, not delivered: 192k AAC is transparent for a stereo
-# bed and a rounding error next to the picture.
-AAC_BITRATE = "192k"
+# The film's delivery rate. loudnorm upsamples to 192 kHz and hands that
+# on, and left to itself the encoder negotiated 96 kHz -- the highest it
+# takes -- for a draft whose every source is 48.
+AUDIO_RATE = 48000
 
 _HAS_DRAWTEXT: bool | None = None
 
@@ -206,13 +207,20 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any]]]],
 
     Speech is normalised per cue, because every recording sits at its own
     level, and faded over ``cue_fade_s`` so a cut into a word does not
-    click. Location is set against its full level; music is crossfaded cue
-    to cue in time order and delayed to where the first begins. Both are
-    then shaped by the mix's envelope -- decided elsewhere, arriving as an
-    opaque ``volume`` expression on film time. It carries commas, which
-    would otherwise end the option, so it is quoted; the mixer promises it
-    holds no quotes of its own. A track with no cues is silence for the
-    film's length so the final mix always has its three inputs.
+    click. Location is set against its full level. Music is placed the
+    same way, cue by cue at its own ``t_in``: chaining the cues with
+    ``acrossfade`` instead collapsed every gap and shortened the run by one
+    crossfade per join, so every cue after the first hole landed early
+    under a picture cut. The crossfade is made by overlap -- each cue's
+    input is read ``music_xfade_s`` longer than its slot and fades out
+    over that extension under the cue that follows, which fades in when it
+    abuts (starts within ``music_xfade_s`` of the previous cue's end) and
+    starts clean after a real gap. Both tracks are then shaped by the
+    mix's envelope -- decided elsewhere, arriving as an opaque ``volume``
+    expression on film time. It carries commas, which would otherwise end
+    the option, so it is quoted; the mixer promises it holds no quotes of
+    its own. A track with no cues is silence for the film's length so the
+    final mix always has its three inputs.
     """
     fade = float(levels["cue_fade_s"])
     parts: list[str] = []
@@ -239,15 +247,17 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any]]]],
                         f",volume='{envelopes['location']}':eval=frame" if location else "", "[loc]"))
 
     music = tracks.get("music") or ()
-    if music:
-        cur = f"[{music[0][0]}:a]"
-        for k, (i, _) in enumerate(music[1:], 1):
-            parts.append(f"{cur}[{i}:a]acrossfade=d={float(levels['music_xfade_s']):g}[mx{k}]")
-            cur = f"[mx{k}]"
-        ms = _ms(music[0][1]["t_in"])
-        parts.append(f"{cur}adelay={ms}|{ms},volume='{envelopes['music']}':eval=frame[mus]")
-    else:
-        parts.append(f"anullsrc,atrim=duration={film_len:.3f}[mus]")
+    xfade = float(levels["music_xfade_s"])
+    prev_out: float | None = None
+    for k, (i, c) in enumerate(music):
+        ms = _ms(c["t_in"])
+        chain = [f"afade=t=in:d={xfade:g}"] if (
+            prev_out is not None and float(c["t_in"]) - prev_out < xfade) else []
+        chain += [f"afade=t=out:st={_cue_len(c):.3f}:d={xfade:g}", f"adelay={ms}|{ms}"]
+        parts.append(f"[{i}:a]" + ",".join(chain) + f"[mu{k}]")
+        prev_out = float(c["t_out"])
+    parts.append(summed("mu", len(music),
+                        f",volume='{envelopes['music']}':eval=frame" if music else "", "[mus]"))
 
     parts.append(f"[speech][loc][mus]amix=inputs=3:normalize=0,"
                  f"loudnorm=I={float(levels['final_lufs']):g}:TP={float(levels['true_peak_db']):g}"
@@ -272,7 +282,8 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
 
     The inputs are, in order: one per row (a split's secondary right after
     its primary), then one per speech, location and music cue, each track
-    in time order. Every pad index in the graph follows from that order.
+    in time order, a music cue read ``music_xfade_s`` longer for its
+    crossfade. Every pad index in the graph follows from that order.
     ``levels`` is the config's ``render`` block; ``envelopes`` the mix's
     per-track ``volume`` expressions. Without cues this is the silent draft
     it always was.
@@ -341,13 +352,18 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
         raise ValueError(f"cue(s) on unknown track(s): {sorted(unknown)}")
     files = {"speech": audio_sources or {}, "location": audio_sources or {},
              "music": music_sources or {}}
+    levels = levels or {}
     for track, placed in tracks.items():
         for c in sorted((c for c in cues if c["track"] == track), key=lambda c: float(c["t_in"])):
             src = files[track].get(str(c["source"]))
             if src is None:
                 raise KeyError(f"no audio source for cue {c.get('cue_id')} ({track}: {c['source']})")
-            # Seeked at the input like a shot, for the cue's length on the film.
-            cmd += ["-ss", f"{float(c['src_in']):.3f}", "-t", f"{_cue_len(c):.3f}", "-i", str(src)]
+            # Seeked at the input like a shot, for the cue's length on the
+            # film -- plus the crossfade for music, which is made by overlap:
+            # the extension plays out under the next cue (see audio_filters).
+            # ffmpeg simply stops where the track ends if there is less.
+            length = _cue_len(c) + (float(levels["music_xfade_s"]) if track == "music" else 0.0)
+            cmd += ["-ss", f"{float(c['src_in']):.3f}", "-t", f"{length:.3f}", "-i", str(src)]
             placed.append((n, c))
             n += 1
 
@@ -360,7 +376,7 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
 
     maps = ["-map", "[vout]"]
     if cues:
-        parts += audio_filters(tracks, envelopes=envelopes or {}, levels=levels or {},
+        parts += audio_filters(tracks, envelopes=envelopes or {}, levels=levels,
                                film_len=max(float(r["t_out"]) for r in rows))
         # No -shortest: the mix may run a hair past the picture, which is
         # harmless, but a mix that ran short would cut the picture with it.
@@ -382,7 +398,7 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
             "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
             "-pix_fmt", "yuv420p"]
     if cues:
-        cmd += ["-c:a", "aac", "-b:a", AAC_BITRATE]
+        cmd += ["-c:a", "aac", "-b:a", f"{int(levels['audio_bitrate_k'])}k", "-ar", str(AUDIO_RATE)]
     cmd.append(str(out_path))
     return cmd
 

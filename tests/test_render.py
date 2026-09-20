@@ -407,7 +407,8 @@ def test_a_card_takes_its_caption_from_the_caller_over_the_row():
 # -- the audio graph (Film v2 step 4, part B) ---------------------------
 
 LEVELS = {"speech_lufs": -16.0, "location_full_lufs": -18.0, "final_lufs": -14.0,
-          "true_peak_db": -1.5, "music_xfade_s": 2.0, "cue_fade_s": 0.15}
+          "true_peak_db": -1.5, "music_xfade_s": 2.0, "cue_fade_s": 0.15,
+          "audio_bitrate_k": 192}
 # What mix.volume_expr produces: a flat sum of between(t,..)*gain terms,
 # opaque to the renderer -- written by hand here so this file never
 # imports mix.py.
@@ -454,7 +455,7 @@ def test_cue_inputs_follow_the_video_inputs_by_track_in_time_order(tmp_path):
                             "/w/rec_a.wav", "/w/rec_b.wav", "/mu/a.mp3", "/mu/b.mp3"]
     i = [k for k, c in enumerate(cmd) if c == "-i"]
     assert cmd[i[2] - 4:i[2]] == ["-ss", "5.000", "-t", "2.000"], "a cue is seeked at the input like a shot"
-    assert cmd[i[6] - 4:i[6]] == ["-ss", "10.000", "-t", "3.000"]
+    assert cmd[i[6] - 4:i[6]] == ["-ss", "10.000", "-t", "5.000"], "a music cue is read xfade_s longer for its crossfade"
 
 
 def test_speech_cues_are_normalised_faded_placed_and_summed(tmp_path):
@@ -472,16 +473,26 @@ def test_location_cues_sit_against_full_level_and_ride_the_envelope(tmp_path):
             "volume='between(t,0,3)*1+between(t,3,7)*0.25':eval=frame[loc]") in fc
 
 
-def test_music_cues_crossfade_in_time_order_then_ride_the_envelope(tmp_path):
+def test_music_cues_land_at_their_own_t_in_and_crossfade_by_overlap(tmp_path):
+    """Chaining cues with acrossfade collapsed every gap and shortened the
+    run by one crossfade per join, so every cue after the first hole landed
+    early under a picture cut. Each cue is placed by adelay like the others;
+    the crossfade is the outgoing cue read xfade_s longer and fading out
+    under the incoming one, which fades in because it abuts."""
     fc = _graph(_mixed(tmp_path))
-    assert "[5:a][6:a]acrossfade=d=2[mx1]" in fc
-    assert "[mx1]adelay=0|0,volume='between(t,0,7)*0.5':eval=frame[mus]" in fc
-
-
-def test_one_music_cue_needs_no_crossfade(tmp_path):
-    fc = _graph(_mixed(tmp_path, cues=[c for c in CUES if c["cue_id"] != "mu_0"]))
     assert "acrossfade" not in fc
-    assert "[5:a]adelay=4000|4000,volume='between(t,0,7)*0.5':eval=frame[mus]" in fc
+    assert "[5:a]afade=t=out:st=4.000:d=2,adelay=0|0[mu0]" in fc, "the first cue of a run starts clean"
+    assert "[6:a]afade=t=in:d=2,afade=t=out:st=3.000:d=2,adelay=4000|4000[mu1]" in fc
+    assert "[mu0][mu1]amix=inputs=2:normalize=0,volume='between(t,0,7)*0.5':eval=frame[mus]" in fc
+
+
+def test_a_music_cue_after_a_real_gap_starts_clean(tmp_path):
+    later = [c if c["cue_id"] != "mu_1" else c | {"t_in": 6.0, "t_out": 7.0} for c in CUES]
+    fc = _graph(_mixed(tmp_path, cues=later))
+    assert "[6:a]afade=t=out:st=1.000:d=2,adelay=6000|6000[mu1]" in fc, "a gap is a gap, not a fade"
+    alone = _graph(_mixed(tmp_path, cues=[c for c in CUES if c["cue_id"] != "mu_0"]))
+    assert "[5:a]afade=t=out:st=3.000:d=2,adelay=4000|4000[mu0]" in alone
+    assert "[mu0]amix=inputs=1:normalize=0,volume='between(t,0,7)*0.5':eval=frame[mus]" in alone
 
 
 def test_the_three_tracks_meet_in_one_mix_and_one_final_normalisation(tmp_path):
@@ -489,9 +500,10 @@ def test_the_three_tracks_meet_in_one_mix_and_one_final_normalisation(tmp_path):
     fc = _graph(cmd)
     assert "-filter_complex_script" in cmd
     assert "[speech][loc][mus]amix=inputs=3:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[aout]" in fc
-    assert fc.count("adelay=") == 1 + 2 + 1, "one per speech and location cue, one for the music chain"
+    assert fc.count("adelay=") == len(CUES), "every cue is placed on film time, whatever its track"
     assert cmd[cmd.index("-map") + 1] == "[vout]" and "[aout]" in cmd
     assert cmd[cmd.index("-c:a") + 1] == "aac" and cmd[cmd.index("-b:a") + 1] == "192k"
+    assert cmd[cmd.index("-ar") + 1] == "48000", "loudnorm hands the encoder 192 kHz; the film is 48"
     assert "-shortest" not in cmd, "a short audio track must never cut the picture"
 
 
@@ -536,11 +548,15 @@ def test_a_cue_on_an_unknown_track_or_without_a_source_is_an_error(tmp_path):
 @pytest.mark.slow
 def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
     """At the boundary: a 12 s cut, a 440 Hz "speech" cue at 2-5 s over a
-    220 Hz bed, the music envelope muting 8-10 s. Read back with
-    volumedetect: the bed alone at 0-2 s and 5-8 s within 3 dB, the window
-    silent, the audio running the length of the film. The envelopes are the
-    flat between(t,..)*gain sums mix.volume_expr writes, quoted inside the
-    script file -- this is the proof that ffmpeg parses them that way."""
+    220 Hz bed in three cues -- two abutting at 5 s, one after a silence
+    window at 10 s -- with the envelope muting 7-9 s. Read back with
+    volumedetect: the join at 5-7 s and the late cue at 10-12 s within
+    3 dB of the bed alone at 0-2 s (a crossfade is not a dip, a cue after
+    a gap lands where the table says), the muted stretch silent although
+    the outgoing cue's tail runs on under it, and 9-10 s silent because
+    nothing is scheduled there. The envelopes are the flat between(t,..)*g
+    sums mix.volume_expr writes, quoted inside the script file -- the proof
+    that ffmpeg parses them that way."""
     if not shutil.which("ffmpeg"):
         pytest.skip("needs ffmpeg")
 
@@ -554,25 +570,28 @@ def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
     rows = [{"shot_id": "v1", "t_in": 0.0, "t_out": 6.0, "src_in": 0.0},
             {"shot_id": "v2", "t_in": 6.0, "t_out": 12.0, "src_in": 6.0}]
     cues = [_cue(cue_id="sp", track="speech", t_in=2.0, t_out=5.0, source="r",
-                 src_in=0.0, src_out=3.0, gain_lufs=-16.0),
-            _cue(cue_id="mu", track="music", t_in=0.0, t_out=12.0, source="m",
-                 src_in=0.0, src_out=12.0, gain_lufs=-14.0, fade_in_s=2.0, fade_out_s=2.0)]
-    # The bed is pushed well above the normalised speech so what 5-8 s reads
-    # is the bed's own level, not the final normaliser recovering from the
-    # louder 2-5 s.
-    envelopes = {"music": "between(t,0,8)*4+between(t,10,12)*4",
+                 src_in=0.0, src_out=3.0, gain_lufs=-16.0)]
+    for k, (t0, t1) in enumerate(((0.0, 5.0), (5.0, 7.0), (10.0, 12.0))):
+        cues.append(_cue(cue_id=f"mu_{k}", track="music", t_in=t0, t_out=t1, source="m",
+                         src_in=t0, src_out=t1, gain_lufs=-14.0, fade_in_s=2.0, fade_out_s=2.0))
+    # The bed is pushed well above the normalised speech so what the later
+    # windows read is the bed's own level, not the final normaliser
+    # recovering from the louder 2-5 s.
+    envelopes = {"music": "between(t,0,7)*4+between(t,9,12)*4",
                  "location": "between(t,0,12)*1"}
     out = tmp_path / "draft.mp4"
     cmd = render.build_command(rows, sources={"v1": vid, "v2": vid}, out_path=out, cues=cues,
                                audio_sources={"r": speech}, music_sources={"m": music},
                                envelopes=envelopes, levels=LEVELS)
     subprocess.run(cmd, check=True)
-    before = render.probe_loudness(out, t_in=0.0, t_out=2.0)
-    after = render.probe_loudness(out, t_in=5.0, t_out=8.0)
-    assert abs(before - after) < 3.0, f"the bed alone reads {before} dB before the speech, {after} dB after"
+    alone = render.probe_loudness(out, t_in=0.0, t_out=2.0)
+    for what, (a, b) in (("across the join", (5.0, 7.0)), ("the cue after the window", (10.0, 12.0))):
+        got = render.probe_loudness(out, t_in=a, t_out=b)
+        assert abs(got - alone) < 3.0, f"{what} reads {got} dB against {alone} dB for the bed alone"
     # The envelope is evaluated once per audio frame, so its edges land
-    # within a frame of 8 s and 10 s; the probe stays a quarter second inside.
-    assert render.probe_loudness(out, t_in=8.25, t_out=9.75) < -50.0
+    # within a frame of 7 s and 9 s; the probes stay a quarter second inside.
+    assert render.probe_loudness(out, t_in=7.25, t_out=8.75) < -50.0, "the outgoing tail is muted"
+    assert render.probe_loudness(out, t_in=9.1, t_out=9.9) < -50.0, "nothing plays before the late cue's t_in"
     dur = float(subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
          "stream=duration", "-of", "csv=p=0", str(out)],
