@@ -15,6 +15,7 @@ database and no config.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 from typing import Any, Mapping, Sequence
@@ -50,31 +51,72 @@ def _touches(t0: float, t1: float, spans: Sequence[tuple[float, float]]) -> bool
 
 # -- speech ---------------------------------------------------------------
 
-def speech_cues(anchors: Sequence[Anchor], *, lufs: float, fade_s: float) -> list[dict[str, Any]]:
-    """One cue per placed speech anchor (``t_in`` already on film time)."""
-    return [_cue(cue_id=f"sp_{a.beat_id}", track="speech", t_in=round(a.t_in, 3),
-                 t_out=round(a.t_in + a.duration_s, 3), source=a.recording_id,
-                 src_in=a.src_in, src_out=a.src_out, gain_lufs=lufs,
-                 fade_in_s=fade_s, fade_out_s=fade_s, beat_id=a.beat_id)
-            for a in anchors if a.kind == "speech"]
-
-
-def speech_spans(slots: Sequence[Mapping[str, Any]]) -> list[tuple[float, float]]:
-    """Where a voice is heard: each run of consecutive slots carrying the
-    same ``beat_id``. Runs, not one union per beat -- the cold open plays a
-    late beat at t = 0 and its act plays it again, and a union of the two
-    would put the whole film in between "under speech"."""
-    out: list[tuple[float, float]] = []
+def _runs(slots: Sequence[Mapping[str, Any]]) -> list[tuple[str, Mapping[str, Any], float]]:
+    """Each run of consecutive slots carrying the same ``beat_id``: the beat,
+    the run's first slot and where the run ends. Runs, not one span per beat
+    -- the cold open plays a late beat at t = 0 and its act plays it again,
+    and one span for both would put the whole film in between "under
+    speech"."""
+    out: list[tuple[str, Mapping[str, Any], float]] = []
     prev = None
     for s in slots:
         beat = s.get("beat_id")
-        t0, t1 = float(s["t_in"]), float(s["t_out"])
         if beat and beat == prev:
-            out[-1] = (out[-1][0], max(out[-1][1], t1))
+            out[-1] = (beat, out[-1][1], max(out[-1][2], float(s["t_out"])))
         elif beat:
-            out.append((t0, t1))
+            out.append((beat, s, float(s["t_out"])))
         prev = beat
     return out
+
+
+def place_speech(anchors: Sequence[Anchor], slots: Sequence[Mapping[str, Any]]) -> list[Anchor]:
+    """One placed anchor per run of slots carrying its beat, in slot order:
+    the cold open is the film's device -- the line teases at t = 0 and is
+    delivered in its act -- so both runs are heard, the same utterance each
+    time. The voice starts where the run's first slot reaches the anchor's
+    source: a locked slot opens on it, the cold open runs into it after its
+    extension. A slot that opens after the anchor's pre-roll (a cold open
+    longer than its range extends less than the pre-roll) starts the voice
+    with the picture rather than before the film. The offset is read only
+    when the slot is on the anchor's recording -- another clip's ``src_in``
+    is on another clock -- so a run the retime left all B-roll starts the
+    voice with its first cut. A beat with no run is absent from the result;
+    the caller says so."""
+    firsts: dict[str, list[Mapping[str, Any]]] = {}
+    for beat, first, _ in _runs(slots):
+        firsts.setdefault(beat, []).append(first)
+    out: list[Anchor] = []
+    for a in anchors:
+        for slot in firsts.get(a.beat_id, []):
+            same_clip = slot.get("recording_id") == a.recording_id
+            lead = a.src_in - float(slot["src_in"] or 0.0) if same_clip else 0.0
+            if lead < 0:
+                a = dataclasses.replace(a, src_in=a.src_in - lead, duration_s=a.duration_s + lead)
+                lead = 0.0
+            out.append(dataclasses.replace(a, t_in=float(slot["t_in"]) + lead))
+    return out
+
+
+def speech_cues(anchors: Sequence[Anchor], *, lufs: float, fade_s: float) -> list[dict[str, Any]]:
+    """One cue per placed speech anchor (``t_in`` already on film time). A
+    beat placed more than once -- the cold open and its act -- keeps
+    ``sp_<beat>`` for its first cue and numbers the rest from 2."""
+    seen: dict[str, int] = {}
+    out: list[dict[str, Any]] = []
+    for a in anchors:
+        if a.kind != "speech":
+            continue
+        n = seen[a.beat_id] = seen.get(a.beat_id, 0) + 1
+        out.append(_cue(cue_id=f"sp_{a.beat_id}" if n == 1 else f"sp_{a.beat_id}_{n}", track="speech",
+                        t_in=round(a.t_in, 3), t_out=round(a.t_in + a.duration_s, 3),
+                        source=a.recording_id, src_in=a.src_in, src_out=a.src_out, gain_lufs=lufs,
+                        fade_in_s=fade_s, fade_out_s=fade_s, beat_id=a.beat_id))
+    return out
+
+
+def speech_spans(slots: Sequence[Mapping[str, Any]]) -> list[tuple[float, float]]:
+    """Where a voice is heard: each run's span."""
+    return [(float(first["t_in"]), t1) for _, first, t1 in _runs(slots)]
 
 
 # -- location -------------------------------------------------------------

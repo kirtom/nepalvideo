@@ -13,7 +13,6 @@ merely usable.
 """
 from __future__ import annotations
 
-import dataclasses
 import json
 import logging
 import math
@@ -1172,33 +1171,17 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
         "SELECT b.*, m.author FROM story_beats b LEFT JOIN messages m ON m.msg_id = b.msg_id "
         "ORDER BY b.rank, b.beat_id")]
 
-    # The speech anchors as the timeline step built them; each is placed
-    # where the first slot carrying its beat reaches the words -- the locked
-    # slot opens on them, the cold open runs into them after its extension,
-    # so the offset between the slot's source and the anchor's is the offset
-    # on film time too. A beat the fill never gave a slot has no voice.
+    # The speech anchors as the timeline step built them, placed once per
+    # run of slots carrying the beat. A beat the fill never gave a slot has
+    # no voice.
     anchors = anchors_mod.speech_anchors(
         [b for b in beats if b.get("kind") == "speech" and b.get("shot_id") in shots_by_id],
         shots_by_id, face_hold_s=float(cfg.get("beats.face_hold_s")),
         pre_roll_s=float(cfg.get("beats.pre_roll_s")),
         own_picture_below=float(cfg.get("beats.own_picture_face_score_below")))
-    first_slot: dict[str, Mapping[str, Any]] = {}
-    for s in slots:
-        if s.get("beat_id") and s["beat_id"] not in first_slot:
-            first_slot[s["beat_id"]] = s
-    placed: list[anchors_mod.Anchor] = []
-    for a in anchors:
-        slot = first_slot.get(a.beat_id)
-        if slot is None:
-            log.warning("S05.cues speech beat %s has no slot on the timeline; it gets no cue", a.beat_id)
-            continue
-        lead = a.src_in - float(slot["src_in"] or 0.0)
-        if lead < 0:
-            # A cold open longer than its range extends less than the
-            # pre-roll: the cue opens with the picture, not before the film.
-            a = dataclasses.replace(a, src_in=a.src_in - lead, duration_s=a.duration_s + lead)
-            lead = 0.0
-        placed.append(dataclasses.replace(a, t_in=float(slot["t_in"]) + lead))
+    placed = cues_mod.place_speech(anchors, slots)
+    for beat in {a.beat_id for a in anchors} - {p.beat_id for p in placed}:
+        log.warning("S05.cues speech beat %s has no slot on the timeline; it gets no cue", beat)
 
     map_path = cfg.work_root / "music" / "music_map.json"
     if not map_path.exists():

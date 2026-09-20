@@ -607,15 +607,21 @@ def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
     # every speech beat with slots has its voice, starting where its first
     # slot reaches the words: the locked act slot opens on them, the cold
     # open runs into them after its extension
-    speech = {c["beat_id"]: c for c in by_track["speech"]}
+    speech = {c["cue_id"]: c for c in by_track["speech"]}
     for beat in ("b_arrive", "b_walk", "b_pass"):
         first = next(s for s in slots if s["beat_id"] == beat)
-        c = speech[beat]
-        assert c["cue_id"] == f"sp_{beat}" and c["source"] == shots[first["shot_id"]]["recording_id"]
+        c = speech[f"sp_{beat}"]
+        assert c["source"] == shots[first["shot_id"]]["recording_id"]
         assert math.isclose(c["t_in"] - first["t_in"], c["src_in"] - first["src_in"], abs_tol=1e-3), beat
         if first["act"] >= 1:
             assert math.isclose(c["t_in"], first["t_in"], abs_tol=1e-3), beat
         assert c["gain_lufs"] == cfg.get("render.speech_lufs")
+    # the cold open's line is heard again where act 4 delivers it
+    assert rep_tl["cold_open_beat"] == "b_pass" and set(speech) == {"sp_b_arrive", "sp_b_walk", "sp_b_pass", "sp_b_pass_2"}
+    again = next(s for s in slots if s["beat_id"] == "b_pass" and s["act"] == 4)
+    c2 = speech["sp_b_pass_2"]
+    assert math.isclose(c2["t_in"], again["t_in"], abs_tol=1e-3) and c2["t_in"] > speech["sp_b_pass"]["t_out"]
+    assert (c2["src_in"], c2["src_out"]) == (speech["sp_b_pass"]["src_in"], speech["sp_b_pass"]["src_out"])
 
     # music covers each act end to end on the table's own spans, not the
     # map's planned ones (the map was not rebuilt, and the acts drifted from

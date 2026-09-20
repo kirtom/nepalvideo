@@ -50,6 +50,31 @@ def test_only_speech_anchors_become_speech_cues():
     assert cues.speech_cues([pair], lufs=-16.0, fade_s=0.15) == []
 
 
+def test_a_beat_on_two_runs_gets_a_speech_cue_per_run():
+    # the cold open teases the pass line at t = 0, its slot extended 2 s
+    # before the anchor's pre-roll, and act 4 delivers it: two cues, the
+    # same utterance, each starting where its run's first slot reaches it
+    a = _anchor("b_pass", "c4", 10.6, 18.0, t_in=-1.0)
+    slots = [_slot(0, 0, 0.0, 15.0, rec="c4", src_in=8.6, beat="b_pass"),
+             _slot(1, 0, 15.0, 18.0, kind="card"),
+             _slot(2, 1, 18.0, 30.0, rec="a"),
+             _slot(3, 4, 300.0, 304.0, rec="c4", src_in=10.6, beat="b_pass"),
+             _slot(4, 4, 304.0, 307.0, rec="b", beat="b_pass")]
+    rows = cues.speech_cues(cues.place_speech([a], slots), lufs=-16.0, fade_s=0.15)
+    assert [(r["cue_id"], r["t_in"], r["t_out"]) for r in rows] == [
+        ("sp_b_pass", 2.0, 9.4), ("sp_b_pass_2", 300.0, 307.4)]
+    assert all((r["source"], r["src_in"], r["src_out"], r["beat_id"]) == ("c4", 10.6, 18.0, "b_pass")
+               for r in rows)
+    assert cues.place_speech([_anchor("b_none", "x", 0.0, 5.0, t_in=-1.0)], slots) == []
+
+
+def test_a_slot_that_opens_after_the_pre_roll_starts_the_voice_with_the_picture():
+    a = _anchor("b_long", "c4", 0.6, 20.0, t_in=-1.0)      # pre-rolled 0.4 s before the words at 1.0
+    slots = [_slot(0, 0, 0.0, 19.0, rec="c4", src_in=1.0, beat="b_long")]
+    [c] = cues.speech_cues(cues.place_speech([a], slots), lufs=-16.0, fade_s=0.15)
+    assert (c["t_in"], c["src_in"], c["src_out"], c["t_out"]) == (0.0, 1.0, 20.0, 19.0)
+
+
 def test_speech_spans_are_contiguous_runs_not_one_union_per_beat():
     # the cold open plays the pass line at 0 and act 4 plays it again: two
     # spans, never one that covers the whole film in between
