@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import shlex
 import subprocess
@@ -192,77 +193,103 @@ def _ms(seconds: Any) -> int:
     return int(round(float(seconds) * 1000))
 
 
-def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any]]]], *,
+def _fades(cue: Mapping[str, Any], levels: Mapping[str, float]) -> tuple[float, float]:
+    """The row's own fades -- cues.py writes the cut fade at cuts, the
+    window fade at the silence's edges, the crossfade on the cue after it
+    -- or the config's cut fade where the row has none."""
+    default = float(levels["cue_fade_s"])
+    fade_in, fade_out = (default if cue.get(k) is None else float(cue[k])
+                         for k in ("fade_in_s", "fade_out_s"))
+    return fade_in, fade_out
+
+
+def _afades(fade_in: float, fade_out: float, *, end: float) -> list[str]:
+    """The afade filters for a cue that ends at ``end``. A zero fade is no
+    filter at all: afade with d=0 falls back to its default of 44100
+    samples, a one-second fade nobody asked for."""
+    out = []
+    if fade_in > 0:
+        out.append(f"afade=t=in:d={fade_in:g}")
+    if fade_out > 0:
+        out.append(f"afade=t=out:st={max(0.0, end - fade_out):.3f}:d={fade_out:g}")
+    return out
+
+
+def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any], float]]], *,
                   envelopes: Mapping[str, str], levels: Mapping[str, float],
                   film_len: float, measured: Mapping[str, float] | None = None,
                   measure_only: bool = False) -> list[str]:
     """The three tracks and their mix, as graph parts ending in ``[aout]``.
 
     ``tracks`` maps each track to its cues in time order, each with the
-    index of the input that carries it. A cue is placed on film time with
-    ``adelay`` -- one delay per channel of the stereo the mix ends in; a
-    mono cue takes the first and ignores the rest -- and a track's cues are
-    summed without rescaling (``normalize=0``): amix's default halves
-    everything while two inputs are live, which would dip a cue every time
-    another began.
+    index of the input that carries it and how much of it is read. A cue
+    is placed on film time with ``adelay`` -- one delay per channel of
+    the stereo the mix ends in; a mono cue takes the first and ignores the
+    rest -- and a track's cues are summed without rescaling
+    (``normalize=0``): amix's default halves everything while two inputs
+    are live, which would dip a cue every time another began.
 
-    Speech is normalised per cue, because every recording sits at its own
-    level, and faded over ``cue_fade_s`` so a cut into a word does not
-    click. Location is set against its full level. Music is placed the
-    same way, cue by cue at its own ``t_in``: chaining the cues with
-    ``acrossfade`` instead collapsed every gap and shortened the run by one
-    crossfade per join, so every cue after the first hole landed early
-    under a picture cut. The crossfade is made by overlap -- each cue's
-    input is read ``music_xfade_s`` longer than its slot and fades out
-    over that extension under the cue that follows, which fades in when it
-    abuts (starts within ``music_xfade_s`` of the previous cue's end) and
-    starts clean after a real gap. Both tracks are then shaped by the
+    Every cue fades at its edges as its row says (``_fades``): without
+    that, every change of recording is a butt-splice of two unrelated
+    waveforms -- hundreds of clicks at picture cuts. Speech is normalised
+    per cue first, because every recording sits at its own level.
+    Location is set against its full level. Music is placed the same way,
+    cue by cue at its own ``t_in``: chaining the cues with ``acrossfade``
+    instead collapsed every gap and shortened the run by one crossfade
+    per join, so every cue after the first hole landed early under a
+    picture cut. The crossfade is made by overlap -- each cue is read
+    ``music_xfade_s`` longer than its slot and fades out over that
+    extension under the cue that follows, which fades in as its row says.
+    A music cue is cut from a decoded-from-start track with ``atrim``
+    rather than seeked (see build_command), so its timestamps are reset
+    the way a seek would have. Location and music are then shaped by the
     mix's envelope -- decided elsewhere, arriving as an opaque ``volume``
     expression on film time. It carries commas, which would otherwise end
     the option, so it is quoted; the mixer promises it holds no quotes of
-    its own. A track with no cues is silence for the film's length so the
-    final mix always has its three inputs.
+    its own. A track with no cues is silence for the film's length, at
+    the film's rate and layout, so the final mix always has its three
+    inputs.
 
     The final normalisation is two-pass. Single-pass loudnorm re-levels
     what the envelope designed: through three seconds of silence its gain
     rode up and the returning bed came back 3.1 dB hot. So ``measure_only``
     has it print what it hears, and ``measured`` -- those numbers -- has it
-    apply one static gain and only limit true peaks (``linear=true``).
+    apply one static gain (``linear=true``: a bare gain, no limiter; ffmpeg
+    refuses linear mode when that gain would push a peak past TP, and
+    reverts to dynamic).
     """
-    fade = float(levels["cue_fade_s"])
     parts: list[str] = []
 
     def summed(prefix: str, n: int, tail: str, label: str) -> str:
         if not n:
-            return f"anullsrc,atrim=duration={film_len:.3f}{label}"
+            return f"anullsrc=r={AUDIO_RATE}:cl=stereo,atrim=duration={film_len:.3f}{label}"
         return "".join(f"[{prefix}{k}]" for k in range(n)) + f"amix=inputs={n}:normalize=0{tail}{label}"
 
     speech = tracks.get("speech") or ()
-    for k, (i, c) in enumerate(speech):
+    for k, (i, c, length) in enumerate(speech):
         ms = _ms(c["t_in"])
-        parts.append(f"[{i}:a]loudnorm=I={float(levels['speech_lufs']):g}:TP={SPEECH_TP_DB:g}:LRA={LRA},"
-                     f"afade=t=in:d={fade:g},afade=t=out:st={max(0.0, _cue_len(c) - fade):.3f}:d={fade:g},"
-                     f"adelay={ms}|{ms}[sp{k}]")
+        chain = [f"loudnorm=I={float(levels['speech_lufs']):g}:TP={SPEECH_TP_DB:g}:LRA={LRA}",
+                 *_afades(*_fades(c, levels), end=length), f"adelay={ms}|{ms}"]
+        parts.append(f"[{i}:a]" + ",".join(chain) + f"[sp{k}]")
     parts.append(summed("sp", len(speech), "", "[speech]"))
 
     location = tracks.get("location") or ()
     full = float(levels["location_full_lufs"])
-    for k, (i, c) in enumerate(location):
+    for k, (i, c, length) in enumerate(location):
         ms = _ms(c["t_in"])
-        parts.append(f"[{i}:a]volume={float(c['gain_lufs']) - full:g}dB,adelay={ms}|{ms}[lo{k}]")
+        chain = [f"volume={float(c['gain_lufs']) - full:g}dB",
+                 *_afades(*_fades(c, levels), end=length), f"adelay={ms}|{ms}"]
+        parts.append(f"[{i}:a]" + ",".join(chain) + f"[lo{k}]")
     parts.append(summed("lo", len(location),
                         f",volume='{envelopes['location']}':eval=frame" if location else "", "[loc]"))
 
     music = tracks.get("music") or ()
     xfade = float(levels["music_xfade_s"])
-    prev_out: float | None = None
-    for k, (i, c) in enumerate(music):
-        ms = _ms(c["t_in"])
-        chain = [f"afade=t=in:d={xfade:g}"] if (
-            prev_out is not None and float(c["t_in"]) - prev_out < xfade) else []
-        chain += [f"afade=t=out:st={_cue_len(c):.3f}:d={xfade:g}", f"adelay={ms}|{ms}"]
+    for k, (i, c, length) in enumerate(music):
+        ms, src_in = _ms(c["t_in"]), float(c["src_in"])
+        chain = [f"atrim=start={src_in:.3f}:end={src_in + length:.3f}", "asetpts=PTS-STARTPTS",
+                 *_afades(_fades(c, levels)[0], xfade, end=length), f"adelay={ms}|{ms}"]
         parts.append(f"[{i}:a]" + ",".join(chain) + f"[mu{k}]")
-        prev_out = float(c["t_out"])
     parts.append(summed("mu", len(music),
                         f",volume='{envelopes['music']}':eval=frame" if music else "", "[mus]"))
 
@@ -273,14 +300,19 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any]]]],
     elif measured:
         m = {k: float(measured[k]) for k in ("input_i", "input_lra", "input_tp", "input_thresh")}
         gain = target_i - m["input_i"]
-        if m["input_lra"] > LRA or m["input_tp"] + gain > target_tp:
-            # loudnorm's own rule: a source range wider than the target's,
-            # or a gain that would push a true peak past the ceiling, and
-            # it quietly reverts to dynamic mode -- the second pass then
-            # buys nothing, which nobody would hear until Gate 3.
-            log.warning("S07 measured LRA %.1f against a target of %d, true peak %.1f dBTP "
-                        "after %.1f dB of gain: loudnorm will revert to dynamic normalisation "
-                        "and re-level the mix", m["input_lra"], LRA, m["input_tp"] + gain, gain)
+        if (m["input_lra"] > LRA or m["input_tp"] + gain > target_tp
+                # af_loudnorm.c's own sentinels for "not measured"
+                or m["input_lra"] == 0 or m["input_thresh"] == -70 or m["input_i"] == 0
+                or m["input_tp"] == 99):
+            # loudnorm's own rule (af_loudnorm.c, init): a source range wider
+            # than the target's, a gain that would push a true peak past the
+            # ceiling, or a value it reads as unset, and it quietly reverts
+            # to dynamic mode -- the second pass then buys nothing, which
+            # nobody would hear until Gate 3.
+            log.warning("S07 measured I %.1f, LRA %.1f against a target of %d, thresh %.1f, true "
+                        "peak %.1f dBTP after %.1f dB of gain: loudnorm will revert to dynamic "
+                        "normalisation and re-level the mix", m["input_i"], m["input_lra"], LRA,
+                        m["input_thresh"], m["input_tp"] + gain, gain)
         final += (f":measured_I={m['input_i']:g}:measured_LRA={m['input_lra']:g}"
                   f":measured_TP={m['input_tp']:g}:measured_thresh={m['input_thresh']:g}:linear=true")
     parts.append(f"[speech][loc][mus]amix=inputs=3:normalize=0,{final}[aout]")
@@ -383,25 +415,40 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
                             "rendering the primary alone", r.get("shot_id"), other)
             legs.append((r, primary, secondary))
 
-    tracks: dict[str, list[tuple[int, Mapping[str, Any]]]] = {"speech": [], "location": [], "music": []}
+    tracks: dict[str, list[tuple[int, Mapping[str, Any], float]]] = {"speech": [], "location": [], "music": []}
     unknown = {str(c["track"]) for c in cues} - tracks.keys()
     if unknown:
         raise ValueError(f"cue(s) on unknown track(s): {sorted(unknown)}")
     files = {"speech": audio_sources or {}, "location": audio_sources or {},
              "music": music_sources or {}}
     levels = levels or {}
+    film_len = max(float(r["t_out"]) for r in rows)
     for track, placed in tracks.items():
         for c in sorted((c for c in cues if c["track"] == track), key=lambda c: float(c["t_in"])):
             src = files[track].get(str(c["source"]))
             if src is None:
                 raise KeyError(f"no audio source for cue {c.get('cue_id')} ({track}: {c['source']})")
-            # Seeked at the input like a shot, for the cue's length on the
-            # film -- plus the crossfade for music, which is made by overlap:
-            # the extension plays out under the next cue (see audio_filters).
-            # ffmpeg simply stops where the track ends if there is less.
-            length = _cue_len(c) + (float(levels["music_xfade_s"]) if track == "music" else 0.0)
-            cmd += ["-ss", f"{float(c['src_in']):.3f}", "-t", f"{length:.3f}", "-i", str(src)]
-            placed.append((n, c))
+            if track == "music":
+                # A music cue reads its slot plus the crossfade extension,
+                # which plays out under the next cue (see audio_filters) --
+                # clamped to the film's end so the mix never outlasts the
+                # picture. No -ss: the library is VBR MP3, and an input seek
+                # on MP3 without a table of contents goes by a bitrate
+                # estimate that can land seconds off, which the overlap
+                # arithmetic cannot survive. (An -ss after the -i is no
+                # answer: between two -i it belongs to the next input.) The
+                # track is decoded from its start, bounded by -t, and cut
+                # to the sample in the graph. ffmpeg simply stops where the
+                # track ends if there is less.
+                length = max(0.0, min(_cue_len(c) + float(levels["music_xfade_s"]),
+                                      film_len - float(c["t_in"])))
+                cmd += ["-t", f"{float(c['src_in']) + length:.3f}", "-i", str(src)]
+            else:
+                # Seeked at the input like a shot, for the cue's length on
+                # the film: a WAV seeks exactly.
+                length = _cue_len(c)
+                cmd += ["-ss", f"{float(c['src_in']):.3f}", "-t", f"{length:.3f}", "-i", str(src)]
+            placed.append((n, c, length))
             n += 1
 
     parts: list[str] = []
@@ -412,8 +459,7 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
             labels.append(f"[v{k}]")
         parts.append("".join(labels) + f"concat=n={len(legs)}:v=1:a=0[vout]")
     if cues:
-        parts += audio_filters(tracks, envelopes=envelopes or {}, levels=levels,
-                               film_len=max(float(r["t_out"]) for r in rows),
+        parts += audio_filters(tracks, envelopes=envelopes or {}, levels=levels, film_len=film_len,
                                measured=loudnorm_measured, measure_only=measure_only)
 
     # A 564-slot draft put this whole graph past Linux's MAX_ARG_STRLEN
@@ -425,7 +471,9 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
     graph = ";".join(parts)
     filters_path = script_path or out_path.with_suffix(".measure.filters" if measure_only else ".filters")
     tmp_filters_path = filters_path.with_name(filters_path.name + ".tmp")
-    tmp_filters_path.write_text(graph)
+    # Explicitly UTF-8: the card captions are Cyrillic, and the locale of
+    # whatever runs this is not a thing to rely on.
+    tmp_filters_path.write_text(graph, encoding="utf-8")
     tmp_filters_path.rename(filters_path)
 
     if measure_only:
@@ -457,7 +505,7 @@ def describe(cmd: Sequence[str]) -> str:
     cmd = list(cmd)
     try:
         i = cmd.index("-filter_complex_script")
-        graph = Path(cmd[i + 1]).read_text()
+        graph = Path(cmd[i + 1]).read_text(encoding="utf-8")
         cmd[i], cmd[i + 1] = "-filter_complex", graph
     except (ValueError, OSError):
         pass
@@ -498,4 +546,8 @@ def parse_loudnorm_json(stderr: str) -> dict[str, float]:
             out[key] = float(data[key])
         except (KeyError, TypeError, ValueError):
             raise ValueError(f"loudnorm JSON block has no usable {key}: {blocks[-1]}") from None
+        if not math.isfinite(out[key]):
+            # A silent mix measures -inf, which loudnorm refuses at graph
+            # init -- better said here, with the number, than there.
+            raise ValueError(f"loudnorm measured a non-finite {key} ({data[key]}): a silent mix?")
     return out
