@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import resource
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1338,6 +1339,30 @@ def _envelopes(cfg: Config, conn, rows: Sequence[Mapping[str, Any]],
     }
 
 
+# Descriptors ffmpeg needs beyond one per input: its std streams, the
+# script file, the output, the libraries it maps -- a few dozen at most.
+_FD_MARGIN = 64
+
+
+def _raise_fd_limit(n_inputs: int) -> None:
+    """ffmpeg holds one file descriptor per ``-i`` for the whole run, and
+    Linux's default soft limit is 1024: the real film has ~734 video
+    inputs and ~1000 cue inputs, so the render would die opening its
+    thousand-and-somethingth file. The soft limit is raised to the hard
+    one here (a child inherits it); a hard limit still below the count is
+    named and the pass runs anyway -- it is the box's ulimit to raise."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft != hard:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+        except (ValueError, OSError) as e:
+            log.warning("S07 could not raise the open-file limit from %d to %d: %s", soft, hard, e)
+    log.info("S07 open-file limit %d -> %d for %d ffmpeg input(s)", soft, hard, n_inputs)
+    if hard != resource.RLIM_INFINITY and hard < n_inputs + _FD_MARGIN:
+        log.warning("S07 %d ffmpeg input(s) against a hard open-file limit of %d: raise it "
+                    "(ulimit -Hn) or the render will fail opening its inputs", n_inputs, hard)
+
+
 def _draft_seconds(path: Path) -> float | None:
     """The picture's length as ffprobe reads it back -- the video stream's,
     not the container's: the mix runs one crossfade past the last cut, and
@@ -1383,7 +1408,7 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
     all_cues = [dict(r) for r in conn.execute("SELECT * FROM audio_cues ORDER BY track, t_in")]
     overlays = [dict(r) for r in conn.execute("SELECT * FROM overlays ORDER BY t_in")]
     cues, audio_sources, music_sources, n_dropped = _cue_sources(cfg, conn, all_cues)
-    n_cues = {t: sum(1 for c in cues if c["track"] == t) for t in ("speech", "location", "music")}
+    n_cues = {t: sum(1 for c in cues if c["track"] == t) for t in timeline_io.AUDIO_TRACKS}
 
     gate = cfg.workdir("gates", "gate3")
     out = gate / "draft.mp4"
@@ -1399,8 +1424,9 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
                       "speech_lufs", "location_full_lufs", "final_lufs", "true_peak_db",
                       "music_xfade_s", "cue_fade_s", "audio_bitrate_k")})
         log.info("S07 measuring the mix: %s cue(s)", n_cues)
-        proc = subprocess.run(render_mod.build_command(usable, measure_only=True, **kw),
-                              capture_output=True, text=True)
+        cmd = render_mod.build_command(usable, measure_only=True, **kw)
+        _raise_fd_limit(cmd.count("-i"))
+        proc = subprocess.run(cmd, capture_output=True, text=True)
         try:
             if proc.returncode != 0:
                 raise ValueError(f"ffmpeg exited {proc.returncode}: {(proc.stderr or '')[-300:].strip()}")
@@ -1411,6 +1437,7 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
     cmd = render_mod.build_command(usable, loudnorm_measured=measured, script_path=gate / "draft.filters", **kw)
     log.info("S07 rendering %d of %d slot(s) to %s", len(usable), len(rows), out)
     log.debug("S07 %s", render_mod.describe(cmd))
+    _raise_fd_limit(cmd.count("-i"))
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         log.error("S07 render failed: %s", (proc.stderr or "")[-600:])

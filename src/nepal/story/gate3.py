@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
 from nepal.process.render import timecode
+from nepal.process.timeline_io import AUDIO_TRACKS
 from nepal.story import anchors as anchors_mod
 from nepal.story.beats_input import Cast
 
@@ -31,11 +32,10 @@ from nepal.story.beats_input import Cast
 # dawn, not at 01:00 UTC.
 NEPAL_UTC_OFFSET_H = 5.75
 
-TRACKS = ("speech", "location", "music")
 _STYLE = ("body{font:14px/1.4 system-ui,sans-serif;background:#111;color:#ddd;margin:2rem;max-width:80rem}"
           "h1,h2{font-weight:600}table{border-collapse:collapse;margin:.5rem 0 1.5rem}"
           "th,td{text-align:left;padding:.2rem .8rem .2rem 0;vertical-align:top;white-space:nowrap}"
-          "th{color:#999;font-weight:500}td.t{white-space:normal}.big{font-size:1.2rem}")
+          "th{color:#999;font-weight:500}.big{font-size:1.2rem}")
 
 
 def wall_clock(slot: Mapping[str, Any]) -> str:
@@ -84,7 +84,7 @@ def render_gate3(slots: Sequence[Mapping[str, Any]], cues: Sequence[Mapping[str,
     e = html.escape
     cast = Cast(tags=dict(cast_tags))
     end = max((float(s["t_out"]) for s in slots), default=0.0)
-    n_cues = {t: sum(1 for c in cues if c.get("track") == t) for t in TRACKS}
+    n_cues = {t: sum(1 for c in cues if c.get("track") == t) for t in AUDIO_TRACKS}
 
     shot_rows = []
     for s in slots:
@@ -105,7 +105,7 @@ def render_gate3(slots: Sequence[Mapping[str, Any]], cues: Sequence[Mapping[str,
                                 v.get("video_slots"), v.get("videos")))
 
     cue_tables = ""
-    for track in TRACKS:
+    for track in AUDIO_TRACKS:
         mine = sorted((c for c in cues if c.get("track") == track), key=lambda c: float(c["t_in"]))
         cue_tables += f"<h2>cues: {track} ({len(mine)})</h2>" + _table(
             ("cue", "in", "out", "source", "src in", "src out", "LUFS", "beat"),
@@ -119,10 +119,12 @@ def render_gate3(slots: Sequence[Mapping[str, Any]], cues: Sequence[Mapping[str,
         card_rows.append((o.get("overlay_id"), o.get("kind"), timecode(o["t_in"]), timecode(o["t_out"]), tag, text))
 
     # The report's scalars only: its lists and maps (windows, spans, the
-    # per-act tables) are either on this page already or not a number.
+    # per-act tables) are either on this page already or not a number, and
+    # a string with a path in it (the draft's, an ffmpeg error's) names the
+    # machine and its user, which a forwarded page must not.
     report_rows = [(f"{section}.{k}", v) for section in ("score", "timeline", "cues", "draft")
                    for k, v in (report.get(section) or {}).items()
-                   if isinstance(v, (bool, int, float, str))]
+                   if isinstance(v, (bool, int, float, str)) and "/" not in str(v)]
 
     return (
         "<!doctype html>\n"
