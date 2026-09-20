@@ -695,10 +695,12 @@ def test_a_measurement_loudnorm_would_read_as_unset_is_said_out_loud(tmp_path, c
 
 @pytest.mark.slow
 def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
-    """At the boundary: a 12 s cut; a 440 Hz "speech" cue at 2-5 s over a
+    """At the boundary: a 14 s cut; a 440 Hz "speech" cue at 2-5 s over a
     bed in three cues -- 220 Hz at 0-5 s and 330 Hz at 5-7 s abutting,
-    220 Hz again at 10-12 s after a silence window -- with the envelope
-    flat at 1 and muting 7-9 s. Both passes run. The levels are read off
+    220 Hz again at 10-14 s after a silence window, long enough that the
+    end-of-film fade the clamp pulls inside it leaves a flat stretch --
+    with the envelope flat at 1 and muting 7-9 s. Both passes run. The
+    levels are read off
     the two-pass render (one static gain, so they are the graph's numbers,
     not loudnorm's dynamics): the speech at least 3 dB over the bed alone,
     the join at 5-7 s within 3 dB of it (a crossfade is not a dip, and the
@@ -717,20 +719,20 @@ def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
                         "-f", "lavfi", "-i", src, *extra, str(path)], check=True)
     vid, speech = tmp_path / "v.mp4", tmp_path / "speech.wav"
     low, mid = tmp_path / "low.wav", tmp_path / "mid.wav"
-    lavfi("testsrc=size=320x240:rate=25:duration=13", vid, "-c:v", "libx264", "-pix_fmt", "yuv420p")
+    lavfi("testsrc=size=320x240:rate=25:duration=15", vid, "-c:v", "libx264", "-pix_fmt", "yuv420p")
     lavfi("sine=frequency=440:duration=5", speech)
-    lavfi("sine=frequency=220:duration=12", low, "-ac", "2")
-    lavfi("sine=frequency=330:duration=12", mid, "-ac", "2")
-    rows = [{"shot_id": "v1", "t_in": 0.0, "t_out": 6.0, "src_in": 0.0},
-            {"shot_id": "v2", "t_in": 6.0, "t_out": 12.0, "src_in": 6.0}]
+    lavfi("sine=frequency=220:duration=14", low, "-ac", "2")
+    lavfi("sine=frequency=330:duration=14", mid, "-ac", "2")
+    rows = [{"shot_id": "v1", "t_in": 0.0, "t_out": 7.0, "src_in": 0.0},
+            {"shot_id": "v2", "t_in": 7.0, "t_out": 14.0, "src_in": 7.0}]
     cues = [_cue(cue_id="sp", track="speech", t_in=2.0, t_out=5.0, source="r",
                  src_in=0.0, src_out=3.0, gain_lufs=-16.0)]
     for k, (t0, t1, src, fade_in) in enumerate(((0.0, 5.0, "low", 0.0), (5.0, 7.0, "mid", 2.0),
-                                                (10.0, 12.0, "low", 0.5))):
+                                                (10.0, 14.0, "low", 0.5))):
         cues.append(_cue(cue_id=f"mu_{k}", track="music", t_in=t0, t_out=t1, source=src,
                          src_in=t0, src_out=t1, gain_lufs=-14.0, fade_in_s=fade_in, fade_out_s=2.0))
-    envelopes = {"music": "between(t,0,7)*1+between(t,9,12)*1",
-                 "location": "between(t,0,12)*1"}
+    envelopes = {"music": "between(t,0,7)*1+between(t,9,14)*1",
+                 "location": "between(t,0,14)*1"}
     kw = dict(sources={"v1": vid, "v2": vid}, cues=cues, audio_sources={"r": speech},
               music_sources={"low": low, "mid": mid}, envelopes=envelopes, levels=LEVELS)
     out = tmp_path / "draft.mp4"
@@ -739,7 +741,7 @@ def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
         ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
          "stream=duration", "-of", "csv=p=0", str(out)],
         capture_output=True, text=True, check=True).stdout.strip())
-    assert 11.5 <= dur <= 12.1, f"the mix runs the film's length and not past it, got {dur}"
+    assert 13.5 <= dur <= 14.1, f"the mix runs the film's length and not past it, got {dur}"
 
     # Two-pass: hear the mix audio-only, then render with its numbers.
     measure = subprocess.run(render.build_command(rows, out_path=out, measure_only=True, **kw),
