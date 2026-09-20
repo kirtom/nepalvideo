@@ -86,7 +86,13 @@ def _normal_end(t_in: float, pct: float, table: Mapping[str, Sequence[float]],
     that would overrun the footage is not a candidate at all -- the clamp is
     the last word, not something a snap gets to override -- and a beat that
     would land at or before ``t_in`` can't produce a slot with any length,
-    so both leave the clamped, unsnapped end standing."""
+    so both leave the clamped, unsnapped end standing.
+
+    Not ``assemble.snap_to_beat``/``snap_within`` (already imported into this
+    module by way of ``shot_available_s``'s neighbours): ``snap_to_beat`` has
+    no ceiling at all, and ``snap_within``'s own fallback is the ceiling
+    itself, which would stretch every clamped-but-unsnapped slot out to the
+    full available footage instead of to its own band's nominal length."""
     lo, hi = target_length(pct, table)
     length = min((lo + hi) / 2.0, avail)
     want_end = t_in + length
@@ -115,27 +121,77 @@ def _burst_end(t_in: float, beats: Sequence[float], ceiling: float) -> float | N
     return end if end <= ceiling else None
 
 
+def _slot_avail_s(slot: Mapping[str, Any], shot: Mapping[str, Any] | None) -> float:
+    """How much footage this specific slot can actually claim.
+
+    ``shot_available_s`` caps by the shot's own ``start_s``/``end_s``, but a
+    slot's own ``src_in`` may already sit partway into that footage --
+    pairs.py's split slots set ``src_in`` to ``start_s`` plus however far the
+    two streams had to align to share an instant -- so the real ceiling is
+    ``end_s - src_in``, which can only be tighter, never looser, than
+    ``shot_available_s``. A split slot has a second, independent ceiling
+    besides: the overlap ``find_pairs`` already measured between the two
+    streams (``src_out - src_in``, computed once at pairing time), since a
+    beat snap may stretch a split no further than either camera actually
+    has at the aligned instant.
+    """
+    if shot is None:
+        return math.inf
+    avail = shot_available_s(shot)
+    if avail == math.inf:
+        return avail                        # a photo (or a shot with no end_s) has nothing to tighten
+    src_in = slot.get("src_in")
+    if src_in is not None:
+        avail = min(avail, float(shot["end_s"]) - float(src_in))
+        if slot.get("secondary_shot_id") is not None and slot.get("src_out") is not None:
+            avail = min(avail, float(slot["src_out"]) - float(src_in))
+    return max(0.0, avail)
+
+
 def _apply_held_shot(out: list[dict[str, Any]], *, shots: Mapping[str, Mapping[str, Any]],
                      held_shot_s: Sequence[float], silence_t: float) -> None:
-    """Act 4's ending: the last unlocked slot before the silence holds up to
-    it. The first choice is to reach exactly ``silence_t``, so the cut to
-    silence lands clean; when the shot doesn't have that much left, it holds
-    instead for ``held_shot_s``'s midpoint -- clamped by what's left, same as
-    everywhere else in this module -- and falls short of the silence, which
-    is the caller's gap to re-fill, not this function's to invent footage for."""
-    candidates = [s for s in out if not s.get("locked") and float(s["t_in"]) < silence_t]
-    if not candidates:
+    """Act 4's ending: the last unlocked slot before the silence is
+    stretched to end exactly on it.
+
+    A locked slot carries a beat the rhythm pass may never cut, so a locked
+    slot anywhere between a candidate and the silence disqualifies it --
+    scanning forward, every locked slot before the silence resets the
+    candidate, so only the very last qualifying slot (if any) is ever
+    eligible.
+
+    The hold's length is ``held_shot_s``'s own midpoint, clamped to what the
+    shot has left -- not the distance back to the silence, which would make
+    the config value dead weight in every act whose last shot has room to
+    spare. ``t_out`` is always the silence point; only ``t_in`` (and so the
+    hold's actual length) gives way -- first to the shot's own footage, then,
+    if that still reaches earlier than the previous slot's own end, to the
+    previous slot's territory, since this pass may not open an overlap to
+    buy itself a longer last breath. Whatever the hold can't reach is the
+    caller's gap to re-fill, not this function's to invent footage for.
+    """
+    candidate, idx = None, None
+    for i, s in enumerate(out):
+        if float(s["t_in"]) >= silence_t:
+            continue
+        if s.get("locked"):
+            candidate, idx = None, None     # a locked slot sits between here and the silence
+        else:
+            candidate, idx = s, i
+    if candidate is None:
         return
-    slot = candidates[-1]
-    shot = shots.get(slot.get("shot_id"))
-    avail = shot_available_s(shot) if shot is not None else math.inf
-    t_in = float(slot["t_in"])
-    reach = silence_t - t_in
-    if avail >= reach:
-        slot["t_out"] = silence_t
-    else:
-        held_mid = (float(held_shot_s[0]) + float(held_shot_s[1])) / 2.0
-        slot["t_out"] = t_in + min(held_mid, avail)
+
+    shot = shots.get(candidate.get("shot_id"))
+    avail = _slot_avail_s(candidate, shot)
+    held_mid = (float(held_shot_s[0]) + float(held_shot_s[1])) / 2.0
+    held = min(held_mid, avail)
+    prev_end = float(out[idx - 1]["t_out"]) if idx > 0 else -math.inf
+    if silence_t - held < prev_end:
+        held = silence_t - prev_end         # shrink the hold rather than overlap the previous slot
+
+    candidate["t_in"] = round(silence_t - held, 3)
+    candidate["t_out"] = round(silence_t, 3)
+    if candidate.get("src_in") is not None:
+        candidate["src_out"] = round(float(candidate["src_in"]) + held, 3)
 
 
 def retime(slots: Sequence[Mapping[str, Any]], *, sections: Sequence[Mapping[str, Any]],
@@ -146,7 +202,7 @@ def retime(slots: Sequence[Mapping[str, Any]], *, sections: Sequence[Mapping[str
     """Walk an act's slots in order and give each an end that fits its
     section's energy, its shot's footage and the beat grid.
 
-    A locked slot (the bridge crossing, a pair) keeps both its own bounds
+    A locked slot (the bridge crossing) keeps both its own bounds
     untouched -- the walk only resumes counting from its ``t_out``. Every
     other slot is contiguous: the act's first slot keeps its own ``t_in``,
     and each slot after it starts where the previous one ended, so the
@@ -166,12 +222,28 @@ def retime(slots: Sequence[Mapping[str, Any]], *, sections: Sequence[Mapping[str
     burst_count = round((float(burst_slots[0]) + float(burst_slots[1])) / 2.0)
 
     out: list[dict[str, Any]] = []
-    t = float(slots[0]["t_in"]) if slots else 0.0
+    # A `None` t_in on the very first slot is the shape S06's lay_out (via
+    # SLOT_KEYS) hands a slot before anything has placed it: it starts the
+    # act at the act's own first cue rather than crashing on `float(None)`.
+    if not slots:
+        t = 0.0
+    elif slots[0].get("t_in") is not None:
+        t = float(slots[0]["t_in"])
+    elif sections:
+        t = float(sections[0]["t_in"])
+    else:
+        t = 0.0
     burst_started = False
     burst_remaining = burst_count
 
     for slot in slots:
         if slot.get("locked"):
+            if slot.get("t_in") is None or slot.get("t_out") is None:
+                # A locked slot is placed by whoever built it (the bridge
+                # crossing, a pair); one with no bounds at all is that
+                # caller's bug, not something to paper over with a cast
+                # that would otherwise fail deep inside float(None).
+                raise ValueError(f"locked slot {slot.get('shot_id')!r} has no t_in/t_out")
             new_slot = dict(slot)
             if float(new_slot["t_in"]) >= act_end:
                 continue                    # off the end of the act; the caller re-fills the gap
@@ -181,7 +253,11 @@ def retime(slots: Sequence[Mapping[str, Any]], *, sections: Sequence[Mapping[str
 
         t_in = t
         if t_in >= act_end:
-            continue                        # this and every later slot fall off the act's end
+            # This one unlocked slot missed the act's end; the walk pointer
+            # doesn't move, so every unlocked slot after it will too --
+            # unless a later LOCKED slot (which ignores the walk pointer
+            # entirely) lands before the act's end and pulls it back.
+            continue
 
         section, pct = _section_pct_at(t_in, section_pcts)
         # A slot whose shot never made it into `shots` can't be measured
@@ -189,21 +265,36 @@ def retime(slots: Sequence[Mapping[str, Any]], *, sections: Sequence[Mapping[str
         # than treated as having none, since inventing a clamp this module
         # was given no data for is worse than leaving the length alone.
         shot = shots.get(slot.get("shot_id"))
-        avail = shot_available_s(shot) if shot is not None else math.inf
+        avail = _slot_avail_s(slot, shot)
 
         if swell is not None and section is swell and not burst_started:
             burst_started = True
 
-        t_out = None
         if burst_started and burst_remaining > 0:
             t_out = _burst_end(t_in, beats, t_in + avail)
-            if t_out is not None:
-                burst_remaining -= 1
-        if t_out is None:
+            if t_out is None:
+                # Inside the swell the burst budget counts cuts attempted,
+                # not successful snaps -- a starved grid still spends one,
+                # and takes the fastest length the config allows (the high
+                # band's own floor) rather than the section's own, likely
+                # much longer, band: a slow cut is exactly wrong at the
+                # film's most intense moment.
+                t_out = t_in + min(float(table["high"][0]), avail)
+            burst_remaining -= 1
+        else:
             t_out = _normal_end(t_in, pct, table, avail, beats, downbeats)
+
+        if t_out <= t_in:
+            continue                        # the clamp (or a starved grid) left no length at all; drop it rather than stall the walk
 
         new_slot = dict(slot)
         new_slot["t_in"], new_slot["t_out"] = round(t_in, 3), round(t_out, 3)
+        if new_slot.get("src_in") is not None:
+            # render.py cuts `-ss src_in -t (t_out - t_in)`; src_out is
+            # descriptive, not consulted by ffmpeg, but it must still agree
+            # with the film span this slot now actually occupies.
+            new_slot["src_out"] = round(float(new_slot["src_in"]) +
+                                        (new_slot["t_out"] - new_slot["t_in"]), 3)
         out.append(new_slot)
         t = new_slot["t_out"]
 

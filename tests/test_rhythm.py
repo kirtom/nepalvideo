@@ -109,6 +109,15 @@ def test_high_section_gets_a_length_in_the_high_band_ending_on_a_downbeat():
     assert out[0]["t_out"] == 62.2
 
 
+def test_high_section_downbeat_past_avail_keeps_the_clamped_unsnapped_end():
+    # Every downbeat below is well past t_in + avail (1.0s), so none of them
+    # is a candidate at all -- this exercises the `b <= ceiling` filter
+    # itself, which the other high-band test never binds (its avail is
+    # effectively unlimited).
+    out = _retime_one(60.0, downbeats=[65.0, 70.0], shots={"s1": _shot(end_s=1.0)})
+    assert out[0]["t_out"] == 61.0                           # t_in(60) + the clamped 1.0s, unsnapped
+
+
 def test_retimed_slot_keeps_every_key_it_arrived_with():
     out = _retime_one(0.0)
     assert set(out[0].keys()) == set(SLOT_KEYS) - {"slot_index"}
@@ -169,14 +178,33 @@ def test_burst_capped_by_burst_slots_then_reverts_to_normal_banding():
     assert 3.0 <= third_length <= 5.0                        # back to the mid band (pct 50 here)
 
 
-def test_burst_with_no_beats_falls_back_to_normal_banding_without_crashing():
+def test_burst_with_no_beats_takes_the_high_band_floor_and_still_spends_budget():
+    # burst_slots=[1,1] -> a budget of exactly 1. The grid is empty, so the
+    # first slot can't find a beat at all; it still takes the high band's
+    # floor (1.5s) and still spends the one burst slot the budget has --
+    # the second slot must fall back to ordinary (mid) section banding,
+    # not a second high-floor cut.
+    sections = [{"t_in": 0.0, "t_out": 1000.0, "energy": 1.0}]
+    slots = [_slot("s0", 0.0), _slot("s1", None)]
+    shots = {"s0": _shot(end_s=1000.0), "s1": _shot(end_s=1000.0)}
+    out = retime(slots, sections=sections, beats=[], downbeats=[],
+                table=TABLE, burst_slots=[1, 1], is_act4=False,
+                held_shot_s=[6.0, 10.0], silence_t=None, shots=shots)
+    assert out[0]["t_out"] - out[0]["t_in"] == 1.5
+    second_length = out[1]["t_out"] - out[1]["t_in"]
+    assert 3.0 <= second_length <= 5.0
+
+
+def test_burst_slot_whose_next_beat_would_overrun_the_footage_does_not_take_it():
+    # The next beat after 0.0 is 1.0, but only 0.5s of footage is left --
+    # _burst_end must refuse it rather than over-claim, falling back to the
+    # high band's floor clamped by what's actually there.
     sections = [{"t_in": 0.0, "t_out": 1000.0, "energy": 1.0}]
     slots = [_slot("s0", 0.0)]
-    out = retime(slots, sections=sections, beats=[], downbeats=[],
+    out = retime(slots, sections=sections, beats=[0.0, 1.0, 100.0], downbeats=[],
                 table=TABLE, burst_slots=[8, 12], is_act4=False,
-                held_shot_s=[6.0, 10.0], silence_t=None, shots={"s0": _shot()})
-    length = out[0]["t_out"] - out[0]["t_in"]
-    assert 3.0 <= length <= 5.0
+                held_shot_s=[6.0, 10.0], silence_t=None, shots={"s0": _shot(end_s=0.5)})
+    assert out[0]["t_out"] - out[0]["t_in"] == 0.5
 
 
 # -- retime: a slot must never claim more footage than its shot has -----
@@ -203,33 +231,130 @@ def test_slot_at_or_past_act_end_is_dropped():
 def test_every_slot_locked_passes_through_unchanged():
     a = _slot("a", 0.0, t_out=10.0, locked=1)
     b = _slot("b", 10.0, t_out=20.0, locked=1)
+    a_before, b_before = dict(a), dict(b)
     out = retime([a, b], sections=SECTIONS, beats=BEATS, downbeats=DOWNBEATS,
                 table=TABLE, burst_slots=[8, 12], is_act4=False,
                 held_shot_s=[6.0, 10.0], silence_t=None, shots={})
     assert out == [a, b]
+    assert a == a_before and b == b_before        # retime must copy, never mutate its inputs
+
+
+def test_first_unlocked_slot_with_no_t_in_starts_at_the_first_sections_t_in():
+    slot = _slot("s1", None)
+    out = retime([slot], sections=SECTIONS, beats=[], downbeats=[],
+                table=TABLE, burst_slots=[8, 12], is_act4=False,
+                held_shot_s=[6.0, 10.0], silence_t=None, shots={"s1": _shot()})
+    assert out[0]["t_in"] == SECTIONS[0]["t_in"]              # 0.0
+
+
+def test_locked_slot_with_missing_bounds_raises_a_named_error():
+    locked = _slot("bridge", None, t_out=None, locked=1)
+    with pytest.raises(ValueError, match="bridge"):
+        retime([locked], sections=SECTIONS, beats=[], downbeats=[],
+              table=TABLE, burst_slots=[8, 12], is_act4=False,
+              held_shot_s=[6.0, 10.0], silence_t=None, shots={})
+
+
+def test_slot_with_zero_available_footage_is_dropped_not_stalled():
+    out = _retime_one(0.0, beats=[], downbeats=[], shots={"s1": _shot(end_s=0.0)})
+    assert out == []
+
+
+def test_no_sections_at_all_does_not_crash_and_falls_back_to_the_low_band():
+    # No section to read energy from -> percentile 0.0 -> the low band.
+    out = _retime_one(0.0, sections=[], beats=[0.0, 1.0, 2.0, 3.0], downbeats=[])
+    assert out[0]["t_out"] == 3.0        # low band's 6.5s midpoint, snapped to the nearest of a sparse grid
+
+
+# -- retime: the clamp is tighter than shot_available_s when src_in offsets
+# into the shot, or a split slot's own recorded overlap is tighter still --
+
+def test_offset_src_in_tightens_the_clamp_below_shot_available_s():
+    # shot_available_s(shot) is end_s - start_s = 10.0, but this slot's own
+    # src_in already sits 8s into the shot -- pairs.py does exactly this for
+    # a split aligned to the later of two starts -- so only 2s is actually
+    # left; using the wider shot_available_s alone would over-claim the
+    # mid band's 4.0s midpoint.
+    slot = _slot("s1", 40.0, src_in=8.0)
+    shot = _shot(start_s=0.0, end_s=10.0)
+    out = retime([slot], sections=SECTIONS, beats=[], downbeats=[],
+                table=TABLE, burst_slots=[8, 12], is_act4=False,
+                held_shot_s=[6.0, 10.0], silence_t=None, shots={"s1": shot})
+    assert out[0]["t_out"] - out[0]["t_in"] == 2.0
+    assert out[0]["src_out"] == 10.0                          # src_in + the actual clamped length
+
+
+def test_split_slot_never_outlasts_the_recorded_overlap():
+    # find_pairs already computed src_out - src_in as the true overlap
+    # between the two cameras (1.5s); the shot's own footage runs on for
+    # far longer, but a split may not use more than either camera actually
+    # shares at the aligned instant.
+    slot = _slot("s1", 40.0, src_in=5.0, src_out=6.5, secondary_shot_id="s2",
+                secondary_src_in=1.0)
+    shot = _shot(start_s=0.0, end_s=1000.0)
+    out = retime([slot], sections=SECTIONS, beats=[], downbeats=[],
+                table=TABLE, burst_slots=[8, 12], is_act4=False,
+                held_shot_s=[6.0, 10.0], silence_t=None, shots={"s1": shot})
+    assert out[0]["t_out"] - out[0]["t_in"] == 1.5
+    assert out[0]["src_out"] == 6.5
 
 
 # -- retime: Act 4's held shot --------------------------------------------
 
-def test_act4_held_shot_reaches_silence_t_when_the_shot_has_room():
+def test_act4_held_shot_holds_for_the_configured_midpoint_when_the_shot_has_room():
+    # held_shot_s's own midpoint (8.0s) drives the hold, not the 50.0s
+    # distance back to the silence -- otherwise held_shot_s would be dead
+    # weight in every act whose last shot has room to spare.
     out = _retime_one(0.0, sections=[{"t_in": 0.0, "t_out": 100.0, "energy": 1.0}],
                       beats=[], downbeats=[], is_act4=True, silence_t=50.0,
                       shots={"s1": _shot(end_s=1000.0)})
     assert out[-1]["t_out"] == 50.0
+    assert out[-1]["t_in"] == 42.0
+    assert out[-1]["t_out"] - out[-1]["t_in"] == 8.0
 
 
-def test_act4_held_shot_falls_short_when_the_shot_cannot_reach_silence_t():
-    # Only 3s of footage left; held_shot_s's 8.0s midpoint and the 50.0s
-    # reach to silence both exceed it, so the clamp -- not either of those
-    # numbers -- decides the actual end.
+def test_act4_held_shot_shrinks_but_still_ends_on_the_silence_when_the_shot_is_short():
+    # Only 3s of footage left; the hold shrinks to 3s but t_out still lands
+    # exactly on the silence -- t_in moves forward to meet it, rather than
+    # t_out falling short of it.
     out = _retime_one(0.0, sections=[{"t_in": 0.0, "t_out": 100.0, "energy": 1.0}],
                       beats=[], downbeats=[], is_act4=True, silence_t=50.0,
                       shots={"s1": _shot(end_s=3.0)})
-    assert out[-1]["t_out"] == 3.0
+    assert out[-1]["t_out"] == 50.0
+    assert out[-1]["t_in"] == 47.0
+    assert out[-1]["t_out"] - out[-1]["t_in"] == 3.0
 
 
 def test_act4_silence_before_every_slot_leaves_slots_untouched():
-    out = _retime_one(20.0, sections=[{"t_in": 0.0, "t_out": 100.0, "energy": 1.0}],
+    # A single section would be its own swell (max of one is itself) and
+    # trigger the burst instead of plain mid-band timing; a second, much
+    # louder dummy section elsewhere keeps this section's percentile at 50
+    # (mid) without ever being queried itself.
+    sections = [{"t_in": 0.0, "t_out": 100.0, "energy": 2.0},
+               {"t_in": 100.0, "t_out": 150.0, "energy": 1.0},
+               {"t_in": 150.0, "t_out": 200.0, "energy": 100.0}]
+    out = _retime_one(20.0, sections=sections,
                       beats=[], downbeats=[], is_act4=True, silence_t=5.0,
                       shots={"s1": _shot(end_s=1000.0)})
     assert out[0]["t_out"] == 24.0                           # mid band's midpoint, un-held
+
+
+def test_act4_held_shot_never_taken_when_a_locked_slot_sits_before_the_silence():
+    # The locked slot sits between the unlocked slot and the silence, so no
+    # slot qualifies for the hold at all: the locked slot keeps its own
+    # bounds, the unlocked slot keeps its ordinary (un-held) length, and
+    # nothing stretches over the locked slot's span. A dummy high-energy
+    # section elsewhere (never queried) keeps the tested section's own
+    # percentile at 50 (mid) rather than letting it become its own swell.
+    sections = [{"t_in": 0.0, "t_out": 50.0, "energy": 2.0},
+               {"t_in": 50.0, "t_out": 60.0, "energy": 1.0},
+               {"t_in": 60.0, "t_out": 100.0, "energy": 100.0}]
+    unlocked = _slot("s1", 0.0)
+    locked = _slot("bridge", 10.0, t_out=45.0, locked=1)
+    out = retime([unlocked, locked], sections=sections, beats=[], downbeats=[],
+                table=TABLE, burst_slots=[8, 12], is_act4=True,
+                held_shot_s=[6.0, 10.0], silence_t=50.0,
+                shots={"s1": _shot(end_s=1000.0)})
+    assert out[1]["t_in"] == 10.0 and out[1]["t_out"] == 45.0
+    assert out[0]["t_out"] == 4.0                            # mid band's own midpoint, un-held
+    assert out[0]["t_out"] <= out[1]["t_in"]                 # no overlap
