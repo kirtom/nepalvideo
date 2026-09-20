@@ -22,14 +22,6 @@ Envelope = list[tuple[float, float]]
 # aim at one fixed floor instead of a per-scene "quiet enough" judgement.
 FLOOR_DB = -70.0
 
-# Subtracted from a segment's upper time bound in volume_expr so between(),
-# which ffmpeg treats as closed on both ends, does not double-count the
-# instant a segment shares with the next one. Far below any real fade or
-# frame duration (a fifth of a millisecond), so it never shows up in an
-# actual render -- see volume_expr's docstring for why between() needs this
-# at all.
-_HALF_OPEN_EPS_S = 1e-4
-
 # Priority among the three levels a moment of music can be at: the floor
 # (a window or the silence) always wins over a speech dip, which always
 # wins over the base bed -- "a window inside a speech span is a window."
@@ -185,8 +177,8 @@ def location_envelope(*, total_s: float, cues: Sequence[Mapping[str, Any]],
 
 def _fmt(x: float) -> str:
     """A plain decimal ffmpeg's expression parser accepts -- repr()/str()
-    can fall back to scientific notation for very small magnitudes (as
-    ``_HALF_OPEN_EPS_S`` produces), which the parser does not."""
+    can fall back to scientific notation for very small magnitudes, which
+    the parser does not."""
     s = f"{x:.6f}".rstrip("0").rstrip(".")
     return s if s and s != "-0" else "0"
 
@@ -208,21 +200,22 @@ def volume_expr(env: Envelope) -> str:
     has no nesting that grows with the breakpoint count at all.
 
     ``between(t,T0,T1)`` is closed on both ends in ffmpeg, so two adjacent
-    segments would both fire, and so both get summed, at the exact instant
-    they share -- doubling that one instant's value. Each segment's upper
-    bound is therefore built half-open by construction: ``T1`` minus
-    ``_HALF_OPEN_EPS_S``, an interval far too small to affect the real
-    interpolation (which still divides by the true ``T1 - T0``) or ever
-    land on an actual frame. At exactly ``T1`` only the next segment's
-    (closed, correct) term is left standing.
+    segments built on it would both fire, and so both get summed, at the
+    exact instant they share -- doubling that one instant's value. An
+    earlier version tried to dodge this by shrinking each segment's upper
+    bound by a fixed epsilon, which instead opened a real epsilon-wide gap
+    of near-zero gain just before every interior breakpoint. Each segment
+    is therefore ``gte(t,T0)*lt(t,T1)`` -- the exact, epsilon-free
+    half-open interval ``[T0, T1)`` -- so the shared instant belongs to
+    exactly one segment (or to the final held tail, for the very last
+    breakpoint) with no gap and no double count.
     """
     if len(env) == 1:
         return _gain(env[0][1])
     terms = []
     for (t0, d0), (t1, d1) in zip(env, env[1:]):
-        t1_open = t1 - _HALF_OPEN_EPS_S
         g0, g1 = _gain(d0), _gain(d1)
-        terms.append(f"between(t,{_fmt(t0)},{_fmt(t1_open)})*"
+        terms.append(f"gte(t,{_fmt(t0)})*lt(t,{_fmt(t1)})*"
                      f"({g0}+({g1}-{g0})*(t-{_fmt(t0)})/({_fmt(t1)}-{_fmt(t0)}))")
     t_last, d_last = env[-1]
     terms.append(f"gte(t,{_fmt(t_last)})*{_gain(d_last)}")

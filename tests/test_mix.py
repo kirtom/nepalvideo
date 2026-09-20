@@ -8,15 +8,15 @@ from nepal.process.mix import music_envelope, location_envelope, volume_expr, FL
 
 # -- a tiny evaluator for the emitted expression --------------------------
 # The expression is deliberately valid Python syntax (function calls and
-# infix arithmetic), so evaluating it only needs between()/gte()/pow() in
-# the namespace -- this is not a real ffmpeg parser, just enough to check
-# the shape this module promises. The real boundary (does ffmpeg itself
-# accept and evaluate it) is Task 13's slow test.
+# infix arithmetic), so evaluating it only needs gte()/lt()/pow() in the
+# namespace -- this is not a real ffmpeg parser, just enough to check the
+# shape this module promises. The real boundary (does ffmpeg itself accept
+# and evaluate it) is Task 13's slow test.
 def _eval_expr(expr: str, t: float) -> float:
     ns = {
         "t": t,
-        "between": lambda x, a, b: 1.0 if a <= x <= b else 0.0,
         "gte": lambda x, y: 1.0 if x >= y else 0.0,
+        "lt": lambda x, y: 1.0 if x < y else 0.0,
         "pow": pow,
     }
     # eval() here is on this module's own generated output, not on
@@ -94,6 +94,28 @@ def test_music_envelope_with_nothing_going_on_is_flat_at_base():
     assert env == [(0.0, 0.0)]
 
 
+def test_short_speech_span_clamps_to_a_symmetric_triangle():
+    """A span shorter than 2 * cue_fade_s can't fit a full ramp in and a
+    full ramp out without crossing; each is clamped to half the span, so
+    the two ramps meet exactly in the middle instead."""
+    env = music_envelope(total_s=5.0, speech_spans=[(3.0, 3.1)], windows=[], silence=None)
+    expected = [(0.0, 0.0), (3.0, 0.0), (3.05, -8.0), (3.1, 0.0)]
+    assert env == pytest.approx(expected, abs=1e-9)
+
+
+def test_window_immediately_adjacent_to_a_span_keeps_breakpoints_ordered():
+    """A window that starts exactly where a speech span ends (touching, not
+    overlapping or nested) must still produce sorted breakpoints with no
+    duplicate time."""
+    env = music_envelope(total_s=10.0, speech_spans=[(2.0, 5.0)],
+                          windows=[{"t_in": 5.0, "t_out": 7.0}], silence=None)
+    times = [t for t, _ in env]
+    assert times == sorted(times)
+    assert len(set(times)) == len(times)
+    expected = [(0.0, 0.0), (2.0, 0.0), (2.15, -8.0), (5.0, -8.0), (6.0, -70.0), (7.0, 0.0)]
+    assert env == pytest.approx(expected, abs=1e-9)
+
+
 def test_music_envelope_levels_are_configurable():
     env = music_envelope(total_s=10.0, speech_spans=[(2.0, 4.0)], windows=[],
                           silence=None, base_db=-3.0, under_speech_db=-11.0,
@@ -161,15 +183,16 @@ def test_volume_expr_holds_the_last_value():
 
 def test_volume_expr_300_breakpoints_is_flat_and_shallow():
     """A film has hundreds of breakpoints; the expression must stay a flat
-    sum (one between()/gte() level, not nested ifs whose depth would track
-    the breakpoint count)."""
+    sum (one gte()*lt() level per segment, not nested ifs whose depth would
+    track the breakpoint count)."""
     env = [(float(i), float(-i % 12)) for i in range(300)]
     expr = volume_expr(env)
     assert "\n" not in expr
     assert " " not in expr
-    assert expr.count("between(") == 299
-    assert expr.count("gte(") == 1
+    assert expr.count("lt(") == 299
+    assert expr.count("gte(") == 300              # one per segment, plus the final tail
     assert "if(" not in expr
+    assert "between(" not in expr
     assert _max_paren_depth(expr) <= 6          # constant, not O(len(env))
 
     # spot-check correctness away from the edges
@@ -179,3 +202,21 @@ def test_volume_expr_300_breakpoints_is_flat_and_shallow():
     got = _eval_expr(expr, mid)
     want = (pow(10, d0 / 20) + pow(10, d1 / 20)) / 2.0
     assert got == pytest.approx(want)
+
+
+def test_volume_expr_no_gap_at_a_shared_boundary():
+    """Regression: an earlier version shrank each segment's upper bound by
+    a fixed epsilon to avoid between()'s closed-both-ends double count, which
+    instead opened a real epsilon-wide gap of near-zero gain just before
+    every interior breakpoint. gte(t,T0)*lt(t,T1) is exact and leaves none:
+    sampling inside what used to be that gap, and at the breakpoint itself,
+    must both land on the real interpolated/held value, never 0."""
+    env = [(0.0, -10.0), (10.0, 4.0), (20.0, -2.0)]
+    expr = volume_expr(env)
+    want_at_breakpoint = pow(10, 4.0 / 20)
+    just_before = _eval_expr(expr, 10.0 - 5e-5)
+    at_boundary = _eval_expr(expr, 10.0)
+    assert just_before > 0.0
+    assert at_boundary > 0.0
+    assert just_before == pytest.approx(want_at_breakpoint, abs=1e-3)
+    assert at_boundary == pytest.approx(want_at_breakpoint)
