@@ -140,10 +140,17 @@ def _shot_rows(conn) -> list[dict[str, Any]]:
     source (the recording's for video, the asset's for a photo), whether the
     recording is 360, and the frame size (the recording's first chapter's,
     since a recording's shots carry none) so ``pairs.is_portrait`` can tell a
-    phone held up from the camera."""
-    return [dict(r) for r in conn.execute(
+    phone held up from the camera.
+
+    width/height come straight off the stream, but a phone's rotation is a
+    flag next to those numbers, not a change to them -- see
+    ``pairs.display_dimensions`` for why that flag has to be read before
+    ``is_portrait`` ever sees the row.
+    """
+    rows = [dict(r) for r in conn.execute(
         "SELECT s.*, COALESCE(r.source, a.source) AS source, r.is_360 AS is_360, "
-        "COALESCE(a.width, fa.width) AS width, COALESCE(a.height, fa.height) AS height "
+        "COALESCE(a.width, fa.width) AS width, COALESCE(a.height, fa.height) AS height, "
+        "COALESCE(a.probe_json, fa.probe_json) AS probe_json "
         "FROM shots s "
         "LEFT JOIN recordings r ON r.recording_id = s.recording_id "
         "LEFT JOIN assets a ON a.asset_id = s.asset_id "
@@ -152,6 +159,10 @@ def _shot_rows(conn) -> list[dict[str, Any]]:
         "  ORDER BY chapter_index, asset_id LIMIT 1) "
         "WHERE s.status <> 'rejected' AND s.act IS NOT NULL "
         "ORDER BY COALESCE(s.start_utc, ''), s.shot_id")]
+    for r in rows:
+        r["width"], r["height"] = pairs_mod.display_dimensions(
+            r["width"], r["height"], r.get("probe_json"))
+    return rows
 
 
 def _act_spans(bounds: Sequence[Mapping[str, Any]]) -> dict[int, tuple[float | None, float | None]]:

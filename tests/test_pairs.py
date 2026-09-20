@@ -1,9 +1,10 @@
 """Two phones, one moment (Film v2 step 4, task 4) -- pure, no database."""
+import json
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from nepal.process.assemble import SLOT_KEYS
-from nepal.process.pairs import find_pairs, is_portrait
+from nepal.process.pairs import display_dimensions, find_pairs, is_portrait
 
 
 def _shot(shot_id, source, start_utc, *, start_s=0.0, end_s=60.0, act=3,
@@ -94,3 +95,53 @@ def test_is_portrait():
     assert is_portrait({"width": 1920, "height": 1080}) is False
     assert is_portrait({"width": None, "height": None}) is False
     assert is_portrait({}) is False
+
+
+def _probe(video_stream):
+    return json.dumps({"streams": [video_stream]})
+
+
+def test_display_dimensions_tag_rotate_90_swaps():
+    probe = _probe({"codec_type": "video", "tags": {"rotate": "90"}})
+    assert display_dimensions(1920, 1080, probe) == (1080, 1920)
+
+
+def test_display_dimensions_tag_rotate_270_swaps():
+    probe = _probe({"codec_type": "video", "tags": {"rotate": "270"}})
+    assert display_dimensions(1920, 1080, probe) == (1080, 1920)
+
+
+def test_display_dimensions_tag_rotate_0_unchanged():
+    probe = _probe({"codec_type": "video", "tags": {"rotate": "0"}})
+    assert display_dimensions(1920, 1080, probe) == (1920, 1080)
+
+
+def test_display_dimensions_tag_rotate_180_unchanged():
+    probe = _probe({"codec_type": "video", "tags": {"rotate": "180"}})
+    assert display_dimensions(1920, 1080, probe) == (1920, 1080)
+
+
+def test_display_dimensions_no_rotate_tag_unchanged():
+    probe = _probe({"codec_type": "video"})
+    assert display_dimensions(1920, 1080, probe) == (1920, 1080)
+
+
+def test_display_dimensions_side_data_rotation_minus_90_swaps():
+    # newer ffprobe reports rotation via side_data_list rather than tags,
+    # and the sign is the direction of rotation, not whether it is a quarter turn
+    probe = _probe({"codec_type": "video",
+                    "side_data_list": [{"side_data_type": "Display Matrix", "rotation": -90.0}]})
+    assert display_dimensions(1920, 1080, probe) == (1080, 1920)
+
+
+def test_display_dimensions_malformed_probe_json_unchanged():
+    assert display_dimensions(1920, 1080, "{not json") == (1920, 1080)
+
+
+def test_display_dimensions_none_probe_json_unchanged():
+    assert display_dimensions(1920, 1080, None) == (1920, 1080)
+
+
+def test_display_dimensions_missing_dimensions_unchanged():
+    probe = _probe({"codec_type": "video", "tags": {"rotate": "90"}})
+    assert display_dimensions(None, None, probe) == (None, None)

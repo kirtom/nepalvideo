@@ -55,11 +55,19 @@ def _seed(cfg):
     shots: list[dict] = []
 
     def recording(rid, source, start, duration_s, *, portrait=False, is_360=None):
-        w, h = (1080, 1920) if portrait else (1920, 1080)
+        # The real corpus never stores portrait dimensions: 253 of 373 phone
+        # videos are 1920x1080 in the asset row with a 90/270 rotation tag in
+        # probe_json, and only 3 are portrait by width/height alone. Seed the
+        # same shape here so the split-slot assertion below is proof that
+        # pairs.display_dimensions reads the rotation, not an artifact of the
+        # seed having done the swap itself.
+        w, h = 1920, 1080
+        probe_json = json.dumps({"streams": [{"codec_type": "video",
+                                              "tags": {"rotate": "90"}}]}) if portrait else None
         recordings.append((rid, source, int(is_360 if is_360 is not None else source == "camera"),
                            _iso(start), duration_s, 1))
         assets.append((f"a_{rid}", f"raw/{rid}.mp4", source, "video360" if source == "camera" else "video_flat",
-                       w, h, duration_s, _iso(start), rid, 0))
+                       w, h, duration_s, _iso(start), rid, 0, probe_json))
 
     def shot(rid, idx, start_s, end_s, start, act, *, source_score=0.6, face=0, face_score=None,
              transcript=None, place=None, levity=0, status="shortlisted", lat=None, lon=None, alt=None):
@@ -72,7 +80,7 @@ def _seed(cfg):
                       "has_speech": int(bool(transcript))})
 
     def photo(pid, source, when, act, score=0.7):
-        assets.append((pid, f"raw/{pid}.jpg", source, "photo", 3000, 4000, None, _iso(when), None, None))
+        assets.append((pid, f"raw/{pid}.jpg", source, "photo", 3000, 4000, None, _iso(when), None, None, None))
         shots.append({"shot_id": f"photo_{pid}", "recording_id": None, "asset_id": pid,
                       "media_kind": "photo", "start_s": 0.0, "end_s": 4.0, "start_utc": _iso(when),
                       "act": act, "place_name": None, "score_total": score, "has_face": 0,
@@ -187,7 +195,8 @@ def _seed(cfg):
     conn.executemany("INSERT INTO recordings(recording_id, source, is_360, start_utc, duration_s, "
                      "asset_count) VALUES (?,?,?,?,?,?)", recordings)
     conn.executemany("INSERT INTO assets(asset_id, s3_key, source, kind, width, height, duration_s, "
-                     "created_at_utc, recording_id, chapter_index) VALUES (?,?,?,?,?,?,?,?,?,?)", assets)
+                     "created_at_utc, recording_id, chapter_index, probe_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                     assets)
     db.upsert(conn, "shots", ["shot_id"], shots)
 
     conn.execute("INSERT INTO messages(msg_id, ts_utc, author, text, phase) VALUES "

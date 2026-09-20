@@ -11,6 +11,7 @@ into an actual split-screen render.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Mapping, Sequence
 
@@ -21,6 +22,49 @@ from nepal.process.assemble import SLOT_KEYS
 # than the raw score sum says -- but it is a nudge, not a second signal, so
 # it must never outweigh a real score gap.
 FACE_CLUSTER_BONUS = 0.2
+
+
+def display_dimensions(width: Any, height: Any, probe_json: str | None) -> tuple[Any, Any]:
+    """What the frame looks like on screen, not what the stream stores.
+
+    On the real corpus, 253 of 373 phone videos carry a 90/270 rotation on
+    their video stream while ``width``x``height`` still say 1920x1080 --
+    only 3 phone videos are portrait by the stored numbers alone. The phone
+    records portrait behind a rotation flag that ffmpeg applies on decode
+    (the same trap noted in reproject.py's ``build_flat_graph_clamped``), so
+    a caller reading raw width/height sees a landscape corpus and
+    ``is_portrait`` never fires. ffprobe reports the rotation two ways
+    depending on version: the old ``tags.rotate`` string on the video
+    stream, or a ``side_data_list`` entry with a numeric ``rotation`` (often
+    negative). Either one at a quarter turn (90 or 270, sign ignored) means
+    the stored width/height are swapped from what a viewer sees.
+    """
+    if width is None or height is None or not probe_json:
+        return width, height
+    try:
+        data = json.loads(probe_json)
+    except (TypeError, ValueError):
+        return width, height
+    streams = data.get("streams") if isinstance(data, dict) else None
+    if not streams:
+        return width, height
+    video = next((s for s in streams if isinstance(s, dict) and s.get("codec_type") == "video"), None)
+    if video is None:
+        return width, height
+
+    def _quarter_turn(value: Any) -> bool:
+        try:
+            return abs(int(float(value))) % 180 == 90
+        except (TypeError, ValueError):
+            return False
+
+    rotated = _quarter_turn((video.get("tags") or {}).get("rotate"))
+    if not rotated:
+        for side_data in video.get("side_data_list") or []:
+            if isinstance(side_data, dict) and _quarter_turn(side_data.get("rotation")):
+                rotated = True
+                break
+    return (height, width) if rotated else (width, height)
 
 
 def is_portrait(row: Mapping[str, Any]) -> bool:
