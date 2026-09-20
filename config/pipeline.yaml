@@ -538,7 +538,10 @@ cloud:
       cpu:
         name: nepal-cpu
         machine_type: e2-standard-8
-        disk_gb: 60
+        # raw/ alone is 69 GB once the camera originals landed in the bucket,
+        # and every run rsyncs it onto this disk: at 60 GB cloud-init died
+        # with ENOSPC at boot and ssh keys were never written (2026-09-20).
+        disk_gb: 150
         image_family: ubuntu-2204-lts
         image_project: ubuntu-os-cloud
         accelerator: null
@@ -547,7 +550,7 @@ cloud:
       gpu:
         name: nepal-gpu
         machine_type: g2-standard-4
-        disk_gb: 100
+        disk_gb: 150                # same rsync of raw/, same reason as cpu
         image_family: ubuntu-2204-lts
         image_project: ubuntu-os-cloud
         accelerator: nvidia-l4
