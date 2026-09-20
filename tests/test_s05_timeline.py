@@ -209,7 +209,7 @@ def _seed(cfg, *, lopsided_act=None):
     db.upsert(conn, "shots", ["shot_id"], shots)
 
     conn.execute("INSERT INTO messages(msg_id, ts_utc, author, text, phase) VALUES "
-                 "('m1', '2024-02-11T19:02:00+00:00', 'A', '20 км в день не проблема', 'planning')")
+                 "('m1', '2024-02-11T19:02:00+00:00', 'Kulikov', '20 км в день не проблема', 'planning')")
     beats = [
         ("b_arrive", "speech", 2, "c2#0000", None, 3.0, 9.0, "Мы приехали, тут жарко", 1, "none", 3),
         ("b_walk", "speech", 3, "w3#0000", None, 2.0, 12.0, "Я вот на этом курумнике прям сдох", 0, "none", 2),
@@ -576,3 +576,74 @@ def test_two_locked_slots_never_cut_each_other():
     s05_cut._set_length(c, 4.0, 12.0)
     out = s05_cut._resolve_overlaps([c, a])
     assert (out[0]["t_out"], out[1]["t_in"]) == (10.0, 10.0) and out[1]["t_out"] == 18.0
+
+
+def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
+    """Part B reads only what the timeline step persisted, so it is run on
+    the seeded database after ``build_timeline`` exactly as ``--redo cues``
+    would be, and every row it writes is checked against the slot it serves."""
+    cfg = _cfg(tmp_path)
+    conn = _seed(cfg)
+    rep_tl = s05_cut.build_timeline(cfg, conn)
+    rep = s05_cut.build_cues(cfg, conn)
+    slots = [dict(r) for r in conn.execute("SELECT * FROM timeline ORDER BY slot_index")]
+    shots = _shots(conn)
+    by_track: dict[str, list[dict]] = {}
+    for c in conn.execute("SELECT * FROM audio_cues"):
+        by_track.setdefault(c["track"], []).append(dict(c))
+    assert rep["n_cues"] == {t: len(by_track.get(t, [])) for t in ("speech", "location", "music")}
+
+    # every video slot hears its own recording, the stills hold the one before
+    loc = {c["cue_id"]: c for c in by_track["location"]}
+    for s in slots:
+        if s["kind"] != "video":
+            continue
+        c = loc[f"lo_{s['slot_index']}"]
+        assert c["source"] == shots[s["shot_id"]]["recording_id"]
+        assert (c["t_in"], c["t_out"], c["src_in"], c["src_out"]) == (s["t_in"], s["t_out"], s["src_in"], s["src_out"])
+    assert all(c["gain_lufs"] in {cfg.get("render.duck_lufs"), cfg.get("render.location_full_lufs"),
+                                  cfg.get("render.location_under_speech_lufs")} for c in loc.values())
+
+    # every speech beat with slots has its voice, starting where its first
+    # slot reaches the words: the locked act slot opens on them, the cold
+    # open runs into them after its extension
+    speech = {c["beat_id"]: c for c in by_track["speech"]}
+    for beat in ("b_arrive", "b_walk", "b_pass"):
+        first = next(s for s in slots if s["beat_id"] == beat)
+        c = speech[beat]
+        assert c["cue_id"] == f"sp_{beat}" and c["source"] == shots[first["shot_id"]]["recording_id"]
+        assert math.isclose(c["t_in"] - first["t_in"], c["src_in"] - first["src_in"], abs_tol=1e-3), beat
+        if first["act"] >= 1:
+            assert math.isclose(c["t_in"], first["t_in"], abs_tol=1e-3), beat
+        assert c["gain_lufs"] == cfg.get("render.speech_lufs")
+
+    # music covers each act end to end, within half a second, the silence excepted
+    mmap = json.loads((cfg.work_root / "music" / "music_map.json").read_text())
+    q = mmap["silence_window"]
+    for a in mmap["acts"]:
+        mine = [c for c in by_track["music"] if c["cue_id"].startswith(f"mu_{a['act']}_")]
+        assert bool(mine) == bool(a["segments"]), a["act"]
+        if not mine:
+            continue
+        lo = q["t_end"] if a["t_start"] < q["t_end"] <= a["t_end"] else a["t_start"]
+        hi = q["t_start"] if a["t_start"] <= q["t_start"] < a["t_end"] else a["t_end"]
+        assert abs(min(c["t_in"] for c in mine) - lo) <= 0.5, a["act"]
+        assert abs(max(c["t_out"] for c in mine) - hi) <= 0.5, a["act"]
+    assert not any(c["t_in"] < q["t_end"] and c["t_out"] > q["t_start"] for c in by_track["music"])
+
+    # the chat card carries the author's tag, never the name, and sits in act 1
+    overlays = [dict(r) for r in conn.execute("SELECT * FROM overlays")]
+    assert rep["n_overlays"] == len(overlays) == 1 and overlays[0]["overlay_id"] == "cc_q_plan"
+    assert "Kulikov" not in json.dumps(overlays, ensure_ascii=False)
+    assert json.loads(overlays[0]["payload"])["author_tag"] == "A"
+    act1 = [s for s in slots if s["act"] == 1]
+    assert act1[0]["t_in"] <= overlays[0]["t_in"] < overlays[0]["t_out"] <= act1[-1]["t_out"]
+
+    # no report on disk: the windows are recomputed and match the timeline step's;
+    # with one, the report's list is what is used
+    assert rep["natural_windows"] == rep_tl["natural_windows"]
+    made_up = [{"t_in": 1.0, "t_out": 2.0, "slot_index": 0}]
+    cfg.work("reports", "s05_cut.json").write_text(json.dumps({"timeline": {"natural_windows": made_up}}))
+    assert s05_cut.build_cues(cfg, conn)["natural_windows"] == made_up
+    assert conn.execute("SELECT COUNT(*) FROM audio_cues").fetchone()[0] == sum(rep["n_cues"].values())
+    conn.close()
