@@ -104,7 +104,8 @@ def mmr_select(candidates: Sequence[Mapping[str, Any]], *, budget: int,
                similarity: Callable[[Mapping[str, Any], Mapping[str, Any]], float],
                lam: float = MMR_LAMBDA,
                admissible=None,
-               prefer=None) -> list[Mapping[str, Any]]:
+               prefer=None,
+               seed: Sequence[Mapping[str, Any]] = ()) -> list[Mapping[str, Any]]:
     """Greedy MMR fill under a per-step admissibility filter.
 
     ``admissible(candidate, chosen)`` returns whether a shot may be taken
@@ -118,6 +119,11 @@ def mmr_select(candidates: Sequence[Mapping[str, Any]], *, budget: int,
 
     When nothing is admissible the fill stops rather than forcing a shot in:
     the caller decides what to relax, and the spec says what order to relax in.
+
+    ``seed`` is what an earlier pass already chose: the diversity penalty is
+    taken over it as well as over this call's own picks, so a relaxed second
+    pass is still penalised for resembling the first, while the returned
+    list and the ``admissible``/``prefer`` calls see this call's picks alone.
     """
     chosen: list[Mapping[str, Any]] = []
     remaining = [c for c in candidates if c.get("score_total") is not None]
@@ -126,7 +132,7 @@ def mmr_select(candidates: Sequence[Mapping[str, Any]], *, budget: int,
         for c in remaining:
             if admissible is not None and not admissible(c, chosen):
                 continue
-            penalty = max((similarity(c, s) for s in chosen), default=0.0)
+            penalty = max((similarity(c, s) for s in (*seed, *chosen)), default=0.0)
             val = float(c["score_total"]) - lam * penalty
             if prefer is not None:
                 val += prefer(c, chosen)

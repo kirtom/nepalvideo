@@ -77,6 +77,21 @@ def test_mmr_refuses_a_second_shot_that_looks_like_the_first():
     assert [s["shot_id"] for s in diverse] == ["a", "c"]
 
 
+def test_a_seeded_pass_is_penalised_for_resembling_what_came_before():
+    """A relaxed second pass must not re-pick the first pass's ridge: with
+    the first pass's picks as ``seed``, the candidate identical to one of
+    them ranks last under any diversity pressure, though the returned list
+    holds this call's picks alone. Without a seed nothing changes."""
+    E = _emb({"a": [1, 0], "b": [0.99, 0.01], "c": [0, 1], "d": [0.7, 0.7]})
+    first = [shot("a", 0.90)]
+    later = [shot("b", 0.89), shot("c", 0.80), shot("d", 0.79)]
+    # seeded with a: b is a's twin and drops to 0.39; c (0.80) then d (0.44) go first
+    seeded = assemble.mmr_select(later, budget=3, similarity=_sim(E), lam=0.5, seed=first)
+    assert [s["shot_id"] for s in seeded] == ["c", "d", "b"]
+    assert [s["shot_id"] for s in assemble.mmr_select(later, budget=3, similarity=_sim(E), lam=0.5)] \
+        == ["b", "c", "d"]
+
+
 def test_an_unknown_similarity_does_not_veto_a_shot():
     """A shot missing from the embedding index, with no fallback signal
     either (no shared recording or place), must still be selectable -- it is

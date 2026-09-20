@@ -337,7 +337,7 @@ def _select(cands: Sequence[Mapping[str, Any]], *, budget: int, similarity, lam:
     relaxed = asm.mmr_select([c for c in cands if c["shot_id"] not in taken],
                              budget=budget - len(chosen), similarity=similarity, lam=lam,
                              admissible=lambda c, ch: admissible(c, chosen + ch, place=False),
-                             prefer=lambda c, ch: prefer(c, chosen + ch))
+                             prefer=lambda c, ch: prefer(c, chosen + ch), seed=chosen)
     return chosen + relaxed, len(relaxed)
 
 
