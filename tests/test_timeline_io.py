@@ -91,3 +91,54 @@ def test_write_puts_both_files_where_they_are_expected(tmp_path):
     assert paths["otio"].exists() and paths["fcpxml"].exists()
     ET.fromstring(paths["fcpxml"].read_text())
     json.loads(paths["otio"].read_text())
+
+
+# -- the audio tracks and the overlays (Film v2 step 4, task 14) -------
+
+def _cue(**f):
+    return {"cue_id": "x", "track": "speech", "t_in": 0.0, "t_out": 1.0, "source": "r", "src_in": 0.0,
+            "src_out": 1.0, "gain_lufs": -16.0, "fade_in_s": 0.15, "fade_out_s": 0.15, "beat_id": None, **f}
+
+
+CUES = [_cue(cue_id="sp_b", track="speech", t_in=4.0, t_out=7.0, source="rb", src_in=2.0, src_out=5.0, beat_id="b"),
+        _cue(cue_id="lo_0", track="location", t_in=0.0, t_out=4.0, source="ra", src_in=10.0, src_out=14.0),
+        _cue(cue_id="lo_1", track="location", t_in=4.0, t_out=9.0, source="rb", src_in=0.0, src_out=5.0),
+        _cue(cue_id="mu_1_0", track="music", t_in=0.0, t_out=15.0, source="t1", src_in=30.0, src_out=45.0)]
+OVERLAYS = [{"overlay_id": "cc_q", "kind": "chat_card", "t_in": 2.0, "t_out": 6.0,
+             "payload": '{"text": "20 km a day", "author_tag": "A", "side": "left"}', "asset_path": None}]
+
+
+def test_without_cues_the_otio_is_the_one_video_track_it_always_was():
+    tracks = tio.to_otio(ROWS)["tracks"]["children"]
+    assert [t["name"] for t in tracks] == ["V1"]
+
+
+def test_cues_become_three_audio_tracks_and_the_overlays_a_fourth():
+    tracks = tio.to_otio(ROWS, fps=30, cues=CUES, overlays=OVERLAYS)["tracks"]["children"]
+    assert [t["name"] for t in tracks] == ["V1", "speech", "location", "music", "overlays"]
+    assert [t["kind"] for t in tracks[1:4]] == ["Audio"] * 3
+    by_name = {t["name"]: t["children"] for t in tracks}
+    # a cue that starts late sits after a gap, on film time, at its own source range
+    gap, sp = by_name["speech"]
+    assert gap["OTIO_SCHEMA"] == "Gap.1" and gap["source_range"]["duration"]["value"] == 120   # 4 s at 30 fps
+    assert sp["OTIO_SCHEMA"] == "Clip.1" and sp["name"] == "sp_b"
+    assert sp["source_range"]["start_time"]["value"] == 60 and sp["source_range"]["duration"]["value"] == 90
+    assert sp["metadata"]["nepal"]["source"] == "rb" and sp["metadata"]["nepal"]["beat_id"] == "b"
+    # abutting cues need no gap between them
+    assert [c["OTIO_SCHEMA"] for c in by_name["location"]] == ["Clip.1", "Clip.1"]
+    assert by_name["music"][0]["source_range"]["start_time"]["value"] == 900
+    # an overlay is a placed gap carrying its payload, not a clip of any media
+    spacer, card = by_name["overlays"]
+    assert card["OTIO_SCHEMA"] == "Gap.1" and card["name"] == "cc_q"
+    assert spacer["source_range"]["duration"]["value"] == 60 and card["source_range"]["duration"]["value"] == 120
+    assert card["metadata"]["nepal"]["kind"] == "chat_card" and "20 km" in card["metadata"]["nepal"]["payload"]
+    json.dumps(tracks)
+
+
+def test_write_carries_the_cues_into_the_otio_and_the_fps_into_the_fcpxml(tmp_path):
+    paths = tio.write(ROWS, tmp_path, media_dir="/m", fps=30, cues=CUES, overlays=OVERLAYS)
+    otio = json.loads(paths["otio"].read_text())
+    assert [t["name"] for t in otio["tracks"]["children"]] == ["V1", "speech", "location", "music", "overlays"]
+    root = ET.fromstring(paths["fcpxml"].read_text())
+    assert root.find(".//format").get("frameDuration") == tio.fcp_time(1.0 / 30, 30)
+    assert [c.get("name") for c in root.findall(".//asset-clip")] == ["a", "b", "c"], "the FCPXML is unchanged"
