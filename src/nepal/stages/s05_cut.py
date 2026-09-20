@@ -1192,13 +1192,22 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
         if slot is None:
             log.warning("S05.cues speech beat %s has no slot on the timeline; it gets no cue", a.beat_id)
             continue
-        placed.append(dataclasses.replace(
-            a, t_in=float(slot["t_in"]) + a.src_in - float(slot["src_in"] or 0.0)))
+        lead = a.src_in - float(slot["src_in"] or 0.0)
+        if lead < 0:
+            # A cold open longer than its range extends less than the
+            # pre-roll: the cue opens with the picture, not before the film.
+            a = dataclasses.replace(a, src_in=a.src_in - lead, duration_s=a.duration_s + lead)
+            lead = 0.0
+        placed.append(dataclasses.replace(a, t_in=float(slot["t_in"]) + lead))
 
     map_path = cfg.work_root / "music" / "music_map.json"
     if not map_path.exists():
         return {"skipped": "no music map; the timeline step writes it"}
-    mmap = json.loads(map_path.read_text())
+    act_spans: dict[int, tuple[float, float]] = {}
+    for s in slots:
+        lo, hi = act_spans.get(int(s["act"]), (math.inf, -math.inf))
+        act_spans[int(s["act"])] = (min(lo, float(s["t_in"])), max(hi, float(s["t_out"])))
+    mmap = cues_mod.map_on_film_time(json.loads(map_path.read_text()), act_spans)
     natural = _reported_windows(cfg)
     if natural is None:
         natural, _ = _natural_windows(cfg, effort.profile(place_mod.load_track(conn)), slots, shots_by_id)

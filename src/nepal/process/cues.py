@@ -131,6 +131,35 @@ def location_cues(slots: Sequence[Mapping[str, Any]], *, lufs_under_music: float
 
 # -- music ----------------------------------------------------------------
 
+def map_on_film_time(mmap: Mapping[str, Any],
+                     act_spans: Mapping[int, tuple[float, float]]) -> dict[str, Any]:
+    """The map with every act on the span the timeline actually gave it.
+
+    The map is built on the planned act spans and rebuilt only when an act's
+    length moved by more than a scene; the rhythm pass then times each act's
+    cuts against the map's grid shifted to where that act really starts. So
+    the table is on film time and the map is not -- on the seeded corpus act
+    4 opened 8.4 s after the map said -- and a cue laid at the map's
+    ``t_start`` would drift against the picture by that much. ``act_spans``
+    are the table's own first ``t_in`` and last ``t_out`` per act. The
+    silence keeps its length and stays after the act it followed in the map,
+    at that act's real end.
+    """
+    out = dict(mmap)
+    out["acts"] = [dict(e, t_start=round(act_spans[int(e["act"])][0], 3),
+                        t_end=round(act_spans[int(e["act"])][1], 3))
+                   if int(e["act"]) in act_spans else dict(e) for e in mmap.get("acts", [])]
+    q = mmap.get("silence_window") or {}
+    if q:
+        q0, q1 = float(q["t_start"]), float(q["t_end"])
+        before = next((int(e["act"]) for e in mmap.get("acts", [])
+                       if math.isclose(float(e["t_end"]), q0, abs_tol=_EDGE_TOL_S)), None)
+        if before in act_spans:
+            end = act_spans[before][1]
+            out["silence_window"] = {"t_start": round(end, 3), "t_end": round(end + (q1 - q0), 3)}
+    return out
+
+
 def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
                window_fade_s: float) -> list[dict[str, Any]]:
     """One cue per segment of every act in the map, on film time. Adjacent
@@ -140,20 +169,24 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
     starts inside it resumes where the silence ends, the track advanced by
     the same amount so the map's beat grid still lines up.
 
-    An act's last segment runs on to the act's ``t_end``: the map's segments
-    are scene runs, which stop at the last slot the scenes were grouped on,
-    and the second or two between that and the act's end would be a hole in
-    the bed right before the cut, not a pause."""
+    An act's last cue ends where the act ends. The map's segments follow the
+    slots its scenes were grouped on, and those stop short of the act's end
+    or run past it (on the seeded corpus 1.3 s short in act 1, 7.6 s over in
+    act 3): short would be a hole in the bed right before the cut, over
+    would be two beds under the next act's first shot. A segment that only
+    begins past the end is dropped."""
     q = mmap.get("silence_window") or {}
     q0, q1 = (float(q["t_start"]), float(q["t_end"])) if q else (math.inf, math.inf)
     out: list[dict[str, Any]] = []
     for entry in mmap.get("acts", []):
         t_start, t_end = float(entry["t_start"]), float(entry["t_end"])
         segments = entry.get("segments") or []
-        for i, seg in enumerate(segments):
+        kept = [i for i, seg in enumerate(segments) if t_start + float(seg["t_in"]) < t_end - _EDGE_TOL_S]
+        for i in kept:
+            seg = segments[i]
             t0, t1 = t_start + float(seg["t_in"]), t_start + float(seg["t_end"])
             src_in, src_out = float(seg["src_in"]), float(seg["src_out"])
-            if i == len(segments) - 1 and t1 < t_end:
+            if i == kept[-1]:
                 src_out, t1 = src_out + (t_end - t1), t_end
             if t0 < q1 and t1 > q0:
                 if t0 >= q0 and t1 <= q1:

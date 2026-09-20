@@ -169,6 +169,32 @@ def test_the_silence_gets_no_music_and_the_cue_before_it_fades_over_the_window()
     assert not any(r["t_in"] < 162.0 < r["t_out"] or 150.0 < r["t_in"] < 162.0 for r in rows)
 
 
+def test_the_map_is_laid_on_the_acts_the_table_actually_has():
+    # the map was built on the planned spans; on the table act 1 ran 2 s
+    # long, so act 4 opens 2 s late and ends 5 s early, and act 5 starts there
+    spans = {0: (0.0, 23.0), 1: (23.0, 85.0), 2: (85.0, 92.0), 4: (92.0, 147.0), 5: (147.0, 200.0)}
+    rows = cues.music_cues(cues.map_on_film_time(_mmap(), spans), lufs=-14.0, xfade_s=2.0, window_fade_s=1.0)
+    by_id = {r["cue_id"]: r for r in rows}
+    assert (by_id["mu_1_1"]["t_in"], by_id["mu_1_1"]["t_out"]) == (63.0, 85.0)
+    assert (by_id["mu_1_1"]["src_in"], by_id["mu_1_1"]["src_out"]) == (10.0, 32.0)
+    # act 4's segment ran to the map's 150: cut at the act's real end, and
+    # the silence moves with it, its length kept, so the fade before it holds
+    assert (by_id["mu_4_0"]["t_in"], by_id["mu_4_0"]["t_out"]) == (92.0, 147.0)
+    assert by_id["mu_4_0"]["src_out"] == 95.0 and by_id["mu_4_0"]["fade_out_s"] == 1.0
+    assert (by_id["mu_5_0"]["t_in"], by_id["mu_5_0"]["t_out"]) == (159.0, 200.0)
+    assert (by_id["mu_5_0"]["src_in"], by_id["mu_5_0"]["src_out"]) == (12.0, 53.0)
+
+
+def test_a_segment_that_begins_past_the_acts_real_end_is_dropped():
+    mmap = {"acts": [{"act": 3, "t_start": 100.0, "t_end": 150.0,
+                      "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 30.0, "src_in": 0.0, "src_out": 30.0},
+                                   {"track_id": "t2", "t_in": 30.0, "t_end": 50.0, "src_in": 0.0, "src_out": 20.0}]}],
+            "silence_window": {}}
+    rows = cues.music_cues(cues.map_on_film_time(mmap, {3: (100.0, 125.0)}), lufs=-14.0, xfade_s=2.0,
+                           window_fade_s=1.0)
+    assert [(r["cue_id"], r["t_in"], r["t_out"], r["src_out"]) for r in rows] == [("mu_3_0", 100.0, 125.0, 25.0)]
+
+
 def test_a_segment_wholly_inside_the_silence_is_dropped():
     mmap = {"acts": [{"act": 5, "t_start": 150.0, "t_end": 160.0,
                       "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 10.0, "src_in": 0.0, "src_out": 10.0}]}],

@@ -617,19 +617,33 @@ def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
             assert math.isclose(c["t_in"], first["t_in"], abs_tol=1e-3), beat
         assert c["gain_lufs"] == cfg.get("render.speech_lufs")
 
-    # music covers each act end to end, within half a second, the silence excepted
+    # music covers each act end to end on the table's own spans, not the
+    # map's planned ones (the map was not rebuilt, and the acts drifted from
+    # it by up to 8 s here); the silence follows act 4's real end
     mmap = json.loads((cfg.work_root / "music" / "music_map.json").read_text())
-    q = mmap["silence_window"]
+    spans = {a: (min(s["t_in"] for s in slots if s["act"] == a), max(s["t_out"] for s in slots if s["act"] == a))
+             for a in {s["act"] for s in slots}}
+    assert rep_tl["music_map_recomputed"] == [] and any(
+        abs(spans[a["act"]][0] - a["t_start"]) > 1.0 for a in mmap["acts"])
+    q0 = spans[4][1]
+    q1 = q0 + float(cfg.get("assemble.silence_window_s"))
     for a in mmap["acts"]:
         mine = [c for c in by_track["music"] if c["cue_id"].startswith(f"mu_{a['act']}_")]
         assert bool(mine) == bool(a["segments"]), a["act"]
         if not mine:
             continue
-        lo = q["t_end"] if a["t_start"] < q["t_end"] <= a["t_end"] else a["t_start"]
-        hi = q["t_start"] if a["t_start"] <= q["t_start"] < a["t_end"] else a["t_end"]
-        assert abs(min(c["t_in"] for c in mine) - lo) <= 0.5, a["act"]
-        assert abs(max(c["t_out"] for c in mine) - hi) <= 0.5, a["act"]
-    assert not any(c["t_in"] < q["t_end"] and c["t_out"] > q["t_start"] for c in by_track["music"])
+        lo, hi = spans[a["act"]]
+        lo = q1 if lo < q1 <= hi else lo
+        hi = q0 if lo <= q0 < hi else hi
+        assert math.isclose(min(c["t_in"] for c in mine), lo, abs_tol=1e-3), a["act"]
+        assert math.isclose(max(c["t_out"] for c in mine), hi, abs_tol=1e-3), a["act"]
+    assert not any(c["t_in"] < q1 and c["t_out"] > q0 for c in by_track["music"])
+    # and the location cues on either side of the silence take the window
+    # fade, which places the silence the location track heard at act 4's end
+    touching = [c for c in loc.values() if c["t_in"] <= q1 and c["t_out"] >= q0]
+    assert touching and all(c["fade_in_s"] == cfg.get("render.window_fade_s") for c in touching)
+    assert all(c["gain_lufs"] == cfg.get("render.location_full_lufs")
+               for c in loc.values() if q0 <= (c["t_in"] + c["t_out"]) / 2 <= q1)
 
     # the chat card carries the author's tag, never the name, and sits in act 1
     overlays = [dict(r) for r in conn.execute("SELECT * FROM overlays")]
