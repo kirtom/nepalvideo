@@ -1161,6 +1161,12 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
     """S05.cues -- the three audio tracks and the chat cards, from what the
     timeline step persisted: the table, the beats, the map and the report.
     Reading only artefacts is what lets ``--redo cues`` run alone."""
+    map_path = cfg.work_root / "music" / "music_map.json"
+    if not map_path.exists():
+        # The timeline step writes it, so its absence means that step has
+        # not run; a skip here would leave the previous cut's cues standing.
+        raise RuntimeError(f"{map_path} is missing: the timeline step has not run "
+                           "(nepal cut --redo timeline,cues)")
     slots = [dict(r) for r in conn.execute(
         "SELECT t.*, s.recording_id FROM timeline t LEFT JOIN shots s ON s.shot_id = t.shot_id "
         "ORDER BY t.slot_index")]
@@ -1183,9 +1189,6 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
     for beat in {a.beat_id for a in anchors} - {p.beat_id for p in placed}:
         log.warning("S05.cues speech beat %s has no slot on the timeline; it gets no cue", beat)
 
-    map_path = cfg.work_root / "music" / "music_map.json"
-    if not map_path.exists():
-        return {"skipped": "no music map; the timeline step writes it"}
     act_spans: dict[int, tuple[float, float]] = {}
     for s in slots:
         lo, hi = act_spans.get(int(s["act"]), (math.inf, -math.inf))
@@ -1296,6 +1299,18 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
             "n_skipped": len(rows) - len(usable)}
 
 
+def _write_report(cfg: Config, report: Mapping[str, Any]) -> None:
+    """Written after every step, not once at the end: the cues step reads
+    the timeline step's natural windows back from this file, and a report
+    written only after the loop handed it the previous run's windows, mapped
+    to the previous cut's slots. Through a temporary name and a rename, so
+    a kill mid-write never leaves half a file for the next step to read."""
+    path = cfg.work("reports", "s05_cut.json")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(report, indent=2, default=str))
+    tmp.replace(path)
+
+
 def run(cfg: Config, *, force: bool = False,
         redo: set[str] | None = None) -> dict[str, Any]:
     conn = db.init(cfg.db_path)
@@ -1312,7 +1327,8 @@ def run(cfg: Config, *, force: bool = False,
             continue
         report[name] = fn()
         db.mark_unit(conn, STAGE, name, detail=json.dumps(report[name], default=str)[:2000])
+        _write_report(cfg, report)
     report["finished_utc"] = db.utcnow()
-    cfg.work("reports", "s05_cut.json").write_text(json.dumps(report, indent=2, default=str))
+    _write_report(cfg, report)
     conn.close()
     return report

@@ -66,6 +66,16 @@ def test_a_beat_on_two_runs_gets_a_speech_cue_per_run():
     assert all((r["source"], r["src_in"], r["src_out"], r["beat_id"]) == ("c4", 10.6, 18.0, "b_pass")
                for r in rows)
     assert cues.place_speech([_anchor("b_none", "x", 0.0, 5.0, t_in=-1.0)], slots) == []
+    # a cold open that opens 0.4 s after the pre-roll trims its own cue and
+    # not act 4's: each run is placed from the anchor, never from the run before
+    slots[0] = _slot(0, 0, 0.0, 15.0, rec="c4", src_in=11.0, beat="b_pass")
+    rows = cues.speech_cues(cues.place_speech([a], slots), lufs=-16.0, fade_s=0.15)
+    assert [(r["cue_id"], r["t_in"], round(r["src_in"], 6), r["t_out"]) for r in rows] == [
+        ("sp_b_pass", 0.0, 11.0, 7.0), ("sp_b_pass_2", 300.0, 10.6, 307.4)]
+    # a second run that begins while the first cue is still speaking gets no cue
+    early = [_slot(0, 0, 0.0, 4.0, rec="c4", src_in=8.6, beat="b_pass"), _slot(1, 0, 4.0, 5.0, kind="card"),
+             _slot(2, 4, 5.0, 9.0, rec="c4", src_in=10.6, beat="b_pass")]
+    assert [r["cue_id"] for r in cues.speech_cues(cues.place_speech([a], early), lufs=-16.0, fade_s=0.15)] == ["sp_b_pass"]
 
 
 def test_a_slot_that_opens_after_the_pre_roll_starts_the_voice_with_the_picture():
@@ -129,10 +139,10 @@ def test_levels_full_in_a_window_under_speech_in_a_span_else_under_music():
     # slot 1 is under the voice; slot 2 is both under the voice and in the
     # window, and the window wins; slot 5 is under nothing but the music
     assert gains == [-24.0, -24.0, -18.0, -18.0, -18.0, -28.0]
-    # the cues touching the window rise and fall over the window fade, not the cut fade
-    fades = [r["fade_in_s"] for r in rows]
-    assert fades == [0.15, 1.0, 1.0, 1.0, 1.0, 0.15]
-    assert all(r["fade_in_s"] == r["fade_out_s"] for r in rows)
+    # an edge inside the window takes the window fade, the other edge the
+    # cut fade: slot 1 ends in it and slot 4 starts in it, slots 2-3 lie in it
+    assert [r["fade_in_s"] for r in rows] == [0.15, 0.15, 1.0, 1.0, 1.0, 0.15]
+    assert [r["fade_out_s"] for r in rows] == [0.15, 1.0, 1.0, 1.0, 0.15, 0.15]
 
 
 def test_the_silence_window_is_full_location_sound():
@@ -140,7 +150,9 @@ def test_the_silence_window_is_full_location_sound():
     rows = cues.location_cues(slots, speech_spans=[], windows=[],
                               silence={"t_start": 100.0, "t_end": 110.0}, **LEVELS, **FADES)
     assert [r["gain_lufs"] for r in rows] == [-18.0, -18.0, -28.0]
-    assert [r["fade_out_s"] for r in rows] == [1.0, 1.0, 1.0]
+    # slot 2 opens on the silence's last edge and ends outside it
+    assert [r["fade_in_s"] for r in rows] == [1.0, 1.0, 1.0]
+    assert [r["fade_out_s"] for r in rows] == [1.0, 1.0, 0.15]
 
 
 # -- music ----------------------------------------------------------------

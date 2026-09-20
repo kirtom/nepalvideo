@@ -644,10 +644,12 @@ def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
         assert math.isclose(min(c["t_in"] for c in mine), lo, abs_tol=1e-3), a["act"]
         assert math.isclose(max(c["t_out"] for c in mine), hi, abs_tol=1e-3), a["act"]
     assert not any(c["t_in"] < q1 and c["t_out"] > q0 for c in by_track["music"])
-    # and the location cues on either side of the silence take the window
+    # and the location cue that ends on the silence fades out over the window
     # fade, which places the silence the location track heard at act 4's end
-    touching = [c for c in loc.values() if c["t_in"] <= q1 and c["t_out"] >= q0]
-    assert touching and all(c["fade_in_s"] == cfg.get("render.window_fade_s") for c in touching)
+    ending = [c for c in loc.values() if math.isclose(c["t_out"], q0, abs_tol=1e-3)]
+    assert ending and all(c["fade_out_s"] == cfg.get("render.window_fade_s") for c in ending)
+    assert all(c["fade_in_s"] == cfg.get("render.window_fade_s")
+               for c in loc.values() if q0 - 1e-3 <= c["t_in"] <= q1 + 1e-3)
     assert all(c["gain_lufs"] == cfg.get("render.location_full_lufs")
                for c in loc.values() if q0 <= (c["t_in"] + c["t_out"]) / 2 <= q1)
 
@@ -667,3 +669,20 @@ def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
     assert s05_cut.build_cues(cfg, conn)["natural_windows"] == made_up
     assert conn.execute("SELECT COUNT(*) FROM audio_cues").fetchone()[0] == sum(rep["n_cues"].values())
     conn.close()
+
+
+def test_the_cues_step_reads_the_windows_the_timeline_step_just_wrote(tmp_path):
+    """``nepal cut`` runs timeline then cues in one process, and cues reads
+    the windows from the report on disk: written once after the loop, that
+    was the previous run's list, mapped to the previous cut's slots, and
+    the location track went to full level on the wrong shots."""
+    cfg = _cfg(tmp_path)
+    _seed(cfg).close()
+    stale = [{"t_in": 1.0, "t_out": 2.0, "slot_index": 0}]
+    cfg.work("reports", "s05_cut.json").write_text(json.dumps({"timeline": {"natural_windows": stale}}))
+    rep = s05_cut.run(cfg, redo={"timeline", "cues"})
+    assert rep["timeline"]["natural_windows"] != stale
+    assert rep["cues"]["natural_windows"] == rep["timeline"]["natural_windows"]
+    on_disk = json.loads(cfg.work("reports", "s05_cut.json").read_text())
+    assert on_disk["cues"]["natural_windows"] == rep["timeline"]["natural_windows"] and on_disk["finished_utc"]
+    assert not list(cfg.work_root.joinpath("reports").glob("*.tmp"))

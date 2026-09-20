@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import math
 from typing import Any, Mapping, Sequence
 
 from nepal.story.anchors import Anchor
+
+log = logging.getLogger(__name__)
 
 # Every row carries every column: ``db.upsert`` takes the column list from
 # the first row, so a cue missing a key would silently drop that column for
@@ -41,12 +44,9 @@ def _cue(**fields: Any) -> dict[str, Any]:
 
 
 def _inside(t: float, spans: Sequence[tuple[float, float]]) -> bool:
-    return any(a <= t <= b for a, b in spans)
-
-
-def _touches(t0: float, t1: float, spans: Sequence[tuple[float, float]]) -> bool:
-    """Overlapping or abutting: the cue on either side of an edge shares it."""
-    return any(t0 <= b and t1 >= a for a, b in spans)
+    """On the edge counts as inside, within the rounding: the cue on either
+    side of a cut a window starts on shares that edge with the window."""
+    return any(a - _EDGE_TOL_S <= t <= b + _EDGE_TOL_S for a, b in spans)
 
 
 # -- speech ---------------------------------------------------------------
@@ -80,20 +80,30 @@ def place_speech(anchors: Sequence[Anchor], slots: Sequence[Mapping[str, Any]]) 
     with the picture rather than before the film. The offset is read only
     when the slot is on the anchor's recording -- another clip's ``src_in``
     is on another clock -- so a run the retime left all B-roll starts the
-    voice with its first cut. A beat with no run is absent from the result;
-    the caller says so."""
+    voice with its first cut. A run that begins before the beat's previous
+    cue has ended would put the line over itself; it is skipped with a
+    warning. A beat with no run is absent from the result; the caller says
+    so."""
     firsts: dict[str, list[Mapping[str, Any]]] = {}
     for beat, first, _ in _runs(slots):
         firsts.setdefault(beat, []).append(first)
     out: list[Anchor] = []
     for a in anchors:
+        heard_to = -math.inf
         for slot in firsts.get(a.beat_id, []):
+            p = a                       # each run trims from the anchor, never from the run before
             same_clip = slot.get("recording_id") == a.recording_id
             lead = a.src_in - float(slot["src_in"] or 0.0) if same_clip else 0.0
             if lead < 0:
-                a = dataclasses.replace(a, src_in=a.src_in - lead, duration_s=a.duration_s + lead)
+                p = dataclasses.replace(a, src_in=a.src_in - lead, duration_s=a.duration_s + lead)
                 lead = 0.0
-            out.append(dataclasses.replace(a, t_in=float(slot["t_in"]) + lead))
+            t_in = float(slot["t_in"]) + lead
+            if t_in < heard_to - _EDGE_TOL_S:
+                log.warning("speech beat %s: its run at %.3fs starts before its previous cue ends at "
+                            "%.3fs; that run gets no cue", a.beat_id, t_in, heard_to)
+                continue
+            out.append(dataclasses.replace(p, t_in=t_in))
+            heard_to = t_in + p.duration_s
     return out
 
 
@@ -134,9 +144,10 @@ def location_cues(slots: Sequence[Mapping[str, Any]], *, lufs_under_music: float
     (``t_start``/``t_end``); inside either the location sound is the mix.
 
     A slot's level is read at its centre, so a window that cuts a slot
-    claims it by the larger part rather than by a frame at the edge; every
-    cue that overlaps or abuts a window takes the window fade at both ends,
-    so the rise into full sound is one fade on each side of the cut.
+    claims it by the larger part rather than by a frame at the edge; each
+    edge of a cue that lies in a window takes the window fade, the other
+    edge the cut fade, so the rise into full sound is one fade on each side
+    of the cut and a cue half in a window still cuts sharp at its far end.
     """
     full = [(float(w["t_in"]), float(w["t_out"])) for w in windows]
     if silence:
@@ -164,10 +175,10 @@ def location_cues(slots: Sequence[Mapping[str, Any]], *, lufs_under_music: float
             gain = lufs_under_speech
         else:
             gain = lufs_under_music
-        fade = window_fade_s if _touches(t0, t1, full) else fade_s
         out.append(_cue(cue_id=f"lo_{s['slot_index']}", track="location", t_in=t0, t_out=t1,
                         source=held[0], src_in=src_in, src_out=src_out, gain_lufs=gain,
-                        fade_in_s=fade, fade_out_s=fade))
+                        fade_in_s=window_fade_s if _inside(t0, full) else fade_s,
+                        fade_out_s=window_fade_s if _inside(t1, full) else fade_s))
     return out
 
 
