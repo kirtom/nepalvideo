@@ -295,6 +295,13 @@ def _fill_gap(cfg: Config, cands: Sequence[Mapping[str, Any]], *, act: int, t0: 
                             lam=float(cfg.get("assemble.mmr_lambda")),
                             admissible=admissible, prefer=prefer)
     taken = {c["shot_id"] for c in chosen}
+    if log.isEnabledFor(logging.DEBUG):
+        left = [c for c in cands if c["shot_id"] not in taken]
+        refused = {"photo_rule": sum(1 for c in left if _is_photo(c) and (_is_photo(chosen[-1]) if chosen else prev_photo)),
+                   "place_cap": sum(1 for c in left if not asm.place_count_ok(c, list(existing) + list(chosen), limit=place_cap)),
+                   "recording_run": sum(1 for c in left if not asm.recording_run_ok(c, list(chosen), limit=run_cap))}
+        log.debug("S06 act %d fill %.1f-%.1fs: budget %d, %d candidate(s), chose %d, %d left of which "
+                  "refused %s", act, t0, t1, budget, len(cands), len(chosen), len(left), refused)
     chosen = asm.source_share_repair(chosen, [c for c in cands if c["shot_id"] not in taken],
                                      min_share=float(cfg.get("assemble.source_share_min")))
     ordered = _no_adjacent_photos(asm.chronological(chosen), prev_photo=prev_photo,
@@ -468,7 +475,11 @@ def plan_act(cfg: Config, act: int, act_rows: Sequence[Mapping[str, Any]],
                            prev_photo=prev_photo, next_photo=False)
         slots.extend(filled)
         used.update(s["shot_id"] for s in filled)
-    return _close_holes(_resolve_overlaps(slots), t0), [a for a in anchors if a.beat_id not in fixed]
+    out = _close_holes(_resolve_overlaps(slots), t0)
+    log.info("S06 act %d plan: %d anchor(s) (%d fixed), pool %d of %d rows, %d slot(s) covering "
+             "%.1fs of %.1fs planned", act, len(anchors), len(fixed), len(pool), len(act_rows),
+             len(out), (float(out[-1]["t_out"]) - t0) if out else 0.0, act_len_s)
+    return out, [a for a in anchors if a.beat_id not in fixed]
 
 
 def _anchor_slots(cfg: Config, a: anchors_mod.Anchor, pool: Sequence[Mapping[str, Any]],
@@ -785,9 +796,17 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
                 held_shot_s=cfg.get("assemble.act4_held_shot_s"), silence_t=silence_t,
                 shots=shots_by_id))
 
+        log.info("S06 act %d rhythm: %d section(s) %.1f-%.1fs, grid %d beat(s) to %.1fs, planned "
+                 "%.1f-%.1fs", act, len(sections), sections[0]["t_in"], sections[-1]["t_out"],
+                 len(grid), max(grid, default=act_t0), act_t0, act_t1)
         for round_no in range(max_loops + 1):
+            before = len(slots)
             slots = retimed(slots)
             gaps = _gaps(slots, act_t0, act_t1, min_len=rng[0])
+            log.info("S06 act %d round %d: retime kept %d of %d slot(s), end %.1fs of %.1fs, "
+                     "%d gap(s) totalling %.1fs", act, round_no, len(slots), before,
+                     float(slots[-1]["t_out"]) if slots else act_t0, act_t1, len(gaps),
+                     sum(g1 - g0 for g0, g1, _ in gaps))
             if not gaps or round_no == max_loops:
                 break
             on_screen = {x for s in slots + act0
@@ -799,14 +818,21 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
                 nxt = slots[idx] if idx < len(slots) else None
                 lo, hi = _utc_window(prev, nxt, shots_by_id, act_span_utc.get(act, (None, None)))
                 taken = on_screen | {s["shot_id"] for s in added}
-                cands = [r for r in act_rows if r["shot_id"] not in taken
-                         and r.get("recording_id") not in excluded
-                         and (not _is_photo(r) or r["shot_id"] in allowed_photos)
-                         and _in_window(r, lo, hi)]
-                added += _fill_gap(cfg, cands, act=act, t0=g0, t1=g1, similarity=similarity,
+                free = [r for r in act_rows if r["shot_id"] not in taken
+                        and r.get("recording_id") not in excluded
+                        and (not _is_photo(r) or r["shot_id"] in allowed_photos)]
+                cands = [r for r in free if _in_window(r, lo, hi)]
+                filled = _fill_gap(cfg, cands, act=act, t0=g0, t1=g1, similarity=similarity,
                                    existing=existing + [shots_by_id[s["shot_id"]] for s in added],
                                    prev_photo=bool(prev and prev.get("kind") == "photo"),
                                    next_photo=bool(nxt and nxt.get("kind") == "photo"))
+                log.debug("S06 act %d round %d gap %.1f-%.1fs (%.1fs): utc window %s..%s, "
+                          "%d of %d free row(s) inside, %d slot(s) laid to %.1fs", act, round_no,
+                          g0, g1, g1 - g0, lo, hi, len(cands), len(free), len(filled),
+                          float(filled[-1]["t_out"]) if filled else g0)
+                added += filled
+            log.info("S06 act %d round %d: %d slot(s) added for %d gap(s)", act, round_no,
+                     len(added), len(gaps))
             if not added:
                 break
             slots = _resolve_overlaps(slots + added)
@@ -821,6 +847,8 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         final[act] = slots
         end = float(slots[-1]["t_out"]) if slots else act_t0
         final_spans[act] = (act_t0, end)
+        log.info("S06 act %d final: %d slot(s), %.1fs of %.1fs planned (%+.1fs)", act, len(slots),
+                 end - act_t0, act_len[act], end - act_t1)
         t = end
 
     # The map was built on the planned spans; only a real change of length
