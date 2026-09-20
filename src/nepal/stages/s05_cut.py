@@ -364,7 +364,15 @@ def _fill_gap(cfg: Config, free: Sequence[Mapping[str, Any]], *, act: int, t0: f
     act's plan lengths; the refill after the rhythm pass passes its own.
     """
     rng = _duration_range(cfg, act)
+    # A refill is laid at what a slot actually runs, not at plan length:
+    # budgeted at 2.5 s and laid at 3-8 s, a mid-act refill overran its gap
+    # two to three times, _resolve_overlaps dropped what started inside the
+    # locked anchor and kept what started after it, and a third of the
+    # picks chosen for the window before a line played after it. retime
+    # re-cuts the lengths anyway.
+    refill = budget is not None
     budget = asm.slot_budget(t1 - t0, rng) if budget is None else budget
+    lay_range = (float(cfg.get("assemble.expected_slot_s")),) * 2 if refill else rng
     cands, n_inside = _gap_candidates(free, lo, hi, budget=budget)
     place_cap = int(cfg.get("assemble.max_shots_per_place_per_act"))
     run_cap = int(cfg.get("assemble.max_consecutive_recording"))
@@ -376,7 +384,7 @@ def _fill_gap(cfg: Config, free: Sequence[Mapping[str, Any]], *, act: int, t0: f
     if log.isEnabledFor(logging.DEBUG):
         left = [c for c in cands if c["shot_id"] not in taken]
         refused = {"photo_rule": sum(1 for c in left if _is_photo(c) and (_is_photo(chosen[-1]) if chosen else prev_photo)),
-                   "place_cap": sum(1 for c in left if not asm.place_count_ok(c, list(existing) + list(chosen), limit=place_cap)),
+                   "over_cap": sum(1 for c in left if not asm.place_count_ok(c, list(existing) + list(chosen), limit=place_cap)),
                    "recording_run": sum(1 for c in left if not asm.recording_run_ok(c, list(chosen), limit=run_cap))}
         log.debug("S06 act %d fill %.1f-%.1fs: budget %d, %d candidate(s) of %d free (%d inside the "
                   "utc window, %d by distance), chose %d (%d by relaxing the place cap), %d left of "
@@ -386,7 +394,7 @@ def _fill_gap(cfg: Config, free: Sequence[Mapping[str, Any]], *, act: int, t0: f
                                      min_share=float(cfg.get("assemble.source_share_min")))
     ordered = _no_adjacent_photos(asm.chronological(chosen), prev_photo=prev_photo,
                                   next_photo=next_photo)
-    return asm.lay_out(ordered, start_s=t0, duration_range=rng, beats=[])
+    return asm.lay_out(ordered, start_s=t0, duration_range=lay_range, beats=[])
 
 
 def _resolve_overlaps(slots: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -986,8 +994,9 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     # by a slot. Dropped here, before scenes and windows index the list.
     empty = [s for s in ordered if float(s["t_out"]) <= float(s["t_in"])]
     if empty:
-        log.warning("S06 dropped %d zero-length slot(s) before the write, first act %s shot %s at %.3fs",
-                    len(empty), empty[0].get("act"), empty[0].get("shot_id"), float(empty[0]["t_in"]))
+        log.warning("S06 dropped %d zero-length slot(s) before the write, first act %s shot %s at %.3fs "
+                    "(locked %s)", len(empty), empty[0].get("act"), empty[0].get("shot_id"),
+                    float(empty[0]["t_in"]), bool(empty[0].get("locked")))
         ordered = [s for s in ordered if float(s["t_out"]) > float(s["t_in"])]
     if moved:
         scenes, mmap, mode, problems = _scenes_and_map(

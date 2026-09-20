@@ -8,6 +8,7 @@ the real stages write it, so the wiring is exercised at the boundary it will
 actually cross on the box.
 """
 import json
+import logging
 import math
 import subprocess
 import sys, pathlib
@@ -19,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 from nepal import db
 from nepal.config import Config
+from nepal.process import rhythm
 from nepal.stages import s05_cut
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -346,15 +348,19 @@ def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path)
     conn.close()
 
 
-def test_acts_reach_their_planned_length(tmp_path):
+def test_acts_reach_their_planned_length(tmp_path, caplog):
     """Film time is laid over an act's UTC span proportionally and the seed's
     footage, like the corpus, clumps on a few hours of a days-long span; a
     gap whose window held nothing added nothing, and every act ended where
     its material stopped. A gap now takes the nearest footage by time, so
-    the acts run to the length the film allotted them."""
+    the acts run to the length the film allotted them -- and nothing of zero
+    length is dropped on the way to the table, which the write-path guard
+    would otherwise hide."""
     cfg = _cfg(tmp_path)
     conn = _seed(cfg)
-    rep = s05_cut.build_timeline(cfg, conn)
+    with caplog.at_level(logging.WARNING, logger="nepal.stages.s05_cut"):
+        rep = s05_cut.build_timeline(cfg, conn)
+    assert not [r.getMessage() for r in caplog.records if "zero-length" in r.getMessage()]
     tol = float(cfg.get("film.duration_tolerance_s"))
     for act, (start, end) in rep["act_spans"].items():
         planned = rep["act_planned_s"][act]
@@ -378,6 +384,52 @@ def test_material_bounds_an_act_band_but_never_below_its_floor(tmp_path):
     assert material[2] == pytest.approx(100.0) and material[4] == pytest.approx(10.0 / 0.9)
     assert [(b["act"], b["min_s"]) for b in bounded] == [(2, 50), (4, 90)]
     assert bounded[0]["max_s"] == pytest.approx(100.0) and bounded[1]["max_s"] == 90.0
+
+
+def test_a_refill_is_laid_at_what_a_slot_runs_and_stays_inside_its_gap(tmp_path):
+    """Budgeted at 2.5 s a slot and laid at the act's 5-8 s plan lengths, a
+    mid-act refill overran its gap two to three times; what started inside
+    the locked anchor was dropped and what started after it played after
+    the line it was chosen to precede. With a budget given, the refill is
+    laid at expected_slot_s and ends within one slot of its gap."""
+    cfg = _cfg(tmp_path)
+    per = float(cfg.get("assemble.expected_slot_s"))
+    day = datetime(2024, 5, 8, 8, tzinfo=timezone.utc)
+    free = [{"shot_id": f"s{i}", "recording_id": f"r{i}", "act": 5, "media_kind": "video", "source": "camera",
+             "start_s": 0.0, "end_s": 12.0, "score_total": 0.9, "place_name": None,
+             "start_utc": _iso(day + timedelta(minutes=i))} for i in range(12)]
+    t0, t1 = 100.0, 125.0
+    laid = s05_cut._fill_gap(cfg, free, act=5, t0=t0, t1=t1, lo=None, hi=None, similarity=lambda a, b: 0.0,
+                             existing=[], prev_photo=False, next_photo=False,
+                             budget=s05_cut._refill_budget(t1 - t0, per))
+    assert len(laid) == 10 and laid[0]["t_in"] == t0
+    assert all(s["t_out"] - s["t_in"] == pytest.approx(per) for s in laid)
+    assert laid[-1]["t_out"] <= t1 + per
+    # the plan's own gaps still lay at plan length
+    planned = s05_cut._fill_gap(cfg, free, act=5, t0=t0, t1=t1, lo=None, hi=None, similarity=lambda a, b: 0.0,
+                                existing=[], prev_photo=False, next_photo=False)
+    assert all(s["t_out"] - s["t_in"] >= cfg.get("assemble.shot_duration_s")[5][0] for s in planned)
+
+
+def test_a_grid_rounded_to_the_timeline_lets_the_walk_pass_its_last_beat(tmp_path):
+    """The map's beats are three-decimal and build_timeline rounds them
+    again after adding the act's shift: added in float, the grid's last beat
+    sat at the walk's own t_in plus 1e-11, retime took it as after t_in, and
+    every slot from there rounded onto it at zero length. Rounded, a beat at
+    t_in is equal to it and the unsnapped band length stands."""
+    cfg = _cfg(tmp_path)
+    t_in = 743.886
+    last_beat = t_in + 1e-11                       # the grid ends here; the act does not
+    assert last_beat > t_in and round(last_beat, 3) == t_in
+    shot = {"shot_id": "x", "media_kind": "video", "start_s": 0.0, "end_s": 6.5}
+    slot = s05_cut._set_length(s05_cut._new_slot(kind="video", act=5, shot_id="x", src_in=0.0), t_in, t_in + 5.0)
+    grid = [round(last_beat, 3)]
+    out = rhythm.retime([slot], sections=[{"t_in": 700.0, "t_out": 800.0, "energy": 0.5}],
+                        beats=grid, downbeats=grid, table=cfg.get("assemble.rhythm"), burst_slots=(0, 0),
+                        is_act4=False, held_shot_s=cfg.get("assemble.act4_held_shot_s"), silence_t=None,
+                        shots={"x": shot})
+    mid = sum(cfg.get("assemble.rhythm")["mid"]) / 2          # one section ranks mid; no beat to snap to
+    assert len(out) == 1 and out[0]["t_out"] - out[0]["t_in"] == pytest.approx(mid)
 
 
 def test_refill_budget_is_the_gap_at_what_a_slot_actually_runs():
