@@ -49,7 +49,7 @@ def to_otio(rows: Sequence[Mapping[str, Any]], *, name: str = "nepal",
                                               "rate": fps,
                                               "value": _frames(t_in - prev_end, fps)}}})
         clips.append({
-            "OTIO_SCHEMA": "Clip.1", "name": str(r["shot_id"]),
+            "OTIO_SCHEMA": "Clip.1", "name": str(r.get("shot_id") or r.get("kind")),
             "source_range": {
                 "OTIO_SCHEMA": "TimeRange.1",
                 "start_time": {"OTIO_SCHEMA": "RationalTime.1", "rate": fps,
@@ -79,7 +79,7 @@ def to_fcpxml(rows: Sequence[Mapping[str, Any]], *, media_dir: str,
 
     assets: dict[str, str] = {}
     for r in rows:
-        key = str(r.get("source") or r["shot_id"])
+        key = str(r.get("source") or r.get("shot_id") or r.get("kind"))
         if key in assets:
             continue
         aid = f"a{len(assets) + 1}"
@@ -98,9 +98,10 @@ def to_fcpxml(rows: Sequence[Mapping[str, Any]], *, media_dir: str,
                              tcStart="0s", tcFormat="NDF")
     spine = ET.SubElement(sequence, "spine")
     for r in rows:
-        key = str(r.get("source") or r["shot_id"])
+        # A v2 card slot has no shot: it is named and keyed by its kind.
+        key = str(r.get("source") or r.get("shot_id") or r.get("kind"))
         t_in, t_out = float(r["t_in"]), float(r["t_out"])
-        clip = ET.SubElement(spine, "asset-clip", name=str(r["shot_id"]),
+        clip = ET.SubElement(spine, "asset-clip", name=str(r.get("shot_id") or r.get("kind")),
                              ref=assets[key], offset=fcp_time(t_in, fps),
                              start=fcp_time(r.get("src_in") or 0.0, fps),
                              duration=fcp_time(t_out - t_in, fps))

@@ -16,10 +16,12 @@ def _seed(tmp_path):
                      [("a", "k1", "phone_keller", "photo", "2024-05-01T00:00:00+00:00"),
                       ("b", "k2", "camera", "video360", None)])
     conn.execute("INSERT INTO recordings(recording_id, source, is_360) VALUES ('r', 'camera', 1)")
-    conn.executemany("INSERT INTO shots(shot_id, recording_id, media_kind, start_s, end_s, status) "
-                     "VALUES (?,?,?,?,?,?)",
-                     [("r#0", "r", "video", 0, 5, "shortlisted"),
-                      ("r#1", "r", "video", 5, 9, "rejected")])
+    conn.executemany("INSERT INTO shots(shot_id, recording_id, asset_id, media_kind, start_s, end_s, "
+                     "act, status) VALUES (?,?,?,?,?,?,?,?)",
+                     [("r#0", "r", None, "video", 0, 5, 3, "shortlisted"),
+                      ("r#1", "r", None, "video", 5, 9, 3, "rejected"),
+                      ("r#2", "r", None, "video", 9, 14, 3, "candidate"),
+                      ("photo_a", None, "a", "photo", 0, 4, 3, "shortlisted")])
     conn.execute("INSERT INTO timeline(slot_index, act, kind, shot_id, t_in, t_out) "
                  "VALUES (0, 3, 'video', 'r#0', 0, 4.5)")
     db.mark_unit(conn, "S03", "faces", detail="x")
@@ -38,8 +40,12 @@ def test_build_status_reads_everything_from_the_database_and_the_reports(tmp_pat
     conn, led, reports = _seed(tmp_path)
     st = status.build_status(conn, led, reports,
                              now=datetime(2026, 9, 18, 6, tzinfo=timezone.utc))
-    assert st["counts"] == {"assets": 2, "dated_assets": 1, "recordings": 1, "shots": 2,
-                            "surviving": 1, "shortlisted": 1, "slots": 1, "timeline_s": 4.5}
+    assert st["counts"] == {"assets": 2, "dated_assets": 1, "recordings": 1, "shots": 4,
+                            "surviving": 3, "shortlisted": 2, "slots": 1, "timeline_s": 4.5}
+    # per act, per source: what the cut took against what survived -- the
+    # rejected shot is not material, the photo counts under its asset's source
+    assert st["per_act_sources"] == {"3": {"camera": {"slots": 1, "available": 2},
+                                           "phone_keller": {"slots": 0, "available": 1}}}
     assert {s["unit"] for s in st["stages"]} == {"faces", "place"}
     assert st["latest_stage"]["unit"] in ("faces", "place")
     assert st["spend"]["total_usd"] == 0.42 and st["spend"]["entries"][-1]["what"] == "gce:cpu"
@@ -55,6 +61,9 @@ def test_render_html_is_self_contained_and_names_the_stage(tmp_path):
     page = status.render_html(status.build_status(conn, led, reports))
     assert page.startswith("<!doctype html>") and "<script" not in page
     assert "place" in page and "0.42" in page and "S03.6 faces 10/10" in page
+    assert "<h2>sources per act</h2>" in page
+    assert "<td>3</td><td>camera</td><td>1</td><td>2</td><td>100%</td>" in page
+    assert "<td>3</td><td>phone_keller</td><td>0</td><td>1</td><td>0%</td>" in page
 
 
 def test_write_status_writes_both_files(tmp_path):

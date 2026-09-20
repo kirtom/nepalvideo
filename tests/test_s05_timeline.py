@@ -1,0 +1,311 @@
+"""The timeline v2 end to end on a seeded database: no media, the real config.
+
+Thirty-odd shots from three sources over five acts, two phones filming the
+same minute in portrait, a camera recording that mentions the bridge, three
+story beats, two tracks with sections and a beat grid, act boundaries and a
+short GPS track -- everything ``build_timeline`` reads, seeded the way the
+real stages write it, so the wiring is exercised at the boundary it will
+actually cross on the box.
+"""
+import json
+import math
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+
+from datetime import datetime, timedelta, timezone
+
+from nepal import db
+from nepal.config import Config
+from nepal.stages import s05_cut
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+PHONES = ("phone_keller", "phone_kulikov")
+
+
+def _cfg(tmp_path):
+    real = Config.load(ROOT / "config" / "pipeline.yaml")
+    data = dict(real._data)
+    data["project"] = {"data_root": str(tmp_path / "data"), "work_root": str(tmp_path / "work"),
+                       "db_path": str(tmp_path / "work" / "db" / "n.sqlite")}
+    return Config(data, real.path)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+# One day per act in the trek, a long planning phase before and a return after.
+ACT_UTC = {
+    1: (datetime(2024, 2, 1, tzinfo=timezone.utc), datetime(2024, 4, 25, tzinfo=timezone.utc)),
+    2: (datetime(2024, 4, 26, tzinfo=timezone.utc), datetime(2024, 4, 30, tzinfo=timezone.utc)),
+    3: (datetime(2024, 4, 30, tzinfo=timezone.utc), datetime(2024, 5, 4, tzinfo=timezone.utc)),
+    4: (datetime(2024, 5, 4, tzinfo=timezone.utc), datetime(2024, 5, 5, tzinfo=timezone.utc)),
+    5: (datetime(2024, 5, 5, tzinfo=timezone.utc), datetime(2024, 5, 20, tzinfo=timezone.utc)),
+}
+
+
+def _seed(cfg):
+    cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = db.init(cfg.db_path)
+    recordings: list[tuple] = []
+    assets: list[tuple] = []
+    shots: list[dict] = []
+
+    def recording(rid, source, start, duration_s, *, portrait=False, is_360=None):
+        w, h = (1080, 1920) if portrait else (1920, 1080)
+        recordings.append((rid, source, int(is_360 if is_360 is not None else source == "camera"),
+                           _iso(start), duration_s, 1))
+        assets.append((f"a_{rid}", f"raw/{rid}.mp4", source, "video360" if source == "camera" else "video_flat",
+                       w, h, duration_s, _iso(start), rid, 0))
+
+    def shot(rid, idx, start_s, end_s, start, act, *, source_score=0.6, face=0, face_score=None,
+             transcript=None, place=None, levity=0, status="shortlisted", lat=None, lon=None, alt=None):
+        shots.append({"shot_id": f"{rid}#{idx:04d}", "recording_id": rid, "asset_id": None,
+                      "media_kind": "video", "start_s": start_s, "end_s": end_s,
+                      "start_utc": _iso(start + timedelta(seconds=start_s)), "act": act,
+                      "place_name": place, "score_total": source_score, "has_face": face,
+                      "face_score": face_score, "transcript": transcript, "tag_levity": levity,
+                      "status": status, "motion_mag": 0.2, "lat": lat, "lon": lon, "alt_dem_m": alt,
+                      "has_speech": int(bool(transcript))})
+
+    def photo(pid, source, when, act, score=0.7):
+        assets.append((pid, f"raw/{pid}.jpg", source, "photo", 3000, 4000, None, _iso(when), None, None))
+        shots.append({"shot_id": f"photo_{pid}", "recording_id": None, "asset_id": pid,
+                      "media_kind": "photo", "start_s": 0.0, "end_s": 4.0, "start_utc": _iso(when),
+                      "act": act, "place_name": None, "score_total": score, "has_face": 0,
+                      "face_score": None, "transcript": None, "tag_levity": 0, "status": "shortlisted",
+                      "motion_mag": None, "lat": None, "lon": None, "alt_dem_m": None, "has_speech": 0})
+
+    # -- act 1: planning, phones in the city ------------------------------
+    t = datetime(2024, 3, 10, 9, tzinfo=timezone.utc)
+    recording("k1", "phone_keller", t, 40)
+    shot("k1", 0, 0, 15, t, 1, place="Kathmandu", source_score=0.5)
+    shot("k1", 1, 15, 30, t, 1, place="Kathmandu", source_score=0.45)
+    recording("q1", "phone_kulikov", t + timedelta(days=2), 40)
+    shot("q1", 0, 0, 16, t + timedelta(days=2), 1, source_score=0.55)
+    shot("q1", 1, 16, 32, t + timedelta(days=2), 1, source_score=0.4)
+    photo("p1", "phone_keller", t + timedelta(days=5), 1)
+
+    # -- act 2: approach; the bridge recording lives here -----------------
+    t = datetime(2024, 4, 27, 4, tzinfo=timezone.utc)
+    recording("c2", "camera", t, 60)
+    shot("c2", 0, 0, 20, t, 2, face=1, face_score=0.8, transcript="Мы приехали, тут жарко",
+         source_score=0.8, place="Besisahar")
+    shot("c2", 1, 20, 40, t, 2, source_score=0.6, place="Besisahar")
+    shot("c2", 2, 40, 60, t, 2, source_score=0.5)
+    recording("rb", "camera", t + timedelta(hours=2), 150)      # the bridge, 150 s of it
+    for i in range(7):
+        shot("rb", i, i * 20, min(150, (i + 1) * 20), t + timedelta(hours=2), 2, source_score=0.5,
+             transcript="идём по мосту" if i == 0 else None, place="Bhulbhule")
+    recording("c2b", "camera", t + timedelta(minutes=20), 40)      # B-roll for the arrival
+    shot("c2b", 0, 0, 20, t + timedelta(minutes=20), 2, source_score=0.55, place="Besisahar")
+    shot("c2b", 1, 20, 40, t + timedelta(minutes=20), 2, source_score=0.45)
+    recording("k2", "phone_keller", t + timedelta(hours=4), 40)
+    shot("k2", 0, 0, 18, t + timedelta(hours=4), 2, source_score=0.65, levity=1)
+    shot("k2", 1, 18, 36, t + timedelta(hours=4), 2, source_score=0.5)
+    recording("q2", "phone_kulikov", t + timedelta(hours=5), 40)
+    shot("q2", 0, 0, 18, t + timedelta(hours=5), 2, source_score=0.6)
+    shot("q2", 1, 18, 36, t + timedelta(hours=5), 2, source_score=0.55)
+    # two stills a minute apart: never both on screen back to back
+    photo("p2a", "phone_keller", t + timedelta(hours=6), 2, score=0.9)
+    photo("p2b", "phone_keller", t + timedelta(hours=6, minutes=1), 2, score=0.85)
+
+    # -- act 3: climb; the walking beat and the portrait pair --------------
+    t = datetime(2024, 5, 1, 3, tzinfo=timezone.utc)
+    recording("w3", "camera", t, 40)
+    shot("w3", 0, 0, 20, t, 3, face=0, face_score=0.1, transcript="Я вот на этом курумнике прям сдох",
+         source_score=0.9, place="Chame", lat=28.55, lon=84.24, alt=2700)
+    shot("w3", 1, 20, 40, t, 3, source_score=0.6, place="Chame")
+    recording("k3", "phone_keller", t + timedelta(minutes=30), 60, portrait=True)
+    shot("k3", 0, 0, 60, t + timedelta(minutes=30), 3, source_score=0.7, face=1)
+    recording("q3", "phone_kulikov", t + timedelta(minutes=30, seconds=20), 60, portrait=True)
+    shot("q3", 0, 0, 60, t + timedelta(minutes=30, seconds=20), 3, source_score=0.75, face=1)
+    recording("k3b", "phone_keller", t + timedelta(hours=1), 40)
+    shot("k3b", 0, 0, 18, t + timedelta(hours=1), 3, source_score=0.6, levity=1)
+    shot("k3b", 1, 18, 36, t + timedelta(hours=1), 3, source_score=0.5)
+    recording("q3b", "phone_kulikov", t + timedelta(hours=2), 40)
+    shot("q3b", 0, 0, 18, t + timedelta(hours=2), 3, source_score=0.62)
+    shot("q3b", 1, 18, 36, t + timedelta(hours=2), 3, source_score=0.48)
+    recording("c3", "camera", t + timedelta(hours=3), 40)
+    shot("c3", 0, 0, 20, t + timedelta(hours=3), 3, source_score=0.7, place="Pisang")
+    shot("c3", 1, 20, 40, t + timedelta(hours=3), 3, source_score=0.3, status="candidate")
+    shot("c3", 2, 40, 40.5, t + timedelta(hours=3), 3, source_score=0.99, status="rejected")
+    photo("p3", "phone_kulikov", t + timedelta(hours=4), 3)
+
+    # -- act 4: the pass; the cold open comes from here --------------------
+    t = datetime(2024, 5, 4, 1, tzinfo=timezone.utc)
+    recording("c4", "camera", t, 40)
+    shot("c4", 0, 0, 20, t, 4, face=1, face_score=0.7, transcript="Перевал. Пять тысяч сто.",
+         source_score=0.95, alt=5100, lat=28.79, lon=83.93)
+    shot("c4", 1, 20, 40, t, 4, source_score=0.7, alt=5100)
+    recording("k4", "phone_keller", t + timedelta(minutes=10), 40)
+    shot("k4", 0, 0, 18, t + timedelta(minutes=10), 4, source_score=0.6, levity=1)
+    shot("k4", 1, 18, 36, t + timedelta(minutes=10), 4, source_score=0.5)
+    recording("q4", "phone_kulikov", t + timedelta(minutes=20), 40)
+    shot("q4", 0, 0, 18, t + timedelta(minutes=20), 4, source_score=0.65)
+    shot("q4", 1, 18, 36, t + timedelta(minutes=20), 4, source_score=0.55)
+
+    # -- act 5: the way down and home --------------------------------------
+    t = datetime(2024, 5, 8, 6, tzinfo=timezone.utc)
+    recording("c5", "camera", t, 40)
+    shot("c5", 0, 0, 20, t, 5, source_score=0.6, place="Jomsom")
+    shot("c5", 1, 20, 40, t, 5, source_score=0.5, place="Jomsom")
+    recording("k5", "phone_keller", t + timedelta(days=1), 40)
+    shot("k5", 0, 0, 18, t + timedelta(days=1), 5, source_score=0.6, place="Pokhara")
+    shot("k5", 1, 18, 36, t + timedelta(days=1), 5, source_score=0.5, place="Pokhara")
+    recording("q5", "phone_kulikov", t + timedelta(days=2), 40)
+    shot("q5", 0, 0, 18, t + timedelta(days=2), 5, source_score=0.55, levity=1, place="Kathmandu")
+    shot("q5", 1, 18, 36, t + timedelta(days=2), 5, source_score=0.45, place="Kathmandu")
+    photo("p5", "phone_kulikov", t + timedelta(days=3), 5)
+
+    conn.executemany("INSERT INTO recordings(recording_id, source, is_360, start_utc, duration_s, "
+                     "asset_count) VALUES (?,?,?,?,?,?)", recordings)
+    conn.executemany("INSERT INTO assets(asset_id, s3_key, source, kind, width, height, duration_s, "
+                     "created_at_utc, recording_id, chapter_index) VALUES (?,?,?,?,?,?,?,?,?,?)", assets)
+    db.upsert(conn, "shots", ["shot_id"], shots)
+
+    conn.execute("INSERT INTO messages(msg_id, ts_utc, author, text, phase) VALUES "
+                 "('m1', '2024-02-11T19:02:00+00:00', 'A', '20 км в день не проблема', 'planning')")
+    beats = [
+        ("b_arrive", "speech", 2, "c2#0000", None, 3.0, 9.0, "Мы приехали, тут жарко", 1, "none", 3),
+        ("b_walk", "speech", 3, "w3#0000", None, 2.0, 12.0, "Я вот на этом курумнике прям сдох", 0, "none", 2),
+        ("b_pass", "speech", 4, "c4#0000", None, 1.0, 8.0, "Перевал. Пять тысяч сто.", 0, "freeze", 1),
+        ("q_plan", "quote", 1, None, "m1", None, None, "20 км в день не проблема", 1, "none", 4),
+    ]
+    conn.executemany("INSERT INTO story_beats(beat_id, kind, act, shot_id, msg_id, src_in, src_out, "
+                     "text, levity, effect, rank) VALUES (?,?,?,?,?,?,?,?,?,?,?)", beats)
+
+    for tid, length, energies in (("t1", 180.0, (0.3, 0.35, 0.5, 0.55, 0.8, 0.7, 0.4, 0.3)),
+                                  ("t2", 200.0, (0.2, 0.3, 0.6, 0.65, 0.9, 0.75, 0.5, 0.35))):
+        conn.execute("INSERT INTO music_tracks(track_id, s3_key, title, duration_s, tempo_bpm, "
+                     "energy_mean, energy_p95, energy_p10, centroid, onset_rate, assigned_act) "
+                     "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                     (tid, f"music/{tid}.mp3", tid.upper(), length, 120.0, sum(energies) / len(energies),
+                      max(energies), min(energies), 2000.0, 2.0, None))
+        n = len(energies)
+        for i, e in enumerate(energies):
+            conn.execute("INSERT INTO music_sections(section_id, track_id, start_s, end_s, energy, "
+                         "is_swell) VALUES (?,?,?,?,?,?)",
+                         (f"{tid}_s{i}", tid, i * length / n, (i + 1) * length / n, e, int(e == max(energies))))
+        conn.executemany("INSERT INTO beats(track_id, t_s, is_downbeat) VALUES (?,?,?)",
+                         [(tid, b / 2.0, int(b % 4 == 0)) for b in range(int(length * 2))])
+
+    db.set_decision(conn, "act_boundaries", json.dumps(
+        [{"act": a, "start_utc": _iso(lo), "end_utc": _iso(hi), "method": "test"}
+         for a, (lo, hi) in ACT_UTC.items()]))
+
+    # A climb on the morning of the walking beat and a hard hour at the pass:
+    # fixes five minutes apart, moving at a walk, gaining height, pulse up.
+    pts = []
+    for day, hr, alt0 in ((datetime(2024, 5, 1, 2, 30, tzinfo=timezone.utc), 120, 2600),
+                          (datetime(2024, 5, 4, 0, 30, tzinfo=timezone.utc), 155, 4900)):
+        for i in range(24):
+            ts = day + timedelta(minutes=5 * i)
+            pts.append((_iso(ts), 28.5 + 0.001 * i, 84.2, alt0 + 25 * i, "strava", hr + i % 3, None, "act"))
+    conn.executemany("INSERT INTO gps_points(ts_utc, lat, lon, alt_dem_m, source, hr_bpm, alt_baro_m, "
+                     "activity_id) VALUES (?,?,?,?,?,?,?,?)", pts)
+    conn.commit()
+    return conn
+
+
+def _shots(conn):
+    return {r["shot_id"]: dict(r) for r in conn.execute("SELECT * FROM shots")}
+
+
+def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path):
+    cfg = _cfg(tmp_path)
+    conn = _seed(cfg)
+    rep = s05_cut.build_timeline(cfg, conn)
+
+    slots = [dict(r) for r in conn.execute("SELECT * FROM timeline ORDER BY slot_index")]
+    shots = _shots(conn)
+    recs = {r["recording_id"]: dict(r) for r in conn.execute("SELECT * FROM recordings")}
+    assert rep["n_slots"] == len(slots) > 10
+
+    # the cold open, then the card, before act 1 begins
+    assert slots[0]["kind"] == "video" and slots[0]["act"] == 0 and slots[0]["t_in"] == 0.0
+    assert slots[0]["beat_id"] == "b_pass" and rep["cold_open_beat"] == "b_pass"
+    assert 15.0 <= slots[0]["t_out"] - slots[0]["t_in"] <= 25.0
+    assert slots[1]["kind"] == "card" and slots[1]["act"] == 0
+    assert slots[1]["t_in"] == slots[0]["t_out"] and slots[1]["t_out"] - slots[1]["t_in"] == 3.0
+    assert all(s["act"] >= 1 for s in slots[2:])
+
+    # every speech beat has its slots; the walking beat stays on its own recording
+    for beat in ("b_arrive", "b_walk", "b_pass"):
+        assert any(s["beat_id"] == beat and s["act"] >= 1 for s in slots), beat
+    walk = [s for s in slots if s["beat_id"] == "b_walk"]
+    assert all(shots[s["shot_id"]]["recording_id"] == "w3" for s in walk)
+    assert any(shots[s["shot_id"]]["recording_id"] != "c2" for s in slots if s["beat_id"] == "b_arrive"), \
+        "the speaking beat cuts to B-roll after the face hold"
+
+    # the two phones at the same minute become one split slot
+    splits = [s for s in slots if s["secondary_shot_id"]]
+    assert splits and rep["n_pairs"] >= 1
+    for s in splits:
+        assert json.loads(s["motion"])["type"] == "split"
+        assert shots[s["shot_id"]]["recording_id"] != shots[s["secondary_shot_id"]]["recording_id"]
+        a, b = shots[s["shot_id"]], shots[s["secondary_shot_id"]]
+        assert {r["source"] for r in (recs[a["recording_id"]], recs[b["recording_id"]])} == set(PHONES)
+
+    # the bridge is one unbroken ninety-second take
+    assert rep["long_take"] == "rb"
+    take = [s for s in slots if s["shot_id"] and shots[s["shot_id"]]["recording_id"] == "rb"]
+    assert len(take) == 1 and math.isclose(take[0]["t_out"] - take[0]["t_in"], 90.0, abs_tol=1e-6)
+    assert take[0]["src_in"] == 0.0 and take[0]["src_out"] == 90.0
+
+    # each phone keeps a quarter of an act's phone slots wherever it had material
+    for act, sources in rep["per_act_sources"].items():
+        if int(act) < 1:
+            continue
+        phone_slots = sum(sources.get(p, {}).get("slots", 0) for p in PHONES)
+        for p in PHONES:
+            if sources.get(p, {}).get("available", 0) and phone_slots:
+                assert sources[p]["slots"] / phone_slots >= 0.25, (act, sources)
+
+    # scenes and music: the map is on disk, and not every segment starts a track
+    mmap = json.loads((cfg.work_root / "music" / "music_map.json").read_text())
+    segs = [seg for a in mmap["acts"] for seg in a["segments"]]
+    assert segs and any(seg["src_in"] != 0 for seg in segs)
+    assert rep["n_scenes"] >= 5 and rep["music_assignment"] == "scene"
+    assert all(s["scene_id"] is not None for s in slots)
+    assert {a["act"] for a in mmap["acts"]} == {0, 1, 2, 3, 4, 5}
+
+    # never two stills back to back
+    for prev, cur in zip(slots, slots[1:]):
+        assert not (prev["kind"] == "photo" and cur["kind"] == "photo"), (prev, cur)
+    assert any(s["kind"] == "photo" for s in slots)
+
+    # the timeline is monotone and never claims footage a shot does not have
+    for prev, cur in zip(slots, slots[1:]):
+        assert cur["t_in"] >= prev["t_in"] and cur["t_in"] >= prev["t_out"] - 1e-6
+    for s in slots:
+        assert s["t_out"] > s["t_in"], s
+        if s["kind"] != "video":
+            continue
+        shot = shots[s["shot_id"]]
+        length = s["t_out"] - s["t_in"]
+        if shot["recording_id"] == "rb":      # the take runs past its first shot by design
+            assert length <= recs["rb"]["duration_s"] - s["src_in"] + 1e-6
+        else:
+            assert length <= shot["end_s"] - s["src_in"] + 1e-6, s
+        assert math.isclose(s["src_out"] - s["src_in"], length, abs_tol=1e-3), s
+    assert "c3#0002" not in {s["shot_id"] for s in slots}          # rejected stays out
+    assert rep["duration_s"] == slots[-1]["t_out"]
+
+    # the natural-sound windows land on slots, and the files are written
+    assert isinstance(rep["natural_windows"], list)
+    for w in rep["natural_windows"]:
+        assert 0 <= w["slot_index"] < len(slots) and w["t_out"] > w["t_in"]
+    assert (cfg.work_root / "timeline.otio").exists() and (cfg.work_root / "timeline.fcpxml").exists()
+    assert set(rep["per_act"]) == {"0", "1", "2", "3", "4", "5"}
+    conn.close()
+
+
+def test_build_timeline_is_rebuilt_not_accumulated(tmp_path):
+    cfg = _cfg(tmp_path)
+    conn = _seed(cfg)
+    first = s05_cut.build_timeline(cfg, conn)
+    again = s05_cut.build_timeline(cfg, conn)
+    n = conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0]
+    assert n == first["n_slots"] == again["n_slots"]
+    conn.close()

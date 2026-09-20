@@ -425,6 +425,12 @@ assemble:
   chat_card_s: 4.0               # an Act 1 quote on screen
   closing_card_s: 6.0
   card_s: 3.0                    # the cold-open card
+  # Film v2 section 6: a scene in one of these places during Act 1 or 5 is
+  # "city", not trail, whatever its speed or altitude says -- Kathmandu sits
+  # at 1,400 m and Pokhara has people walking at trekking pace through it.
+  # Both spellings, because the gazetteer names places in Latin script and
+  # the operator's captions name them in Cyrillic; matched case-insensitively.
+  cities: [Kathmandu, Катманду, Pokhara, Покхара, Delhi, Дели]
 
 render:
   draft: {width: 960, height: 540, crf: 23}

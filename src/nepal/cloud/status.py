@@ -17,6 +17,29 @@ from typing import Any
 from nepal.cloud import spend
 
 
+SOURCE_JOIN = ("LEFT JOIN recordings rc ON rc.recording_id = s.recording_id "
+               "LEFT JOIN assets a ON a.asset_id = s.asset_id")
+
+
+def per_act_sources(conn) -> dict[str, dict[str, dict[str, int]]]:
+    """Per act, per source: how many slots the cut gives it against how many
+    surviving shots it had -- the number the operator asked to see, so a
+    phone that filmed half the day and got a tenth of the screen is visible
+    rather than felt. The source is the recording's for video and the
+    asset's for a photo, the same way S06 reads it."""
+    out: dict[str, dict[str, dict[str, int]]] = {}
+    for r in conn.execute(
+            "SELECT s.act, COALESCE(rc.source, a.source) AS source, COUNT(*) AS n FROM shots s "
+            f"{SOURCE_JOIN} WHERE s.status <> 'rejected' AND s.act IS NOT NULL GROUP BY 1, 2"):
+        out.setdefault(str(r["act"]), {})[str(r["source"])] = {"slots": 0, "available": int(r["n"])}
+    for r in conn.execute(
+            "SELECT t.act, COALESCE(rc.source, a.source) AS source, COUNT(*) AS n FROM timeline t "
+            f"JOIN shots s ON s.shot_id = t.shot_id {SOURCE_JOIN} GROUP BY 1, 2"):
+        cell = out.setdefault(str(r["act"]), {}).setdefault(str(r["source"]), {"slots": 0, "available": 0})
+        cell["slots"] = int(r["n"])
+    return out
+
+
 def build_status(conn, ledger: spend.Ledger, reports_dir: Path, *,
                  now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
@@ -60,6 +83,7 @@ def build_status(conn, ledger: spend.Ledger, reports_dir: Path, *,
     return {
         "generated_utc": now.isoformat(timespec="seconds"),
         "stages": stages, "latest_stage": latest, "counts": counts,
+        "per_act_sources": per_act_sources(conn),
         "spend": {"total_usd": round(ledger.total(), 2),
                   "entries": [e.__dict__ for e in ledger.entries[-5:]]},
         "last_report": last_report, "draft": draft_info, "remote_jobs_tail": tail,
@@ -80,6 +104,13 @@ def render_html(st: dict[str, Any]) -> str:
         f"<tr><td>{e(x['when'])}</td><td>{e(x['what'])}</td><td>{x['usd']:.2f}</td>"
         f"<td>{e(x.get('detail', ''))}</td></tr>" for x in st["spend"]["entries"])
     tail = e("\n".join(st["remote_jobs_tail"]))
+    source_rows = []
+    for act, sources in sorted(st.get("per_act_sources", {}).items(), key=lambda kv: int(kv[0])):
+        total = sum(v["slots"] for v in sources.values())
+        for src, v in sorted(sources.items()):
+            share = f"{v['slots'] / total * 100:.0f}%" if total else "-"
+            source_rows.append(f"<tr><td>{e(act)}</td><td>{e(src)}</td><td>{v['slots']}</td>"
+                               f"<td>{v['available']}</td><td>{share}</td></tr>")
     draft = st.get("draft")
     draft_txt = f"{draft['bytes'] / 1e6:.0f} MB, {draft['mtime']}" if draft else "none yet"
     rep = st.get("last_report") or {}
@@ -99,6 +130,8 @@ def render_html(st: dict[str, Any]) -> str:
         f"{e(str(rep.get('name')))} {e(str(rep.get('finished_utc')))}</p>\n"
         f"<h2>the funnel</h2><table>{rows(st['counts'].items())}</table>\n"
         f"<h2>spend</h2><p>total {st['spend']['total_usd']:.2f} USD</p><table>{spend_rows}</table>\n"
+        f"<h2>sources per act</h2><table><tr><th>act</th><th>source</th><th>slots</th>"
+        f"<th>available</th><th>share</th></tr>{''.join(source_rows)}</table>\n"
         f"<h2>stages</h2><table><tr><th>stage</th><th>unit</th><th>status</th><th>updated</th></tr>"
         f"{stages}</table>\n"
         f"<h2>last remote run</h2><pre>{tail}</pre>\n"
