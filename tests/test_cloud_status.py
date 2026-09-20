@@ -44,8 +44,10 @@ def test_build_status_reads_everything_from_the_database_and_the_reports(tmp_pat
                             "surviving": 3, "shortlisted": 2, "slots": 1, "timeline_s": 4.5}
     # per act, per source: what the cut took against what survived -- the
     # rejected shot is not material, the photo counts under its asset's source
-    assert st["per_act_sources"] == {"3": {"camera": {"slots": 1, "available": 2},
-                                           "phone_keller": {"slots": 0, "available": 1}}}
+    # and is told apart from the clips, which the share rule is about
+    assert st["per_act_sources"] == {
+        "3": {"camera": {"slots": 1, "available": 2, "videos": 2, "video_slots": 1},
+              "phone_keller": {"slots": 0, "available": 1, "videos": 0, "video_slots": 0}}}
     assert {s["unit"] for s in st["stages"]} == {"faces", "place"}
     assert st["latest_stage"]["unit"] in ("faces", "place")
     assert st["spend"]["total_usd"] == 0.42 and st["spend"]["entries"][-1]["what"] == "gce:cpu"

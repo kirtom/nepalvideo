@@ -756,8 +756,8 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
 
 
 def _rebalance_phones(slots: list[dict[str, Any]], act_rows: Sequence[Mapping[str, Any]],
-                      shots_by_id: Mapping[str, Mapping[str, Any]], *, act0: Sequence[Mapping[str, Any]],
-                      excluded: set, min_share: float,
+                      shots_by_id: Mapping[str, Mapping[str, Any]], *, act: int,
+                      act0: Sequence[Mapping[str, Any]], excluded: set, min_share: float,
                       phones: Sequence[str] = ("phone_keller", "phone_kulikov")) -> list[tuple[str, str]]:
     """Each phone's share of the act, after the refill rounds; the swaps
     made, old shot for new.
@@ -773,23 +773,42 @@ def _rebalance_phones(slots: list[dict[str, Any]], act_rows: Sequence[Mapping[st
     def source(shot_id):
         return (shots_by_id.get(shot_id) or {}).get("source")
 
-    available = {p: [r for r in act_rows if r.get("source") == p and not _is_photo(r)] for p in phones}
-    swaps: list[tuple[str, str]] = []
-    while True:
+    def state():
         phone_slots = [s for s in slots if s.get("kind") == "video" and source(s.get("shot_id")) in phones]
         counts = {p: sum(1 for s in phone_slots if source(s["shot_id"]) == p) for p in phones}
         starved = [p for p in phones if available[p] and phone_slots
                    and counts[p] / len(phone_slots) < min_share]
-        if not starved:
-            return swaps
-        p = min(starved, key=lambda q: counts[q])
-        ahead = max(phones, key=lambda q: counts[q])
         used = {x for s in list(slots) + list(act0) for x in (s.get("shot_id"), s.get("secondary_shot_id")) if x}
-        pool = [r for r in available[p] if r["shot_id"] not in used and r.get("recording_id") not in excluded]
+        pools = {p: [r for r in available[p] if r["shot_id"] not in used
+                     and r.get("recording_id") not in excluded] for p in starved}
+        ahead = max(phones, key=lambda q: counts[q])
         givers = sorted((s for s in slots if s.get("kind") == "video" and not s.get("locked")
                          and not s.get("beat_id") and not s.get("secondary_shot_id")
                          and source(s["shot_id"]) == ahead),
                         key=lambda s: float(shots_by_id[s["shot_id"]].get("score_total") or 0.0))
+        return phone_slots, counts, starved, pools, ahead, givers
+
+    def done():
+        # One line per act, whatever happened: the counts before, what each
+        # starved phone still had to give, and the swaps. "keller 42 of 226"
+        # on the dashboard was 34 of its 39 clips already on screen, the
+        # other five on a speech anchor's recording, and 187 stills.
+        phone_slots, counts, starved, pools, ahead, givers = first
+        log.info("S06 act %d phone share: %s of %d phone video slot(s), %s clips available, "
+                 "starved %s with pool %s, %d giver(s) from %s; %d swapped %s", act, counts,
+                 len(phone_slots), {p: len(available[p]) for p in phones}, starved,
+                 {p: len(pools[p]) for p in starved}, len(givers), ahead, len(swaps), swaps)
+        return swaps
+
+    available = {p: [r for r in act_rows if r.get("source") == p and not _is_photo(r)] for p in phones}
+    first = state()
+    phone_slots, counts, starved, pools, ahead, givers = first
+    swaps: list[tuple[str, str]] = []
+    while True:
+        if not starved:
+            return done()
+        p = min(starved, key=lambda q: counts[q])
+        pool = pools[p]
         swapped = False
         for s in givers:
             length = float(s["t_out"]) - float(s["t_in"])
@@ -805,7 +824,8 @@ def _rebalance_phones(slots: list[dict[str, Any]], act_rows: Sequence[Mapping[st
             swapped = True
             break
         if not swapped:
-            return swaps
+            return done()
+        phone_slots, counts, starved, pools, ahead, givers = state()
 
 
 def _material_bound(cfg: Config, specs: Sequence[Mapping[str, Any]], rows: Sequence[Mapping[str, Any]]
@@ -1022,10 +1042,8 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
             if not added:
                 break
             slots = _resolve_overlaps(slots + added)
-        swaps = _rebalance_phones(slots, act_rows, shots_by_id, act0=act0, excluded=excluded,
-                                  min_share=float(cfg.get("assemble.source_share_min")))
-        if swaps:
-            log.info("S06 act %d phone share: %d slot(s) swapped %s", act, len(swaps), swaps)
+        _rebalance_phones(slots, act_rows, shots_by_id, act=act, act0=act0, excluded=excluded,
+                          min_share=float(cfg.get("assemble.source_share_min")))
         # What the material could not fill is closed, and the cuts re-snapped
         # to the grid from where they now sit.
         slots = _close_holes(retimed(_close_holes(slots, act_t0)), act_t0)

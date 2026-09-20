@@ -450,17 +450,29 @@ def per_act_sources(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, i
     surviving shots it had -- the number the operator asked to see, so a
     phone that filmed half the day and got a tenth of the screen is visible
     rather than felt. The source is the recording's for video and the
-    asset's for a photo, the same way S06 reads it."""
+    asset's for a photo, the same way S06 reads it.
+
+    ``videos`` and ``video_slots`` count the clips apart from the stills:
+    "keller 42 of 226" in Act 3 read as a phone starved of screen time
+    until the clips were counted alone -- 34 of its 39, the rest on a
+    speech anchor's recording, and 187 of the 226 were stills, which only
+    the photo budget admits. The share rule is about clips, and a ratio
+    that lumps the two cannot say whether it holds or what it costs.
+    """
+    empty = {"slots": 0, "available": 0, "videos": 0, "video_slots": 0}
     out: dict[str, dict[str, dict[str, int]]] = {}
     for r in conn.execute(
-            "SELECT s.act, COALESCE(rc.source, a.source) AS source, COUNT(*) AS n FROM shots s "
+            "SELECT s.act, COALESCE(rc.source, a.source) AS source, COUNT(*) AS n, "
+            "SUM(s.media_kind = 'video') AS v FROM shots s "
             f"{_SOURCE_JOIN} WHERE s.status <> 'rejected' AND s.act IS NOT NULL GROUP BY 1, 2"):
-        out.setdefault(str(r["act"]), {})[str(r["source"])] = {"slots": 0, "available": int(r["n"])}
+        out.setdefault(str(r["act"]), {})[str(r["source"])] = {
+            **empty, "available": int(r["n"]), "videos": int(r["v"] or 0)}
     for r in conn.execute(
-            "SELECT t.act, COALESCE(rc.source, a.source) AS source, COUNT(*) AS n FROM timeline t "
+            "SELECT t.act, COALESCE(rc.source, a.source) AS source, COUNT(*) AS n, "
+            "SUM(t.kind = 'video') AS v FROM timeline t "
             f"JOIN shots s ON s.shot_id = t.shot_id {_SOURCE_JOIN} GROUP BY 1, 2"):
-        cell = out.setdefault(str(r["act"]), {}).setdefault(str(r["source"]), {"slots": 0, "available": 0})
-        cell["slots"] = int(r["n"])
+        cell = out.setdefault(str(r["act"]), {}).setdefault(str(r["source"]), dict(empty))
+        cell["slots"], cell["video_slots"] = int(r["n"]), int(r["v"] or 0)
     return out
 
 
