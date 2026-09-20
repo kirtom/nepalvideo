@@ -1,4 +1,5 @@
 """S07 -- the draft render command, and one real render at the boundary."""
+import json
 import shutil
 import subprocess
 import sys, pathlib
@@ -188,6 +189,68 @@ def test_ffmpeg_renders_a_cut_of_the_expected_length(tmp_path):
     assert "width=960" in probe and "height=540" in probe
     dur = float([l for l in probe.splitlines() if l.startswith("duration=")][0].split("=")[1])
     assert dur == pytest.approx(7.0, abs=0.3), f"expected 7 s of cut, got {dur}"
+
+
+# -- the card and split slots (Film v2 step 4) --------------------------
+
+@pytest.mark.skipif(not render.has_drawtext(), reason="ffmpeg has no drawtext")
+def test_a_card_row_becomes_a_black_frame_with_its_caption():
+    """A card slot (the cold-open title) has no shot behind it -- the inner
+    join in render_draft used to drop it, shortening the draft by exactly
+    its length. It must still take a slot in the concat, at its own length,
+    with its caption escaped like any other drawtext."""
+    row = {"kind": "card", "t_in": 0.0, "t_out": 2.5,
+           "motion": json.dumps({"type": "card", "text": "Nepal: the trek"})}
+    cmd = render.build_command([row], sources={}, out_path=pathlib.Path("/o.mp4"))
+    assert cmd.count("-i") == 1
+    i = cmd.index("-i")
+    assert cmd[i - 2:i] == ["-f", "lavfi"], "no file backs a card -- lavfi synthesises it"
+    assert "color=" in cmd[i + 1] and "d=2.500" in cmd[i + 1]
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert r"drawtext=text='Nepal\: the trek'" in fc, "the caption is escaped, not passed through raw"
+
+
+def test_a_card_without_drawtext_is_plain_black(monkeypatch):
+    """Same tradeoff as the shot overlay: no libfreetype means no caption,
+    not a failed render -- the card still holds its length as plain black."""
+    monkeypatch.setattr(render, "has_drawtext", lambda **kw: False)
+    row = {"kind": "card", "t_in": 0.0, "t_out": 1.0,
+           "motion": json.dumps({"type": "card", "text": "Nepal"})}
+    f = render.segment_filters(row, 0)
+    assert "drawtext" not in f
+    cmd = render.build_command([row], sources={}, out_path=pathlib.Path("/o.mp4"))
+    assert "drawtext" not in " ".join(cmd)
+
+
+def test_a_split_slot_renders_its_primary_only():
+    """pairs.find_pairs (src/nepal/process/pairs.py:119-132) writes the
+    primary's own shot_id/src_in onto the slot; secondary_shot_id and
+    secondary_src_in describe the other phone's clip for a future
+    split-screen render, and must not be read as a second source now."""
+    row = {"shot_id": "a#0001", "t_in": 0.0, "t_out": 3.0, "src_in": 5.0,
+           "secondary_shot_id": "z#9999", "secondary_src_in": 1.0,
+           "motion": json.dumps({"type": "split"})}
+    cmd = render.build_command([row], sources={"a#0001": pathlib.Path("/m/a.mp4")},
+                               out_path=pathlib.Path("/o.mp4"))
+    assert cmd.count("-i") == 1
+    assert "z#9999" not in " ".join(cmd)
+
+
+def test_a_mixed_timeline_keeps_concat_order_and_one_input_per_row():
+    rows = [
+        {"kind": "card", "t_in": 0.0, "t_out": 1.0,
+         "motion": json.dumps({"type": "card", "text": "x"})},
+        {"shot_id": "a#0001", "t_in": 1.0, "t_out": 3.0, "src_in": 5.0},
+        {"shot_id": "b#0002", "t_in": 3.0, "t_out": 4.0, "src_in": 0.0,
+         "secondary_shot_id": "z#9999", "secondary_src_in": 1.0,
+         "motion": json.dumps({"type": "split"})},
+    ]
+    cmd = render.build_command(rows, sources={"a#0001": pathlib.Path("/m/a.mp4"),
+                                              "b#0002": pathlib.Path("/m/b.mp4")},
+                               out_path=pathlib.Path("/o.mp4"))
+    assert cmd.count("-i") == len(rows)
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "[v0][v1][v2]concat=n=3:v=1:a=0[vout]" in fc, "concat must list the legs in row order"
 
 
 # -- one frame rate (Film v2 step 1) ------------------------------------

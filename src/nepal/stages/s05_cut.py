@@ -910,7 +910,7 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
     """S07 -- render the cut to a watchable file."""
     rows = [dict(r) for r in conn.execute(
         "SELECT t.*, s.recording_id, s.media_kind, a.s3_key FROM timeline t "
-        "JOIN shots s ON s.shot_id = t.shot_id "
+        "LEFT JOIN shots s ON s.shot_id = t.shot_id "
         "LEFT JOIN assets a ON a.asset_id = s.asset_id ORDER BY t.slot_index")]
     if not rows:
         return {"skipped": "no timeline"}
@@ -919,6 +919,12 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
     usable: list[dict[str, Any]] = []
     missing: dict[str, int] = {}
     for r in rows:
+        if r["kind"] == "card":
+            # A card slot has no shot -- the inner join used to drop it
+            # (shot_id is NULL), which shortened the draft by exactly its
+            # length. It needs no source file, so it is never "missing".
+            usable.append(r)
+            continue
         if r["media_kind"] == "photo":
             p = photo_source(cfg, r)
         else:

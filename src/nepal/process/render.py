@@ -16,6 +16,7 @@ shot at 4:12 is wrong" must be naming a row someone can then find.
 """
 from __future__ import annotations
 
+import json
 import logging
 import shlex
 import subprocess
@@ -25,6 +26,13 @@ from typing import Any, Mapping, Sequence
 log = logging.getLogger(__name__)
 
 DRAFT_W, DRAFT_H, DRAFT_CRF, DRAFT_FPS = 960, 540, 23, 30
+
+# A card slot (the cold-open title) has no plate of its own to show, and the
+# spec asks for nothing fancier than a caption over black.
+CARD_COLOR = "black"
+# Read at a glance while the card holds the frame, unlike the small per-shot
+# debug label -- the two are different text at different distances.
+CARD_FONTSIZE = 36
 
 _HAS_DRAWTEXT: bool | None = None
 
@@ -86,6 +94,18 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
     timestamps, and concat would otherwise leave the cut sitting at the
     source's time rather than at zero.
     """
+    if is_card(row):
+        # The lavfi ``color`` input build_command gives this row is already
+        # exactly width x height at ``fps``, so there is no scale/pad step --
+        # only the caption, and only when this ffmpeg can burn one in.
+        chain = ["setpts=PTS-STARTPTS", "setsar=1"]
+        text = _card_text(row)
+        if has_drawtext() and text:
+            chain.append(
+                f"drawtext=text='{escape_drawtext(text)}'"
+                f":x=(w-text_w)/2:y=(h-text_h)/2:fontsize={CARD_FONTSIZE}"
+                f":fontcolor=white")
+        return ",".join(chain)
     chain = []
     if is_still(row):
         dur = float(row["t_out"]) - float(row["t_in"])
@@ -113,6 +133,24 @@ def is_still(row: Mapping[str, Any]) -> bool:
     return str(row.get("media_kind") or "video") == "photo"
 
 
+def is_card(row: Mapping[str, Any]) -> bool:
+    """Whether this slot is a caption card (the cold-open title) rather than
+    footage -- it has no shot and no source file to read."""
+    return str(row.get("kind") or "") == "card"
+
+
+def _card_text(row: Mapping[str, Any]) -> str:
+    """The caption ``build_timeline`` wrote as JSON into ``motion`` for a
+    card slot -- e.g. ``{"type": "card", "text": "..."}``. Malformed or
+    missing text reads as no caption rather than as an error: a card with
+    nothing to say still holds the timeline's length as plain black."""
+    try:
+        payload = json.loads(row.get("motion") or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    return str(payload.get("text") or "")
+
+
 def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Path],
                   out_path: Path, music_path: Path | None = None,
                   width: int = DRAFT_W, height: int = DRAFT_H,
@@ -134,30 +172,38 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
                     "libfreetype), so the draft carries no shot_id/timecode "
                     "overlay. Gate 3 notes will have to cite wall-clock times. "
                     "Install an ffmpeg with libfreetype to restore it.")
+    if any(is_card(r) for r in rows) and not has_drawtext():
+        # Same tradeoff as the overlay above, for card slots: no libfreetype
+        # means no caption burned in, not a failed render.
+        log.warning("S07 this ffmpeg has no drawtext filter, so card slot(s) "
+                    "render as plain black without their caption.")
     cmd: list[str] = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
-    inputs: list[str] = []
     for r in rows:
-        src = sources.get(str(r["shot_id"]))
-        if src is None:
+        if not is_card(r) and sources.get(str(r["shot_id"])) is None:
             raise KeyError(f"no source for shot {r['shot_id']}")
-        inputs.append(str(src))
-    for src, r in zip(inputs, rows):
+    for r in rows:
         dur = float(r["t_out"]) - float(r["t_in"])
-        if is_still(r):
+        if is_card(r):
+            # No file backs a card: ffmpeg synthesises the frame from a
+            # lavfi source instead of decoding one, at the row's own length
+            # -- so the draft's length still matches the timeline's.
+            cmd += ["-f", "lavfi", "-i",
+                    f"color=c={CARD_COLOR}:s={width}x{height}:d={dur:.3f}:r={fps}"]
+        elif is_still(r):
             # No -loop here: it is a demuxer-private option that image2 has and
             # the ISO-BMFF demuxer (HEIC) does not, so it fails with "Option
             # loop not found" on exactly the fourteen iPhone stills in this
             # timeline. The hold is done in the filter graph instead, which
             # works on decoded frames whatever read them.
-            cmd += ["-i", src]
+            cmd += ["-i", str(sources[str(r["shot_id"])])]
         else:
             # -ss and -t BEFORE -i: input seeking, so the decoder starts near
             # the shot instead of at the head of the recording.
             cmd += ["-ss", f"{float(r.get('src_in') or 0.0):.3f}",
-                    "-t", f"{dur:.3f}", "-i", src]
+                    "-t", f"{dur:.3f}", "-i", str(sources[str(r["shot_id"])])]
     music_idx = None
     if music_path is not None:
-        music_idx = len(inputs)
+        music_idx = len(rows)
         cmd += ["-i", str(music_path)]
 
     parts: list[str] = []
