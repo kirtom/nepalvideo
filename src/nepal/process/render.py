@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -33,6 +34,16 @@ CARD_COLOR = "black"
 # Read at a glance while the card holds the frame, unlike the small per-shot
 # debug label -- the two are different text at different distances.
 CARD_FONTSIZE = 36
+
+# The speech pass's own ceiling and range. -1.5 dBTP is the ceiling the
+# final pass takes from the config, applied to speech early so that no
+# single loud cue is the thing that trips the final limiter; LRA 11 is
+# loudnorm's own default, written out so both passes visibly ask for the
+# same range.
+SPEECH_TP_DB, LRA = -1.5, 11
+# The draft is watched, not delivered: 192k AAC is transparent for a stereo
+# bed and a rounding error next to the picture.
+AAC_BITRATE = "192k"
 
 _HAS_DRAWTEXT: bool | None = None
 
@@ -81,8 +92,11 @@ def escape_drawtext(text: str) -> str:
 
 def segment_filters(row: Mapping[str, Any], index: int, *,
                     width: int = DRAFT_W, height: int = DRAFT_H,
-                    overlay: bool = True, fps: int = DRAFT_FPS) -> str:
-    """The per-shot video chain: reset timestamps, scale, label.
+                    overlay: bool = True, fps: int = DRAFT_FPS,
+                    secondary_index: int | None = None,
+                    card_text: str | None = None) -> str:
+    """The per-slot video chain -- what sits between ``[index:v]`` and the
+    leg's output pad: reset timestamps, scale, label.
 
     The trim is NOT here. A ``trim`` filter runs after the decoder, so
     reaching a shot twenty minutes into a recording means decoding twenty
@@ -93,13 +107,18 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
     ``setpts=PTS-STARTPTS`` still matters: a seeked stream keeps its source
     timestamps, and concat would otherwise leave the cut sitting at the
     source's time rather than at zero.
+
+    A split (``secondary_index`` given) is a fragment rather than one chain:
+    the primary's half, the secondary's half from its own input pad, and the
+    ``hstack`` that joins them -- laid out so the caller's ``[index:v]``
+    prefix and output-pad suffix still bracket it like any other leg.
     """
     if is_card(row):
         # The lavfi ``color`` input build_command gives this row is already
         # exactly width x height at ``fps``, so there is no scale/pad step --
         # only the caption, and only when this ffmpeg can burn one in.
         chain = ["setpts=PTS-STARTPTS", "setsar=1"]
-        text = _card_text(row)
+        text = card_text if card_text is not None else _card_text(row)
         # This caption is the card's whole content, not the shot_id/timecode
         # debug label -- it is deliberately independent of the `overlay` flag.
         if has_drawtext() and text:
@@ -108,20 +127,31 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
                 f":x=(w-text_w)/2:y=(h-text_h)/2:fontsize={CARD_FONTSIZE}"
                 f":fontcolor=white")
         return ",".join(chain)
-    chain = []
-    if is_still(row):
-        dur = float(row["t_out"]) - float(row["t_in"])
-        chain += [f"loop=loop=-1:size=1:start=0", f"fps={fps}", f"trim=duration={dur:.3f}"]
+    if secondary_index is not None:
+        # Each phone fills its half: scaled to cover and cropped, not
+        # letterboxed -- a portrait clip letterboxed into a half-width frame
+        # would be a stamp in a black field.
+        half = ",".join([f"fps={fps}", "setpts=PTS-STARTPTS",
+                         f"scale={width // 2}:{height}:force_original_aspect_ratio=increase"
+                         f":force_divisible_by=2",
+                         f"crop={width // 2}:{height}", "setsar=1"])
+        chain = [f"{half}[h{index}a];[{secondary_index}:v]{half}[h{index}b];"
+                 f"[h{index}a][h{index}b]hstack=inputs=2"]
     else:
-        # Every leg of the concat must share a rate: the proxies are 15 fps,
-        # the phones 30 or 60, and a concat of mixed rates produced a 120 fps
-        # draft.
-        chain += [f"fps={fps}"]
-    chain += ["setpts=PTS-STARTPTS",
-             f"scale={width}:{height}:force_original_aspect_ratio=decrease"
-             f":force_divisible_by=2",
-             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black",
-             "setsar=1"]
+        chain = []
+        if is_still(row):
+            dur = float(row["t_out"]) - float(row["t_in"])
+            chain += [f"loop=loop=-1:size=1:start=0", f"fps={fps}", f"trim=duration={dur:.3f}"]
+        else:
+            # Every leg of the concat must share a rate: the proxies are 15
+            # fps, the phones 30 or 60, and a concat of mixed rates produced
+            # a 120 fps draft.
+            chain += [f"fps={fps}"]
+        chain += ["setpts=PTS-STARTPTS",
+                 f"scale={width}:{height}:force_original_aspect_ratio=decrease"
+                 f":force_divisible_by=2",
+                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black",
+                 "setsar=1"]
     if overlay and has_drawtext():
         label = escape_drawtext(f"{row['shot_id']}  {timecode(row['t_in'])}")
         chain.append(
@@ -153,16 +183,99 @@ def _card_text(row: Mapping[str, Any]) -> str:
     return str(payload.get("text") or "")
 
 
+def _cue_len(cue: Mapping[str, Any]) -> float:
+    return float(cue["t_out"]) - float(cue["t_in"])
+
+
+def _ms(seconds: Any) -> int:
+    return int(round(float(seconds) * 1000))
+
+
+def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any]]]], *,
+                  envelopes: Mapping[str, str], levels: Mapping[str, float],
+                  film_len: float) -> list[str]:
+    """The three tracks and their mix, as graph parts ending in ``[aout]``.
+
+    ``tracks`` maps each track to its cues in time order, each with the
+    index of the input that carries it. A cue is placed on film time with
+    ``adelay`` -- one delay per channel of the stereo the mix ends in; a
+    mono cue takes the first and ignores the rest -- and a track's cues are
+    summed without rescaling (``normalize=0``): amix's default halves
+    everything while two inputs are live, which would dip a cue every time
+    another began.
+
+    Speech is normalised per cue, because every recording sits at its own
+    level, and faded over ``cue_fade_s`` so a cut into a word does not
+    click. Location is set against its full level; music is crossfaded cue
+    to cue in time order and delayed to where the first begins. Both are
+    then shaped by the mix's envelope -- decided elsewhere, arriving as an
+    opaque ``volume`` expression on film time. It carries commas, which
+    would otherwise end the option, so it is quoted; the mixer promises it
+    holds no quotes of its own. A track with no cues is silence for the
+    film's length so the final mix always has its three inputs.
+    """
+    fade = float(levels["cue_fade_s"])
+    parts: list[str] = []
+
+    def summed(prefix: str, n: int, tail: str, label: str) -> str:
+        if not n:
+            return f"anullsrc,atrim=duration={film_len:.3f}{label}"
+        return "".join(f"[{prefix}{k}]" for k in range(n)) + f"amix=inputs={n}:normalize=0{tail}{label}"
+
+    speech = tracks.get("speech") or ()
+    for k, (i, c) in enumerate(speech):
+        ms = _ms(c["t_in"])
+        parts.append(f"[{i}:a]loudnorm=I={float(levels['speech_lufs']):g}:TP={SPEECH_TP_DB:g}:LRA={LRA},"
+                     f"afade=t=in:d={fade:g},afade=t=out:st={max(0.0, _cue_len(c) - fade):.3f}:d={fade:g},"
+                     f"adelay={ms}|{ms}[sp{k}]")
+    parts.append(summed("sp", len(speech), "", "[speech]"))
+
+    location = tracks.get("location") or ()
+    full = float(levels["location_full_lufs"])
+    for k, (i, c) in enumerate(location):
+        ms = _ms(c["t_in"])
+        parts.append(f"[{i}:a]volume={float(c['gain_lufs']) - full:g}dB,adelay={ms}|{ms}[lo{k}]")
+    parts.append(summed("lo", len(location),
+                        f",volume='{envelopes['location']}':eval=frame" if location else "", "[loc]"))
+
+    music = tracks.get("music") or ()
+    if music:
+        cur = f"[{music[0][0]}:a]"
+        for k, (i, _) in enumerate(music[1:], 1):
+            parts.append(f"{cur}[{i}:a]acrossfade=d={float(levels['music_xfade_s']):g}[mx{k}]")
+            cur = f"[mx{k}]"
+        ms = _ms(music[0][1]["t_in"])
+        parts.append(f"{cur}adelay={ms}|{ms},volume='{envelopes['music']}':eval=frame[mus]")
+    else:
+        parts.append(f"anullsrc,atrim=duration={film_len:.3f}[mus]")
+
+    parts.append(f"[speech][loc][mus]amix=inputs=3:normalize=0,"
+                 f"loudnorm=I={float(levels['final_lufs']):g}:TP={float(levels['true_peak_db']):g}"
+                 f":LRA={LRA}[aout]")
+    return parts
+
+
 def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Path],
-                  out_path: Path, music_path: Path | None = None,
+                  out_path: Path, cues: Sequence[Mapping[str, Any]] = (),
+                  audio_sources: Mapping[str, Path] | None = None,
+                  music_sources: Mapping[str, Path] | None = None,
+                  envelopes: Mapping[str, str] | None = None,
                   width: int = DRAFT_W, height: int = DRAFT_H,
-                  crf: int = DRAFT_CRF, music_lufs: float = -14.0,
-                  overlay: bool = True, fps: int = DRAFT_FPS) -> list[str]:
+                  crf: int = DRAFT_CRF, fps: int = DRAFT_FPS, overlay: bool = True,
+                  levels: Mapping[str, float] | None = None,
+                  script_path: Path | None = None) -> list[str]:
     """One ffmpeg invocation that renders the whole draft.
 
     Every shot is an input; the filter graph trims each, concatenates, and
     mixes. One process rather than render-then-concat: a per-shot file would
     be a second generation of H.264 on material that is already a proxy.
+
+    The inputs are, in order: one per row (a split's secondary right after
+    its primary), then one per speech, location and music cue, each track
+    in time order. Every pad index in the graph follows from that order.
+    ``levels`` is the config's ``render`` block; ``envelopes`` the mix's
+    per-track ``volume`` expressions. Without cues this is the silent draft
+    it always was.
     """
     if not rows:
         raise ValueError("nothing to render: the timeline is empty")
@@ -183,6 +296,8 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
     for r in rows:
         if not is_card(r) and sources.get(str(r["shot_id"])) is None:
             raise KeyError(f"no source for shot {r['shot_id']}")
+    legs: list[tuple[Mapping[str, Any], int, int | None]] = []  # row, its input, its secondary's
+    n = 0
     for r in rows:
         dur = float(r["t_out"]) - float(r["t_in"])
         if is_card(r):
@@ -203,24 +318,53 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
             # the shot instead of at the head of the recording.
             cmd += ["-ss", f"{float(r.get('src_in') or 0.0):.3f}",
                     "-t", f"{dur:.3f}", "-i", str(sources[str(r["shot_id"])])]
-    music_idx = None
-    if music_path is not None:
-        music_idx = len(rows)
-        cmd += ["-i", str(music_path)]
+        primary, secondary = n, None
+        n += 1
+        other = r.get("secondary_shot_id")
+        if other and sources.get(str(other)) is not None:
+            # The other phone's clip, right after its primary, seeked to the
+            # instant the pair was aligned on, for the slot's length.
+            cmd += ["-ss", f"{float(r.get('secondary_src_in') or 0.0):.3f}",
+                    "-t", f"{dur:.3f}", "-i", str(sources[str(other)])]
+            secondary, n = n, n + 1
+        elif other:
+            # The same policy as a slot with no media: a split whose other
+            # clip nobody supplied shows one phone, loudly, rather than
+            # killing the draft or vanishing from it.
+            log.warning("S07 split slot %s has no source for its secondary %s; "
+                        "rendering the primary alone", r.get("shot_id"), other)
+        legs.append((r, primary, secondary))
+
+    tracks: dict[str, list[tuple[int, Mapping[str, Any]]]] = {"speech": [], "location": [], "music": []}
+    unknown = {str(c["track"]) for c in cues} - tracks.keys()
+    if unknown:
+        raise ValueError(f"cue(s) on unknown track(s): {sorted(unknown)}")
+    files = {"speech": audio_sources or {}, "location": audio_sources or {},
+             "music": music_sources or {}}
+    for track, placed in tracks.items():
+        for c in sorted((c for c in cues if c["track"] == track), key=lambda c: float(c["t_in"])):
+            src = files[track].get(str(c["source"]))
+            if src is None:
+                raise KeyError(f"no audio source for cue {c.get('cue_id')} ({track}: {c['source']})")
+            # Seeked at the input like a shot, for the cue's length on the film.
+            cmd += ["-ss", f"{float(c['src_in']):.3f}", "-t", f"{_cue_len(c):.3f}", "-i", str(src)]
+            placed.append((n, c))
+            n += 1
 
     parts: list[str] = []
     labels: list[str] = []
-    for i, r in enumerate(rows):
-        parts.append(f"[{i}:v]{segment_filters(r, i, width=width, height=height, overlay=overlay, fps=fps)}[v{i}]")
-        labels.append(f"[v{i}]")
-    parts.append("".join(labels) + f"concat=n={len(rows)}:v=1:a=0[vout]")
+    for k, (r, i, si) in enumerate(legs):
+        parts.append(f"[{i}:v]{segment_filters(r, i, width=width, height=height, overlay=overlay, fps=fps, secondary_index=si)}[v{k}]")
+        labels.append(f"[v{k}]")
+    parts.append("".join(labels) + f"concat=n={len(legs)}:v=1:a=0[vout]")
 
     maps = ["-map", "[vout]"]
-    if music_idx is not None:
-        # The bed is normalised to the spec's target rather than assumed to be
-        # there already: the music library is whatever the operator had.
-        parts.append(f"[{music_idx}:a]loudnorm=I={music_lufs:g}:TP=-1.5:LRA=11[aout]")
-        maps += ["-map", "[aout]", "-shortest"]
+    if cues:
+        parts += audio_filters(tracks, envelopes=envelopes or {}, levels=levels or {},
+                               film_len=max(float(r["t_out"]) for r in rows))
+        # No -shortest: the mix may run a hair past the picture, which is
+        # harmless, but a mix that ran short would cut the picture with it.
+        maps += ["-map", "[aout]"]
 
     # A 564-slot draft put this whole graph past Linux's MAX_ARG_STRLEN
     # (128 KiB) as a single -filter_complex argument, and subprocess.run
@@ -229,7 +373,7 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
     # it goes on disk instead of on the command line. Written through a
     # temporary name and renamed, per this pipeline's checkpoint rule.
     graph = ";".join(parts)
-    filters_path = out_path.with_suffix(".filters")
+    filters_path = script_path or out_path.with_suffix(".filters")
     tmp_filters_path = filters_path.with_name(filters_path.name + ".tmp")
     tmp_filters_path.write_text(graph)
     tmp_filters_path.rename(filters_path)
@@ -237,8 +381,8 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
     cmd += ["-filter_complex_script", str(filters_path), *maps, "-r", str(fps),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
             "-pix_fmt", "yuv420p"]
-    if music_idx is not None:
-        cmd += ["-c:a", "aac", "-b:a", "192k"]
+    if cues:
+        cmd += ["-c:a", "aac", "-b:a", AAC_BITRATE]
     cmd.append(str(out_path))
     return cmd
 
@@ -259,3 +403,17 @@ def describe(cmd: Sequence[str]) -> str:
     except (ValueError, OSError):
         pass
     return " ".join(shlex.quote(c) for c in cmd)
+
+
+def probe_loudness(path: Path, *, t_in: float, t_out: float) -> float:
+    """Mean level in dB of one window of a file's audio, as ``volumedetect``
+    measures it (-91 for digital silence). The slow test's ear: the one
+    thing here that runs ffmpeg for an answer rather than building one."""
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostdin", "-ss", f"{t_in:.3f}", "-t", f"{t_out - t_in:.3f}",
+         "-i", str(path), "-vn", "-af", "volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True, check=True)
+    m = re.search(r"mean_volume:\s*(-?[\d.]+) dB", proc.stderr)
+    if not m:
+        raise RuntimeError(f"volumedetect reported no mean_volume for {path}: {proc.stderr[-400:]}")
+    return float(m.group(1))
