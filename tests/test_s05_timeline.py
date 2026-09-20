@@ -1,10 +1,10 @@
 """The timeline v2 end to end on a seeded database: no media, the real config.
 
-Thirty-odd shots from three sources over five acts, two phones filming the
-same minute in portrait, a camera recording that mentions the bridge, three
-story beats, two tracks with sections and a beat grid, act boundaries and a
-short GPS track -- everything ``build_timeline`` reads, seeded the way the
-real stages write it, so the wiring is exercised at the boundary it will
+Three hundred-odd shots from three sources over five acts, two phones filming
+the same minute in portrait, a camera recording that mentions the bridge,
+three story beats, two tracks with sections and a beat grid, act boundaries
+and a short GPS track -- everything ``build_timeline`` reads, seeded the way
+the real stages write it, so the wiring is exercised at the boundary it will
 actually cross on the box.
 """
 import json
@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 from nepal import db
 from nepal.config import Config
+from nepal.spine import music as music_mod
 from nepal.stages import s05_cut
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -160,6 +161,25 @@ def _seed(cfg):
     shot("q5", 0, 0, 18, t + timedelta(days=2), 5, source_score=0.55, levity=1, place="Kathmandu")
     shot("q5", 1, 18, 36, t + timedelta(days=2), 5, source_score=0.45, place="Kathmandu")
     photo("p5", "phone_kulikov", t + timedelta(days=3), 5)
+
+    # -- the bulk of each act, clumped on a couple of hours of one day ------
+    # Each act's boundaries span days; its footage sits in a few hours of one
+    # of them (act 5's a week before its end), as the corpus does, so most of
+    # a gap's UTC windows hold nothing and the fill has to reach for the
+    # nearest by time. Enough rows to run every act to its planned length,
+    # 6.5 s each so their sum stays under what would grow the film past its
+    # floor: the material must not lengthen the film it is meant to fill.
+    for act, day, n_recs in ((1, datetime(2024, 3, 12, 10, tzinfo=timezone.utc), 5),
+                             (2, datetime(2024, 4, 27, 5, tzinfo=timezone.utc), 14),
+                             (3, datetime(2024, 5, 1, 5, tzinfo=timezone.utc), 34),
+                             (4, datetime(2024, 5, 4, 1, 30, tzinfo=timezone.utc), 10),
+                             (5, datetime(2024, 5, 8, 8, tzinfo=timezone.utc), 26)):
+        for i in range(n_recs):
+            rid, start = f"f{act}_{i:02d}", day + timedelta(minutes=4 * i)
+            recording(rid, ("phone_keller", "phone_kulikov", "camera")[i % 3], start, 20)
+            for j in range(3):
+                shot(rid, j, 6.5 * j, 6.5 * (j + 1), start, act,
+                     source_score=0.4 + 0.05 * ((i + j) % 5))
 
     conn.executemany("INSERT INTO recordings(recording_id, source, is_360, start_utc, duration_s, "
                      "asset_count) VALUES (?,?,?,?,?,?)", recordings)
@@ -314,6 +334,23 @@ def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path)
     conn.close()
 
 
+def test_acts_reach_their_planned_length(tmp_path):
+    """Film time is laid over an act's UTC span proportionally and the seed's
+    footage, like the corpus, clumps on a few hours of a days-long span; a
+    gap whose window held nothing added nothing, and every act ended where
+    its material stopped. A gap now takes the nearest footage by time, so
+    the acts run to the length the film allotted them."""
+    cfg = _cfg(tmp_path)
+    conn = _seed(cfg)
+    rep = s05_cut.build_timeline(cfg, conn)
+    card_end = conn.execute("SELECT t_out FROM timeline ORDER BY slot_index LIMIT 1 OFFSET 1").fetchone()[0]
+    planned = music_mod.allocate_act_durations(cfg.act_targets(), rep["planned_s"] - card_end)
+    tol = float(cfg.get("film.duration_tolerance_s"))
+    for act, (start, end) in rep["act_spans"].items():
+        assert abs((end - start) - planned[int(act)]) <= tol, (act, end - start, planned[int(act)])
+    conn.close()
+
+
 def test_build_timeline_is_rebuilt_not_accumulated(tmp_path):
     cfg = _cfg(tmp_path)
     conn = _seed(cfg)
@@ -364,6 +401,32 @@ def test_render_draft_left_join_keeps_the_card_and_matches_row_count(tmp_path, m
     i = cmd.index("-f")
     assert cmd[i:i + 2] == ["-f", "lavfi"], "the card must reach build_command as a synthesised input"
     conn.close()
+
+
+def test_gap_candidates_widen_an_empty_window_by_utc_distance():
+    """A window that holds fewer rows than its budget takes the nearest rows
+    by distance to it, the inside rows first, up to twice the budget."""
+    day = datetime(2024, 5, 1, tzinfo=timezone.utc)
+    rows = [{"shot_id": f"s{i}", "start_utc": _iso(day + timedelta(seconds=10 * i))} for i in range(10)]
+    at = lambda s: day.timestamp() + s
+    ids = lambda cands: [c["shot_id"] for c in cands]
+
+    # four rows inside 60..120 s against a budget of three: nothing is widened
+    cands, n_inside = s05_cut._gap_candidates(rows, at(60), at(120), budget=3)
+    assert (ids(cands), n_inside) == (["s6", "s7", "s8", "s9"], 4)
+    # a budget of six: the inside four first, then the nearest, to twice the budget
+    cands, n_inside = s05_cut._gap_candidates(rows, at(60), at(120), budget=6)
+    assert (ids(cands), n_inside) == (["s6", "s7", "s8", "s9", "s5", "s4", "s3", "s2", "s1", "s0"], 4)
+    # a window over days that hold no footage at all: the nearest, twice the budget of them
+    cands, n_inside = s05_cut._gap_candidates(rows, at(3 * 86400), at(5 * 86400), budget=2)
+    assert (ids(cands), n_inside) == (["s9", "s8", "s7", "s6"], 0)
+    # footage after the window is as near as its end, not its start
+    cands, n_inside = s05_cut._gap_candidates(rows, at(-200), at(-100), budget=1)
+    assert (ids(cands), n_inside) == (["s0", "s1"], 0)
+    # an unstamped row is inside any window, and an unbounded side holds everything on it
+    untimed = {"shot_id": "u", "start_utc": None}
+    cands, n_inside = s05_cut._gap_candidates([untimed] + rows, None, at(45), budget=3)
+    assert (ids(cands), n_inside) == (["u", "s0", "s1", "s2", "s3", "s4"], 6)
 
 
 def test_two_locked_slots_never_cut_each_other():

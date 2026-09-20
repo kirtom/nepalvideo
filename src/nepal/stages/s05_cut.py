@@ -267,17 +267,52 @@ def _no_adjacent_photos(ordered: Sequence[Mapping[str, Any]], *, prev_photo: boo
     return out
 
 
-def _fill_gap(cfg: Config, cands: Sequence[Mapping[str, Any]], *, act: int, t0: float, t1: float,
-              similarity, existing: Sequence[Mapping[str, Any]], prev_photo: bool,
+def _utc_distance(row: Mapping[str, Any], lo: float | None, hi: float | None) -> float:
+    """Seconds from the row's moment to the window: 0 inside (an unstamped
+    shot may go anywhere; chronological() puts it last), else to the nearer
+    edge, on either side of the window."""
+    ts = anchors_mod._epoch(row.get("start_utc"))
+    if ts is None:
+        return 0.0
+    outside = [d for d in ((lo - ts) if lo is not None else 0.0,
+                           (ts - hi) if hi is not None else 0.0) if d > 0]
+    return min(outside) if outside else 0.0
+
+
+def _gap_candidates(free: Sequence[Mapping[str, Any]], lo: float | None, hi: float | None, *,
+                    budget: int) -> tuple[list[Mapping[str, Any]], int]:
+    """The rows a gap may draw on, and how many of them fell inside its UTC
+    window: those inside, widened to the nearest by distance until the list
+    holds twice the budget (so ``mmr_select`` still has a choice) whenever
+    fewer than the budget fell inside.
+
+    Film time is laid over the act's UTC span proportionally, but the footage
+    clumps on a few hours of a few days, so most windows were empty (act 5's
+    last one ran to the flight home a month later and held 0 of 137 free rows)
+    and every act ended where its material stopped: 10.5 min of 35.5 planned.
+    """
+    inside = [r for r in free if _utc_distance(r, lo, hi) == 0.0]
+    if len(inside) >= budget:
+        return inside, len(inside)
+    return sorted(free, key=lambda r: _utc_distance(r, lo, hi))[:2 * budget], len(inside)
+
+
+def _fill_gap(cfg: Config, free: Sequence[Mapping[str, Any]], *, act: int, t0: float, t1: float,
+              lo: float | None, hi: float | None, similarity,
+              existing: Sequence[Mapping[str, Any]], prev_photo: bool,
               next_photo: bool) -> list[dict[str, Any]]:
     """The next-best shots for one gap of the act, laid from its start with
     no grid yet -- the rhythm pass snaps them once there is music to snap to.
 
-    ``existing`` are the shot rows already on screen in this act, so the
-    per-place cap counts the whole act, not just this gap.
+    ``free`` are the rows the gap may still use (nothing on screen, no
+    excluded recording, only budgeted stills); ``lo``/``hi`` its UTC window,
+    from which ``_gap_candidates`` draws. ``existing`` are the shot rows
+    already on screen in this act, so the per-place cap counts the whole act,
+    not just this gap.
     """
     rng = _duration_range(cfg, act)
     budget = asm.slot_budget(t1 - t0, rng)
+    cands, n_inside = _gap_candidates(free, lo, hi, budget=budget)
     place_cap = int(cfg.get("assemble.max_shots_per_place_per_act"))
     run_cap = int(cfg.get("assemble.max_consecutive_recording"))
     after = int(cfg.get("assemble.source_alternation_after"))
@@ -300,8 +335,10 @@ def _fill_gap(cfg: Config, cands: Sequence[Mapping[str, Any]], *, act: int, t0: 
         refused = {"photo_rule": sum(1 for c in left if _is_photo(c) and (_is_photo(chosen[-1]) if chosen else prev_photo)),
                    "place_cap": sum(1 for c in left if not asm.place_count_ok(c, list(existing) + list(chosen), limit=place_cap)),
                    "recording_run": sum(1 for c in left if not asm.recording_run_ok(c, list(chosen), limit=run_cap))}
-        log.debug("S06 act %d fill %.1f-%.1fs: budget %d, %d candidate(s), chose %d, %d left of which "
-                  "refused %s", act, t0, t1, budget, len(cands), len(chosen), len(left), refused)
+        log.debug("S06 act %d fill %.1f-%.1fs: budget %d, %d candidate(s) of %d free (%d inside the "
+                  "utc window, %d by distance), chose %d, %d left of which refused %s", act, t0, t1,
+                  budget, len(cands), len(free), n_inside, len(cands) - n_inside, len(chosen),
+                  len(left), refused)
     chosen = asm.source_share_repair(chosen, [c for c in cands if c["shot_id"] not in taken],
                                      min_share=float(cfg.get("assemble.source_share_min")))
     ordered = _no_adjacent_photos(asm.chronological(chosen), prev_photo=prev_photo,
@@ -390,13 +427,6 @@ def _utc_window(prev: Mapping[str, Any] | None, nxt: Mapping[str, Any] | None,
     return edge(prev, act_utc[0], True), edge(nxt, act_utc[1], False)
 
 
-def _in_window(row: Mapping[str, Any], lo: float | None, hi: float | None) -> bool:
-    ts = anchors_mod._epoch(row.get("start_utc"))
-    if ts is None:
-        return True                     # an unstamped shot may go anywhere; chronological() puts it last
-    return (lo is None or ts >= lo) and (hi is None or ts <= hi)
-
-
 def _fixed_anchor(kind: str, slot: Mapping[str, Any], shot: Mapping[str, Any]) -> anchors_mod.Anchor:
     """A pair or the bridge take as an anchor, so ``place_anchors`` lays it
     among the speech anchors by the same chronology and the same gaps."""
@@ -419,7 +449,8 @@ def plan_act(cfg: Config, act: int, act_rows: Sequence[Mapping[str, Any]],
 
     The speech anchors, the bridge take and the pairs are placed first by
     chronology; every gap between them is filled by MMR from the shots whose
-    moment falls inside that gap; then each speech anchor gets its picture --
+    moment falls inside that gap, or the nearest in time when too few do;
+    then each speech anchor gets its picture --
     its own recording for the whole utterance when the speaker is not in
     frame (a walking shot), else the face for ``face_hold_s`` and B-roll to
     the end of the line.
@@ -454,9 +485,9 @@ def plan_act(cfg: Config, act: int, act_rows: Sequence[Mapping[str, Any]],
     for a in anchors:
         a_end = a.t_in + a.duration_s
         if a.t_in - prev_end > rng[0]:
-            cands = [r for r in pool if r["shot_id"] not in used
-                     and _in_window(r, prev_utc, anchors_mod._epoch(a.utc))]
-            filled = _fill_gap(cfg, cands, act=act, t0=prev_end, t1=a.t_in, similarity=similarity,
+            filled = _fill_gap(cfg, [r for r in pool if r["shot_id"] not in used], act=act,
+                               t0=prev_end, t1=a.t_in, lo=prev_utc, hi=anchors_mod._epoch(a.utc),
+                               similarity=similarity,
                                existing=[shots_by_id[s["shot_id"]] for s in slots if s.get("shot_id")],
                                prev_photo=prev_photo, next_photo=False)
             slots.extend(filled)
@@ -469,8 +500,9 @@ def plan_act(cfg: Config, act: int, act_rows: Sequence[Mapping[str, Any]],
         a_ts = anchors_mod._epoch(a.utc)
         prev_utc = a_ts + a.duration_s if a_ts is not None else prev_utc
     if t0 + act_len_s - prev_end > rng[0]:
-        cands = [r for r in pool if r["shot_id"] not in used and _in_window(r, prev_utc, act_span_utc[1])]
-        filled = _fill_gap(cfg, cands, act=act, t0=prev_end, t1=t0 + act_len_s, similarity=similarity,
+        filled = _fill_gap(cfg, [r for r in pool if r["shot_id"] not in used], act=act,
+                           t0=prev_end, t1=t0 + act_len_s, lo=prev_utc, hi=act_span_utc[1],
+                           similarity=similarity,
                            existing=[shots_by_id[s["shot_id"]] for s in slots if s.get("shot_id")],
                            prev_photo=prev_photo, next_photo=False)
         slots.extend(filled)
@@ -821,14 +853,14 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
                 free = [r for r in act_rows if r["shot_id"] not in taken
                         and r.get("recording_id") not in excluded
                         and (not _is_photo(r) or r["shot_id"] in allowed_photos)]
-                cands = [r for r in free if _in_window(r, lo, hi)]
-                filled = _fill_gap(cfg, cands, act=act, t0=g0, t1=g1, similarity=similarity,
+                filled = _fill_gap(cfg, free, act=act, t0=g0, t1=g1, lo=lo, hi=hi,
+                                   similarity=similarity,
                                    existing=existing + [shots_by_id[s["shot_id"]] for s in added],
                                    prev_photo=bool(prev and prev.get("kind") == "photo"),
                                    next_photo=bool(nxt and nxt.get("kind") == "photo"))
                 log.debug("S06 act %d round %d gap %.1f-%.1fs (%.1fs): utc window %s..%s, "
-                          "%d of %d free row(s) inside, %d slot(s) laid to %.1fs", act, round_no,
-                          g0, g1, g1 - g0, lo, hi, len(cands), len(free), len(filled),
+                          "%d free row(s), %d slot(s) laid to %.1fs", act, round_no,
+                          g0, g1, g1 - g0, lo, hi, len(free), len(filled),
                           float(filled[-1]["t_out"]) if filled else g0)
                 added += filled
             log.info("S06 act %d round %d: %d slot(s) added for %d gap(s)", act, round_no,
