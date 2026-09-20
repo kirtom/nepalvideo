@@ -166,19 +166,21 @@ def _seed(cfg):
     # Each act's boundaries span days; its footage sits in a few hours of one
     # of them (act 5's a week before its end), as the corpus does, so most of
     # a gap's UTC windows hold nothing and the fill has to reach for the
-    # nearest by time. Enough rows to run every act to its planned length,
-    # 6.5 s each so their sum stays under what would grow the film past its
-    # floor: the material must not lengthen the film it is meant to fill.
-    for act, day, n_recs in ((1, datetime(2024, 3, 12, 10, tzinfo=timezone.utc), 5),
-                             (2, datetime(2024, 4, 27, 5, tzinfo=timezone.utc), 14),
-                             (3, datetime(2024, 5, 1, 5, tzinfo=timezone.utc), 34),
-                             (4, datetime(2024, 5, 4, 1, 30, tzinfo=timezone.utc), 10),
-                             (5, datetime(2024, 5, 8, 8, tzinfo=timezone.utc), 26)):
+    # nearest by time. Enough rows to run every act to its planned length --
+    # act 1's cue opens on its swell, a ten-cut burst then two-second cuts,
+    # so a minute of it takes twice the rows a minute elsewhere does -- and
+    # short enough that their sum stays under what would grow the film past
+    # its floor: the material must not lengthen the film it is meant to fill.
+    for act, day, n_recs, shot_s in ((1, datetime(2024, 3, 12, 10, tzinfo=timezone.utc), 12, 4.0),
+                                     (2, datetime(2024, 4, 27, 5, tzinfo=timezone.utc), 14, 6.5),
+                                     (3, datetime(2024, 5, 1, 5, tzinfo=timezone.utc), 34, 6.5),
+                                     (4, datetime(2024, 5, 4, 1, 30, tzinfo=timezone.utc), 10, 6.5),
+                                     (5, datetime(2024, 5, 8, 8, tzinfo=timezone.utc), 26, 6.5)):
         for i in range(n_recs):
             rid, start = f"f{act}_{i:02d}", day + timedelta(minutes=4 * i)
             recording(rid, ("phone_keller", "phone_kulikov", "camera")[i % 3], start, 20)
             for j in range(3):
-                shot(rid, j, 6.5 * j, 6.5 * (j + 1), start, act,
+                shot(rid, j, shot_s * j, shot_s * (j + 1), start, act,
                      source_score=0.4 + 0.05 * ((i + j) % 5))
 
     conn.executemany("INSERT INTO recordings(recording_id, source, is_360, start_utc, duration_s, "

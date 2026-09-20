@@ -806,8 +806,15 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         shifts[act] = shift
         act_t0, act_t1 = t, t + act_len[act]
         sections = _sections_for_act(entry, tracks_by_id, shift=shift, t0=act_t0, t1=act_t1)
-        grid = [b + shift for b in entry.get("beat_grid", [])]
-        downs = [b + shift for b in entry.get("downbeats", [])]
+        # Rounded to the three decimals every slot edge is rounded to. The
+        # map's beats are, but adding the shift in float put the grid's
+        # last beat at the walk's own t_in plus 1e-11: retime took it as
+        # "after t_in", rounded it back onto t_in, and once past the end
+        # of a grid that stopped 78 s before its act every later slot
+        # snapped to that beat at zero length instead of taking the
+        # unsnapped band length the grid's end is meant to leave standing.
+        grid = [round(b + shift, 3) for b in entry.get("beat_grid", [])]
+        downs = [round(b + shift, 3) for b in entry.get("downbeats", [])]
         silence_t = act_t1 if act == 4 and mmap.get("silence_window") else None
         rng = _duration_range(cfg, act)
         slots = [_set_length(dict(s), float(s["t_in"]) + shift, float(s["t_out"]) + shift)
@@ -888,6 +895,14 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     moved = {a for a in acts if abs((final_spans[a][1] - final_spans[a][0]) - act_len[a])
              > float(cfg.get("music.min_scene_s"))}
     ordered = list(act0) + [s for a in acts for s in final[a]]
+    # Nothing of zero length reaches the table, whatever produced it: render
+    # would ask ffmpeg for nothing and every count downstream would be off
+    # by a slot. Dropped here, before scenes and windows index the list.
+    empty = [s for s in ordered if float(s["t_out"]) <= float(s["t_in"])]
+    if empty:
+        log.warning("S06 dropped %d zero-length slot(s) before the write, first act %s shot %s at %.3fs",
+                    len(empty), empty[0].get("act"), empty[0].get("shot_id"), float(empty[0]["t_in"]))
+        ordered = [s for s in ordered if float(s["t_out"]) > float(s["t_in"])]
     if moved:
         scenes, mmap, mode, problems = _scenes_and_map(
             cfg, ordered, attrs, tracks, act_spans=final_spans, act0_span=(0.0, t0), total_s=total_s)
