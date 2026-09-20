@@ -194,7 +194,8 @@ def _ms(seconds: Any) -> int:
 
 def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any]]]], *,
                   envelopes: Mapping[str, str], levels: Mapping[str, float],
-                  film_len: float) -> list[str]:
+                  film_len: float, measured: Mapping[str, float] | None = None,
+                  measure_only: bool = False) -> list[str]:
     """The three tracks and their mix, as graph parts ending in ``[aout]``.
 
     ``tracks`` maps each track to its cues in time order, each with the
@@ -221,6 +222,12 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any]]]],
     the option, so it is quoted; the mixer promises it holds no quotes of
     its own. A track with no cues is silence for the film's length so the
     final mix always has its three inputs.
+
+    The final normalisation is two-pass. Single-pass loudnorm re-levels
+    what the envelope designed: through three seconds of silence its gain
+    rode up and the returning bed came back 3.1 dB hot. So ``measure_only``
+    has it print what it hears, and ``measured`` -- those numbers -- has it
+    apply one static gain and only limit true peaks (``linear=true``).
     """
     fade = float(levels["cue_fade_s"])
     parts: list[str] = []
@@ -259,9 +266,24 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any]]]],
     parts.append(summed("mu", len(music),
                         f",volume='{envelopes['music']}':eval=frame" if music else "", "[mus]"))
 
-    parts.append(f"[speech][loc][mus]amix=inputs=3:normalize=0,"
-                 f"loudnorm=I={float(levels['final_lufs']):g}:TP={float(levels['true_peak_db']):g}"
-                 f":LRA={LRA}[aout]")
+    target_i, target_tp = float(levels["final_lufs"]), float(levels["true_peak_db"])
+    final = f"loudnorm=I={target_i:g}:TP={target_tp:g}:LRA={LRA}"
+    if measure_only:
+        final += ":print_format=json"
+    elif measured:
+        m = {k: float(measured[k]) for k in ("input_i", "input_lra", "input_tp", "input_thresh")}
+        gain = target_i - m["input_i"]
+        if m["input_lra"] > LRA or m["input_tp"] + gain > target_tp:
+            # loudnorm's own rule: a source range wider than the target's,
+            # or a gain that would push a true peak past the ceiling, and
+            # it quietly reverts to dynamic mode -- the second pass then
+            # buys nothing, which nobody would hear until Gate 3.
+            log.warning("S07 measured LRA %.1f against a target of %d, true peak %.1f dBTP "
+                        "after %.1f dB of gain: loudnorm will revert to dynamic normalisation "
+                        "and re-level the mix", m["input_lra"], LRA, m["input_tp"] + gain, gain)
+        final += (f":measured_I={m['input_i']:g}:measured_LRA={m['input_lra']:g}"
+                  f":measured_TP={m['input_tp']:g}:measured_thresh={m['input_thresh']:g}:linear=true")
+    parts.append(f"[speech][loc][mus]amix=inputs=3:normalize=0,{final}[aout]")
     return parts
 
 
@@ -273,7 +295,9 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
                   width: int = DRAFT_W, height: int = DRAFT_H,
                   crf: int = DRAFT_CRF, fps: int = DRAFT_FPS, overlay: bool = True,
                   levels: Mapping[str, float] | None = None,
-                  script_path: Path | None = None) -> list[str]:
+                  script_path: Path | None = None,
+                  loudnorm_measured: Mapping[str, float] | None = None,
+                  measure_only: bool = False) -> list[str]:
     """One ffmpeg invocation that renders the whole draft.
 
     Every shot is an input; the filter graph trims each, concatenates, and
@@ -287,10 +311,19 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
     ``levels`` is the config's ``render`` block; ``envelopes`` the mix's
     per-track ``volume`` expressions. Without cues this is the silent draft
     it always was.
+
+    The final normalisation is two-pass, the first pass audio-only so it
+    costs seconds rather than a second encode: ``measure_only`` builds it
+    -- the same cue inputs, now from index zero, no picture at all, output
+    to null, loudnorm printing what it hears -- and ``loudnorm_measured``,
+    what ``parse_loudnorm_json`` read from that, makes the render apply
+    one static gain instead of re-levelling the mix as it goes.
     """
     if not rows:
         raise ValueError("nothing to render: the timeline is empty")
-    if overlay and not has_drawtext():
+    if measure_only and not cues:
+        raise ValueError("nothing to measure: no cues")
+    if not measure_only and overlay and not has_drawtext():
         # Spec S07 asks for this overlay so Gate 3 feedback can name a moment.
         # Losing it is a real loss, not a cosmetic one -- but a draft nobody
         # can watch is worse than one whose shots are unlabelled.
@@ -298,53 +331,57 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
                     "libfreetype), so the draft carries no shot_id/timecode "
                     "overlay. Gate 3 notes will have to cite wall-clock times. "
                     "Install an ffmpeg with libfreetype to restore it.")
-    if any(is_card(r) for r in rows) and not has_drawtext():
+    if not measure_only and any(is_card(r) for r in rows) and not has_drawtext():
         # Same tradeoff as the overlay above, for card slots: no libfreetype
         # means no caption burned in, not a failed render.
         log.warning("S07 this ffmpeg has no drawtext filter, so card slot(s) "
                     "render as plain black without their caption.")
-    cmd: list[str] = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
-    for r in rows:
-        if not is_card(r) and sources.get(str(r["shot_id"])) is None:
-            raise KeyError(f"no source for shot {r['shot_id']}")
+    # loudnorm prints its measurement at INFO, which -loglevel error would
+    # swallow; -nostats keeps the progress line out of what gets parsed.
+    cmd: list[str] = ["ffmpeg", "-hide_banner", "-loglevel", "info" if measure_only else "error",
+                      "-nostdin", "-y"] + (["-nostats"] if measure_only else [])
     legs: list[tuple[Mapping[str, Any], int, int | None]] = []  # row, its input, its secondary's
     n = 0
-    for r in rows:
-        dur = float(r["t_out"]) - float(r["t_in"])
-        if is_card(r):
-            # No file backs a card: ffmpeg synthesises the frame from a
-            # lavfi source instead of decoding one, at the row's own length
-            # -- so the draft's length still matches the timeline's.
-            cmd += ["-f", "lavfi", "-i",
-                    f"color=c={CARD_COLOR}:s={width}x{height}:d={dur:.3f}:r={fps}"]
-        elif is_still(r):
-            # No -loop here: it is a demuxer-private option that image2 has and
-            # the ISO-BMFF demuxer (HEIC) does not, so it fails with "Option
-            # loop not found" on exactly the fourteen iPhone stills in this
-            # timeline. The hold is done in the filter graph instead, which
-            # works on decoded frames whatever read them.
-            cmd += ["-i", str(sources[str(r["shot_id"])])]
-        else:
-            # -ss and -t BEFORE -i: input seeking, so the decoder starts near
-            # the shot instead of at the head of the recording.
-            cmd += ["-ss", f"{float(r.get('src_in') or 0.0):.3f}",
-                    "-t", f"{dur:.3f}", "-i", str(sources[str(r["shot_id"])])]
-        primary, secondary = n, None
-        n += 1
-        other = r.get("secondary_shot_id")
-        if other and sources.get(str(other)) is not None:
-            # The other phone's clip, right after its primary, seeked to the
-            # instant the pair was aligned on, for the slot's length.
-            cmd += ["-ss", f"{float(r.get('secondary_src_in') or 0.0):.3f}",
-                    "-t", f"{dur:.3f}", "-i", str(sources[str(other)])]
-            secondary, n = n, n + 1
-        elif other:
-            # The same policy as a slot with no media: a split whose other
-            # clip nobody supplied shows one phone, loudly, rather than
-            # killing the draft or vanishing from it.
-            log.warning("S07 split slot %s has no source for its secondary %s; "
-                        "rendering the primary alone", r.get("shot_id"), other)
-        legs.append((r, primary, secondary))
+    if not measure_only:
+        for r in rows:
+            if not is_card(r) and sources.get(str(r["shot_id"])) is None:
+                raise KeyError(f"no source for shot {r['shot_id']}")
+        for r in rows:
+            dur = float(r["t_out"]) - float(r["t_in"])
+            if is_card(r):
+                # No file backs a card: ffmpeg synthesises the frame from a
+                # lavfi source instead of decoding one, at the row's own length
+                # -- so the draft's length still matches the timeline's.
+                cmd += ["-f", "lavfi", "-i",
+                        f"color=c={CARD_COLOR}:s={width}x{height}:d={dur:.3f}:r={fps}"]
+            elif is_still(r):
+                # No -loop here: it is a demuxer-private option that image2 has
+                # and the ISO-BMFF demuxer (HEIC) does not, so it fails with
+                # "Option loop not found" on exactly the fourteen iPhone stills
+                # in this timeline. The hold is done in the filter graph
+                # instead, which works on decoded frames whatever read them.
+                cmd += ["-i", str(sources[str(r["shot_id"])])]
+            else:
+                # -ss and -t BEFORE -i: input seeking, so the decoder starts
+                # near the shot instead of at the head of the recording.
+                cmd += ["-ss", f"{float(r.get('src_in') or 0.0):.3f}",
+                        "-t", f"{dur:.3f}", "-i", str(sources[str(r["shot_id"])])]
+            primary, secondary = n, None
+            n += 1
+            other = r.get("secondary_shot_id")
+            if other and sources.get(str(other)) is not None:
+                # The other phone's clip, right after its primary, seeked to
+                # the instant the pair was aligned on, for the slot's length.
+                cmd += ["-ss", f"{float(r.get('secondary_src_in') or 0.0):.3f}",
+                        "-t", f"{dur:.3f}", "-i", str(sources[str(other)])]
+                secondary, n = n, n + 1
+            elif other:
+                # The same policy as a slot with no media: a split whose other
+                # clip nobody supplied shows one phone, loudly, rather than
+                # killing the draft or vanishing from it.
+                log.warning("S07 split slot %s has no source for its secondary %s; "
+                            "rendering the primary alone", r.get("shot_id"), other)
+            legs.append((r, primary, secondary))
 
     tracks: dict[str, list[tuple[int, Mapping[str, Any]]]] = {"speech": [], "location": [], "music": []}
     unknown = {str(c["track"]) for c in cues} - tracks.keys()
@@ -368,19 +405,16 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
             n += 1
 
     parts: list[str] = []
-    labels: list[str] = []
-    for k, (r, i, si) in enumerate(legs):
-        parts.append(f"[{i}:v]{segment_filters(r, i, width=width, height=height, overlay=overlay, fps=fps, secondary_index=si)}[v{k}]")
-        labels.append(f"[v{k}]")
-    parts.append("".join(labels) + f"concat=n={len(legs)}:v=1:a=0[vout]")
-
-    maps = ["-map", "[vout]"]
+    if not measure_only:
+        labels: list[str] = []
+        for k, (r, i, si) in enumerate(legs):
+            parts.append(f"[{i}:v]{segment_filters(r, i, width=width, height=height, overlay=overlay, fps=fps, secondary_index=si)}[v{k}]")
+            labels.append(f"[v{k}]")
+        parts.append("".join(labels) + f"concat=n={len(legs)}:v=1:a=0[vout]")
     if cues:
         parts += audio_filters(tracks, envelopes=envelopes or {}, levels=levels,
-                               film_len=max(float(r["t_out"]) for r in rows))
-        # No -shortest: the mix may run a hair past the picture, which is
-        # harmless, but a mix that ran short would cut the picture with it.
-        maps += ["-map", "[aout]"]
+                               film_len=max(float(r["t_out"]) for r in rows),
+                               measured=loudnorm_measured, measure_only=measure_only)
 
     # A 564-slot draft put this whole graph past Linux's MAX_ARG_STRLEN
     # (128 KiB) as a single -filter_complex argument, and subprocess.run
@@ -389,11 +423,20 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
     # it goes on disk instead of on the command line. Written through a
     # temporary name and renamed, per this pipeline's checkpoint rule.
     graph = ";".join(parts)
-    filters_path = script_path or out_path.with_suffix(".filters")
+    filters_path = script_path or out_path.with_suffix(".measure.filters" if measure_only else ".filters")
     tmp_filters_path = filters_path.with_name(filters_path.name + ".tmp")
     tmp_filters_path.write_text(graph)
     tmp_filters_path.rename(filters_path)
 
+    if measure_only:
+        # Audio only, to nowhere: the product is what loudnorm prints.
+        cmd += ["-filter_complex_script", str(filters_path), "-map", "[aout]", "-vn", "-f", "null", "-"]
+        return cmd
+    maps = ["-map", "[vout]"]
+    if cues:
+        # No -shortest: the mix may run a hair past the picture, which is
+        # harmless, but a mix that ran short would cut the picture with it.
+        maps += ["-map", "[aout]"]
     cmd += ["-filter_complex_script", str(filters_path), *maps, "-r", str(fps),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
             "-pix_fmt", "yuv420p"]
@@ -433,3 +476,26 @@ def probe_loudness(path: Path, *, t_in: float, t_out: float) -> float:
     if not m:
         raise RuntimeError(f"volumedetect reported no mean_volume for {path}: {proc.stderr[-400:]}")
     return float(m.group(1))
+
+
+def parse_loudnorm_json(stderr: str) -> dict[str, float]:
+    """The four measurements the measuring pass prints, as ffmpeg names
+    them -- the JSON block loudnorm writes at the end of stderr, its
+    values quoted as strings. Anything short of all four is an error that
+    says which, because a render with half a measurement would quietly be
+    a single-pass render."""
+    blocks = re.findall(r"\{[^{}]*\}", stderr)
+    if not blocks:
+        raise ValueError("no loudnorm JSON block in ffmpeg's output -- was the pass run "
+                         "with -loglevel info? tail: " + stderr[-300:].strip())
+    try:
+        data = json.loads(blocks[-1])
+    except ValueError as e:
+        raise ValueError(f"loudnorm JSON block does not parse: {e}") from None
+    out: dict[str, float] = {}
+    for key in ("input_i", "input_lra", "input_tp", "input_thresh"):
+        try:
+            out[key] = float(data[key])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(f"loudnorm JSON block has no usable {key}: {blocks[-1]}") from None
+    return out

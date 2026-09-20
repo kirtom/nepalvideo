@@ -545,6 +545,84 @@ def test_a_cue_on_an_unknown_track_or_without_a_source_is_an_error(tmp_path):
         _mixed(tmp_path, audio_sources={})
 
 
+def test_the_measuring_pass_is_audio_only_and_prints_its_numbers(tmp_path):
+    """The final normalisation is two-pass. The first pass hears the mix
+    and nothing else: no video inputs, no picture chain, no encode, the
+    cue inputs indexed from zero, loudnorm printing its measurement --
+    which it does at INFO, so this pass cannot run at -loglevel error."""
+    cmd = _mixed(tmp_path, measure_only=True)
+    assert _inputs(cmd) == ["/w/rec_a.wav", "/w/rec_a.wav", "/w/rec_b.wav", "/mu/a.mp3", "/mu/b.mp3"]
+    assert cmd[cmd.index("-loglevel") + 1] == "info"
+    assert cmd[-3:] == ["-f", "null", "-"] and "-vn" in cmd
+    assert cmd.count("-map") == 1 and cmd[cmd.index("-map") + 1] == "[aout]"
+    assert "-c:v" not in cmd and "-c:a" not in cmd
+    fc = _graph(cmd)
+    assert "[vout]" not in fc and "concat" not in fc
+    assert "[0:a]loudnorm=I=-16" in fc, "the first cue reads the first input"
+    assert fc.endswith("loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json[aout]")
+
+
+def test_input_indices_agree_between_the_two_passes(tmp_path):
+    """Both passes read the same cue files in the same order; only the
+    offset differs, by exactly the number of video inputs."""
+    import re
+    render_cmd, measure_cmd = _mixed(tmp_path), _mixed(tmp_path, measure_only=True)
+    assert _inputs(render_cmd)[2:] == _inputs(measure_cmd)
+    pads = lambda cmd: sorted(int(k) for k in re.findall(r"\[(\d+):a\]", _graph(cmd)))
+    assert pads(measure_cmd) == list(range(5))
+    assert pads(render_cmd) == list(range(2, 7))
+
+
+def test_a_measured_render_applies_one_static_gain(tmp_path):
+    """With the numbers from the measuring pass loudnorm scales the mix
+    once and only limits true peaks, leaving the envelope's dynamics as
+    designed -- the single pass re-levelled them as it went."""
+    measured = {"input_i": -10.63, "input_lra": 1.1, "input_tp": -3.68, "input_thresh": -20.68}
+    cmd = _mixed(tmp_path, loudnorm_measured=measured)
+    fc = _graph(cmd)
+    assert fc.endswith("loudnorm=I=-14:TP=-1.5:LRA=11:measured_I=-10.63:measured_LRA=1.1"
+                       ":measured_TP=-3.68:measured_thresh=-20.68:linear=true[aout]")
+    assert "print_format" not in fc
+    assert "[vout]" in fc and "-c:v" in cmd and cmd[-1].endswith("o.mp4"), "a full render otherwise"
+    assert _graph(_mixed(tmp_path)).endswith("LRA=11[aout]"), "without numbers: the single pass, unchanged"
+
+
+def test_measuring_without_cues_is_an_error():
+    with pytest.raises(ValueError):
+        render.build_command(ROWS, sources=SRC, out_path=pathlib.Path("/o.mp4"), measure_only=True)
+
+
+LOUDNORM_STDERR = """Input #0, wav, from '/tmp/speech.wav':
+  Duration: 00:00:05.00, bitrate: 705 kb/s
+[Parsed_loudnorm_9 @ 0x55d0c0a3b2c0]
+{
+\t"input_i" : "-10.63",
+\t"input_tp" : "-3.68",
+\t"input_lra" : "1.10",
+\t"input_thresh" : "-20.68",
+\t"output_i" : "-14.05",
+\t"output_tp" : "-7.10",
+\t"output_lra" : "1.10",
+\t"output_thresh" : "-24.10",
+\t"normalization_type" : "dynamic",
+\t"target_offset" : "0.05"
+}
+"""
+
+
+def test_parse_loudnorm_json_reads_the_block_ffmpeg_prints():
+    got = render.parse_loudnorm_json(LOUDNORM_STDERR)
+    assert got == {"input_i": -10.63, "input_lra": 1.1, "input_tp": -3.68, "input_thresh": -20.68}
+    assert all(isinstance(v, float) for v in got.values())
+
+
+def test_parse_loudnorm_json_names_what_is_missing():
+    with pytest.raises(ValueError, match="no loudnorm"):
+        render.parse_loudnorm_json("Input #0, wav\nsize=N/A time=00:00:12.00\n")
+    with pytest.raises(ValueError, match="input_tp"):
+        render.parse_loudnorm_json(LOUDNORM_STDERR.replace('"input_tp" : "-3.68",\n', ""))
+
+
 @pytest.mark.slow
 def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
     """At the boundary: a 12 s cut, a 440 Hz "speech" cue at 2-5 s over a
@@ -580,10 +658,9 @@ def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
     envelopes = {"music": "between(t,0,7)*4+between(t,9,12)*4",
                  "location": "between(t,0,12)*1"}
     out = tmp_path / "draft.mp4"
-    cmd = render.build_command(rows, sources={"v1": vid, "v2": vid}, out_path=out, cues=cues,
-                               audio_sources={"r": speech}, music_sources={"m": music},
-                               envelopes=envelopes, levels=LEVELS)
-    subprocess.run(cmd, check=True)
+    kw = dict(sources={"v1": vid, "v2": vid}, cues=cues, audio_sources={"r": speech},
+              music_sources={"m": music}, envelopes=envelopes, levels=LEVELS)
+    subprocess.run(render.build_command(rows, out_path=out, **kw), check=True)
     alone = render.probe_loudness(out, t_in=0.0, t_out=2.0)
     join = render.probe_loudness(out, t_in=5.0, t_out=7.0)
     assert abs(join - alone) < 3.0, f"across the join reads {join} dB against {alone} dB for the bed alone"
@@ -603,3 +680,17 @@ def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
          "stream=duration", "-of", "csv=p=0", str(out)],
         capture_output=True, text=True, check=True).stdout.strip())
     assert dur >= 11.5, f"the audio stream must run the film's length, got {dur}"
+
+    # Two-pass: hear the mix audio-only, then render with its numbers. One
+    # static gain leaves the envelope's dynamics alone, so the bed after the
+    # window comes back at the level it left -- the 3.1 dB the single pass
+    # added is the number this holds.
+    measure = subprocess.run(render.build_command(rows, out_path=out, measure_only=True, **kw),
+                             capture_output=True, text=True, check=True)
+    measured = render.parse_loudnorm_json(measure.stderr)
+    assert measured["input_i"] < 0 and measured["input_tp"] < 0
+    out2 = tmp_path / "draft2.mp4"
+    subprocess.run(render.build_command(rows, out_path=out2, loudnorm_measured=measured, **kw), check=True)
+    alone2 = render.probe_loudness(out2, t_in=0.0, t_out=2.0)
+    late2 = render.probe_loudness(out2, t_in=10.0, t_out=12.0)
+    assert abs(late2 - alone2) < 1.5, f"two-pass: the cue after the window reads {late2} dB against {alone2} dB"
