@@ -93,14 +93,6 @@ def test_every_shot_becomes_an_input_and_a_concat_leg(tmp_path):
     assert "concat=n=2:v=1:a=0[vout]" in fc
 
 
-def test_music_is_normalised_to_the_spec_target_not_assumed(tmp_path):
-    cmd = render.build_command(ROWS, sources=SRC, out_path=tmp_path / "o.mp4",
-                               music_path=pathlib.Path("/m/bed.mp3"), music_lufs=-14.0)
-    fc = _graph(cmd)
-    assert "loudnorm=I=-14" in fc
-    assert "-shortest" in cmd, "the bed must not outlast the picture"
-
-
 def test_without_music_there_is_no_audio_stream_to_map(tmp_path):
     cmd = render.build_command(ROWS, sources=SRC, out_path=tmp_path / "o.mp4")
     assert "[aout]" not in " ".join(cmd)
@@ -270,11 +262,11 @@ def test_a_card_without_drawtext_is_plain_black(monkeypatch, tmp_path):
     assert "drawtext" not in _graph(cmd)
 
 
-def test_a_split_slot_renders_its_primary_only(tmp_path):
-    """pairs.find_pairs (src/nepal/process/pairs.py:119-132) writes the
-    primary's own shot_id/src_in onto the slot; secondary_shot_id and
-    secondary_src_in describe the other phone's clip for a future
-    split-screen render, and must not be read as a second source now."""
+def test_a_split_whose_secondary_has_no_source_renders_its_primary_alone(tmp_path):
+    """render_draft did not know the other phone's clip before step 4 wired
+    it, and a draft that dies on one slot is worse than one whose split
+    shows a single phone -- the same policy as a slot with no media at all:
+    degrade loudly, never drop the slot or read the secondary as a source."""
     row = {"shot_id": "a#0001", "t_in": 0.0, "t_out": 3.0, "src_in": 5.0,
            "secondary_shot_id": "z#9999", "secondary_src_in": 1.0,
            "motion": json.dumps({"type": "split"})}
@@ -333,3 +325,225 @@ def test_a_700_row_timeline_keeps_every_argument_short(tmp_path):
     assert max(len(c) for c in cmd) < 128 * 1024
     assert "-filter_complex_script" in cmd
     assert "-filter_complex" not in cmd
+
+
+# -- the split slot with both phones, and the caller's caption ----------
+
+SPLIT = {"shot_id": "a#0001", "t_in": 0.0, "t_out": 3.0, "src_in": 5.0,
+         "secondary_shot_id": "z#9999", "secondary_src_in": 1.0,
+         "motion": json.dumps({"type": "split"})}
+BOTH = {"a#0001": pathlib.Path("/m/a.mp4"), "z#9999": pathlib.Path("/m/z.mp4")}
+
+
+def _inputs(cmd):
+    return [cmd[k + 1] for k, c in enumerate(cmd) if c == "-i"]
+
+
+def test_a_split_slot_puts_both_phones_side_by_side(tmp_path):
+    """Both clips are inputs -- the secondary right after its primary, seeked
+    to its own src_in for the slot's length -- each fitted to half the frame
+    at the one rate and stacked into one concat leg."""
+    cmd = render.build_command([SPLIT], sources=BOTH, out_path=tmp_path / "o.mp4",
+                               width=960, height=540)
+    assert _inputs(cmd) == ["/m/a.mp4", "/m/z.mp4"]
+    j = [k for k, c in enumerate(cmd) if c == "-i"][1]
+    assert cmd[j - 4:j] == ["-ss", "1.000", "-t", "3.000"]
+    fc = _graph(cmd)
+    assert "[0:v]" in fc and "[1:v]" in fc and "hstack=inputs=2" in fc
+    assert fc.count("scale=480:540") == 2 and fc.count("crop=480:540") == 2
+    assert fc.count("setsar=1") == 2 and fc.count("fps=30") == 2
+    assert "concat=n=1:v=1:a=0[vout]" in fc
+
+
+def test_a_split_in_the_middle_keeps_the_legs_in_row_order(tmp_path):
+    rows = [ROWS[0], SPLIT | {"t_in": 3.0, "t_out": 6.0}, ROWS[1] | {"t_in": 6.0, "t_out": 10.0}]
+    cmd = render.build_command(rows, sources=BOTH | SRC, out_path=tmp_path / "o.mp4")
+    assert _inputs(cmd) == ["/m/a.mp4", "/m/a.mp4", "/m/z.mp4", "/m/b.mp4"]
+    fc = _graph(cmd)
+    assert "[3:v]" in fc, "the row after the split reads the input after the secondary"
+    assert "concat=n=3:v=1:a=0[vout]" in fc
+
+
+@pytest.mark.skipif(not render.has_drawtext(), reason="ffmpeg has no drawtext")
+def test_a_card_takes_its_caption_from_the_caller_over_the_row():
+    row = {"kind": "card", "t_in": 0.0, "t_out": 2.0,
+           "motion": json.dumps({"type": "card", "text": "from the row"})}
+    assert "from the row" in render.segment_filters(row, 0)
+    f = render.segment_filters(row, 0, card_text="from the caller")
+    assert "from the caller" in f and "from the row" not in f
+
+
+# -- the audio graph (Film v2 step 4, part B) ---------------------------
+
+LEVELS = {"speech_lufs": -16.0, "location_full_lufs": -18.0, "final_lufs": -14.0,
+          "true_peak_db": -1.5, "music_xfade_s": 2.0, "cue_fade_s": 0.15}
+# What mix.volume_expr produces: a flat sum of between(t,..)*gain terms,
+# opaque to the renderer -- written by hand here so this file never
+# imports mix.py.
+ENVELOPES = {"location": "between(t,0,3)*1+between(t,3,7)*0.25",
+             "music": "between(t,0,7)*0.5"}
+
+
+def _cue(**f):
+    return {"cue_id": None, "track": None, "t_in": None, "t_out": None, "source": None,
+            "src_in": None, "src_out": None, "gain_lufs": None, "fade_in_s": 0.15,
+            "fade_out_s": 0.15, "beat_id": None} | f
+
+
+# deliberately out of time order, and interleaved across tracks
+CUES = [
+    _cue(cue_id="mu_1", track="music", t_in=4.0, t_out=7.0, source="trk_b",
+         src_in=10.0, src_out=13.0, gain_lufs=-14.0, fade_in_s=2.0, fade_out_s=2.0),
+    _cue(cue_id="lo_1", track="location", t_in=3.0, t_out=7.0, source="rec_b",
+         src_in=0.0, src_out=4.0, gain_lufs=-24.0),
+    _cue(cue_id="sp_0", track="speech", t_in=0.5, t_out=2.5, source="rec_a",
+         src_in=5.0, src_out=7.0, gain_lufs=-16.0, beat_id="b1"),
+    _cue(cue_id="lo_0", track="location", t_in=0.0, t_out=3.0, source="rec_a",
+         src_in=5.0, src_out=8.0, gain_lufs=-18.0),
+    _cue(cue_id="mu_0", track="music", t_in=0.0, t_out=4.0, source="trk_a",
+         src_in=0.0, src_out=4.0, gain_lufs=-14.0, fade_in_s=2.0, fade_out_s=2.0),
+]
+AUDIO = {"rec_a": pathlib.Path("/w/rec_a.wav"), "rec_b": pathlib.Path("/w/rec_b.wav")}
+MUSIC = {"trk_a": pathlib.Path("/mu/a.mp3"), "trk_b": pathlib.Path("/mu/b.mp3")}
+
+
+def _mixed(tmp_path, cues=CUES, **kw):
+    return render.build_command(ROWS, sources=SRC, out_path=tmp_path / "o.mp4", cues=cues,
+                                audio_sources=AUDIO, music_sources=MUSIC,
+                                envelopes=ENVELOPES, levels=LEVELS, **kw)
+
+
+def test_cue_inputs_follow_the_video_inputs_by_track_in_time_order(tmp_path):
+    """Every index in the graph is computed from this order, so it is
+    pinned: the video rows (each secondary right after its primary), then
+    the speech, location and music cues, each track by t_in whatever order
+    the cues arrived in."""
+    cmd = _mixed(tmp_path)
+    assert _inputs(cmd) == ["/m/a.mp4", "/m/b.mp4", "/w/rec_a.wav",
+                            "/w/rec_a.wav", "/w/rec_b.wav", "/mu/a.mp3", "/mu/b.mp3"]
+    i = [k for k, c in enumerate(cmd) if c == "-i"]
+    assert cmd[i[2] - 4:i[2]] == ["-ss", "5.000", "-t", "2.000"], "a cue is seeked at the input like a shot"
+    assert cmd[i[6] - 4:i[6]] == ["-ss", "10.000", "-t", "3.000"]
+
+
+def test_speech_cues_are_normalised_faded_placed_and_summed(tmp_path):
+    fc = _graph(_mixed(tmp_path))
+    assert ("[2:a]loudnorm=I=-16:TP=-1.5:LRA=11,afade=t=in:d=0.15,"
+            "afade=t=out:st=1.850:d=0.15,adelay=500|500[sp0]") in fc
+    assert "[sp0]amix=inputs=1:normalize=0[speech]" in fc
+
+
+def test_location_cues_sit_against_full_level_and_ride_the_envelope(tmp_path):
+    fc = _graph(_mixed(tmp_path))
+    assert "[3:a]volume=0dB,adelay=0|0[lo0]" in fc, "a full-level cue is untouched"
+    assert "[4:a]volume=-6dB,adelay=3000|3000[lo1]" in fc, "a cue under music sits that far below full"
+    assert ("[lo0][lo1]amix=inputs=2:normalize=0,"
+            "volume='between(t,0,3)*1+between(t,3,7)*0.25':eval=frame[loc]") in fc
+
+
+def test_music_cues_crossfade_in_time_order_then_ride_the_envelope(tmp_path):
+    fc = _graph(_mixed(tmp_path))
+    assert "[5:a][6:a]acrossfade=d=2[mx1]" in fc
+    assert "[mx1]adelay=0|0,volume='between(t,0,7)*0.5':eval=frame[mus]" in fc
+
+
+def test_one_music_cue_needs_no_crossfade(tmp_path):
+    fc = _graph(_mixed(tmp_path, cues=[c for c in CUES if c["cue_id"] != "mu_0"]))
+    assert "acrossfade" not in fc
+    assert "[5:a]adelay=4000|4000,volume='between(t,0,7)*0.5':eval=frame[mus]" in fc
+
+
+def test_the_three_tracks_meet_in_one_mix_and_one_final_normalisation(tmp_path):
+    cmd = _mixed(tmp_path)
+    fc = _graph(cmd)
+    assert "-filter_complex_script" in cmd
+    assert "[speech][loc][mus]amix=inputs=3:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[aout]" in fc
+    assert fc.count("adelay=") == 1 + 2 + 1, "one per speech and location cue, one for the music chain"
+    assert cmd[cmd.index("-map") + 1] == "[vout]" and "[aout]" in cmd
+    assert cmd[cmd.index("-c:a") + 1] == "aac" and cmd[cmd.index("-b:a") + 1] == "192k"
+    assert "-shortest" not in cmd, "a short audio track must never cut the picture"
+
+
+def test_a_track_without_cues_is_silence_for_the_length_of_the_film(tmp_path):
+    fc = _graph(_mixed(tmp_path, cues=[c for c in CUES if c["track"] == "music"]))
+    assert "anullsrc,atrim=duration=7.000[speech]" in fc
+    assert "anullsrc,atrim=duration=7.000[loc]" in fc
+    assert "amix=inputs=3:normalize=0" in fc
+
+
+def test_without_cues_the_command_is_the_silent_draft_byte_for_byte(monkeypatch, tmp_path):
+    monkeypatch.setattr(render, "has_drawtext", lambda **kw: False)
+    out = tmp_path / "o.mp4"
+    cmd = render.build_command(ROWS, sources=SRC, out_path=out, cues=(), levels=LEVELS)
+    assert cmd == ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                   "-ss", "5.000", "-t", "3.000", "-i", "/m/a.mp4",
+                   "-ss", "0.000", "-t", "4.000", "-i", "/m/b.mp4",
+                   "-filter_complex_script", str(tmp_path / "o.filters"), "-map", "[vout]",
+                   "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                   "-pix_fmt", "yuv420p", str(out)]
+    leg = ("fps=30,setpts=PTS-STARTPTS,scale=960:540:force_original_aspect_ratio=decrease"
+           ":force_divisible_by=2,pad=960:540:(ow-iw)/2:(oh-ih)/2:black,setsar=1")
+    assert _graph(cmd) == f"[0:v]{leg}[v0];[1:v]{leg}[v1];[v0][v1]concat=n=2:v=1:a=0[vout]"
+
+
+def test_the_graph_can_be_written_where_the_caller_says(tmp_path):
+    script = tmp_path / "elsewhere" / "graph.txt"
+    script.parent.mkdir()
+    cmd = render.build_command(ROWS, sources=SRC, out_path=tmp_path / "o.mp4", script_path=script)
+    assert cmd[cmd.index("-filter_complex_script") + 1] == str(script)
+    assert "concat=n=2" in script.read_text()
+    assert "concat=n=2" in render.describe(cmd), "describe still inlines the graph from wherever it went"
+
+
+def test_a_cue_on_an_unknown_track_or_without_a_source_is_an_error(tmp_path):
+    with pytest.raises(ValueError):
+        _mixed(tmp_path, cues=[CUES[0] | {"track": "ambience"}])
+    with pytest.raises(KeyError):
+        _mixed(tmp_path, audio_sources={})
+
+
+@pytest.mark.slow
+def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
+    """At the boundary: a 12 s cut, a 440 Hz "speech" cue at 2-5 s over a
+    220 Hz bed, the music envelope muting 8-10 s. Read back with
+    volumedetect: the bed alone at 0-2 s and 5-8 s within 3 dB, the window
+    silent, the audio running the length of the film. The envelopes are the
+    flat between(t,..)*gain sums mix.volume_expr writes, quoted inside the
+    script file -- this is the proof that ffmpeg parses them that way."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("needs ffmpeg")
+
+    def lavfi(src, path, *extra):
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", src, *extra, str(path)], check=True)
+    vid, speech, music = tmp_path / "v.mp4", tmp_path / "speech.wav", tmp_path / "music.wav"
+    lavfi("testsrc=size=320x240:rate=25:duration=13", vid, "-c:v", "libx264", "-pix_fmt", "yuv420p")
+    lavfi("sine=frequency=440:duration=5", speech)
+    lavfi("sine=frequency=220:duration=12", music, "-ac", "2")
+    rows = [{"shot_id": "v1", "t_in": 0.0, "t_out": 6.0, "src_in": 0.0},
+            {"shot_id": "v2", "t_in": 6.0, "t_out": 12.0, "src_in": 6.0}]
+    cues = [_cue(cue_id="sp", track="speech", t_in=2.0, t_out=5.0, source="r",
+                 src_in=0.0, src_out=3.0, gain_lufs=-16.0),
+            _cue(cue_id="mu", track="music", t_in=0.0, t_out=12.0, source="m",
+                 src_in=0.0, src_out=12.0, gain_lufs=-14.0, fade_in_s=2.0, fade_out_s=2.0)]
+    # The bed is pushed well above the normalised speech so what 5-8 s reads
+    # is the bed's own level, not the final normaliser recovering from the
+    # louder 2-5 s.
+    envelopes = {"music": "between(t,0,8)*4+between(t,10,12)*4",
+                 "location": "between(t,0,12)*1"}
+    out = tmp_path / "draft.mp4"
+    cmd = render.build_command(rows, sources={"v1": vid, "v2": vid}, out_path=out, cues=cues,
+                               audio_sources={"r": speech}, music_sources={"m": music},
+                               envelopes=envelopes, levels=LEVELS)
+    subprocess.run(cmd, check=True)
+    before = render.probe_loudness(out, t_in=0.0, t_out=2.0)
+    after = render.probe_loudness(out, t_in=5.0, t_out=8.0)
+    assert abs(before - after) < 3.0, f"the bed alone reads {before} dB before the speech, {after} dB after"
+    # The envelope is evaluated once per audio frame, so its edges land
+    # within a frame of 8 s and 10 s; the probe stays a quarter second inside.
+    assert render.probe_loudness(out, t_in=8.25, t_out=9.75) < -50.0
+    dur = float(subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+         "stream=duration", "-of", "csv=p=0", str(out)],
+        capture_output=True, text=True, check=True).stdout.strip())
+    assert dur >= 11.5, f"the audio stream must run the film's length, got {dur}"
