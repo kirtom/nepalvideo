@@ -275,6 +275,63 @@ the chronology break was the camera clock (fixed); wallpaper, smaller round
 videos, a narrower 360 view, per-act source share and a 25–40 minute length
 are decided for steps 4 and 6.
 
+## Film v2 — step 4, part A: the first v2 picture cut (2026-09-20)
+
+Tasks 1–9 of the assembly plan are built and reviewed (anchors, pairs, the
+long take, scenes and their music targets, the Viterbi over sections, the
+rhythm pass, the S05 wiring), and **the v2 timeline has been cut on the box
+six times in one morning**, each run reading what the last one logged. The
+first cut was 10.5 minutes of a 35.5-minute plan; the sixth is **30.3
+minutes, 734 slots**, and the measurements in between are the useful part.
+
+**What the corpus taught, in the order it did.** A gap between anchors took
+only footage whose clock fell inside the gap's own minute, and the trek's
+footage is clumped, so most gaps were empty (fixed: the nearest footage by
+clock distance). The film-time beat grid carried a float shift, so the
+grid's last beat sat one picosecond past a slot's start and every later cut
+snapped onto it and collapsed to nothing (fixed: three decimals, and a
+guard that refuses a zero-length slot at the write). `≤ 3 shots per place
+per act` is a ceiling on the film when a geocoded place is a whole day —
+Act 4 has four place names for 151 shots (relaxed on a second pass, as
+the spec's own table allows). An act was allotted time its material could
+not carry (each act now bounded by what it has). And the film is cut in
+count, not seconds: 84 % of slots are ~2 s because the high band owns most
+of the music time, so each clip is spent once at 2.5 s and Acts 1, 2 and 5
+run out of clips before they run out of seconds (`assemble.expected_slot_s`
+2.5, measured, feeds the material bound and the re-fill budget). Zero pairs
+came from 253 of 373 phone videos being portrait behind a `rotate: 90/270`
+tag while `width × height` said 1920×1080 (fixed at the seam: display
+dimensions). 564 cuts overflowed one `-filter_complex` argument (fixed:
+the graph goes through a file).
+
+**The sixth cut, measured.** Total 1817 s chosen against 2113 planned:
+Act 1 76.5 of 77.5 s, Act 2 90.7 of 150 (material 119 s, floored at
+`min_s`), Act 3 1135 of 1150 (its config `max_s`), Act 4 150 of 150, Act 5
+346 of 394. Slots per act 2 / 30 / 46 / 446 / 60 / 150. Sources (slots of
+available): Act 1 camera 6/6, keller 0/10, kulikov 2/4, telegram 22/62;
+Act 2 camera 19/23, keller 2/11, kulikov 25/43; Act 3 camera 206/260,
+keller 42/226, kulikov 198/398; Act 4 camera 12/13, keller 21/72, kulikov
+27/66; Act 5 camera 39/46, keller 48/170, kulikov 63/129. 15 anchors
+placed, 7 pairs, the long take on `camera_20240415_044025`, cold open on
+beat b18, 30 scenes assigned per scene, one natural-sound window (Act 3,
+t=1145 s). The 25 % phone-share rule does not yet hold after the re-fill
+rounds (Act 3: keller 42 against kulikov 198) — parked for the next round.
+
+**What it cost.** The box would not boot: its 60 GB disk was full once
+raw/ reached 69 GB, cloud-init died with ENOSPC and never wrote the ssh
+keys; recreated with 150 GB (config says so now). Six cuts plus tests,
+about 1.5 h of on-demand box time; ledger 4.65 of 25 USD before this
+session's box hours are booked at `remote down`.
+A local run was started by mistake on a misread instruction and killed
+mid-render; nothing of the pipeline runs locally.
+
+**Gate 3 is the operator's watch** (`work/gates/gate3/draft.mp4`, silent,
+cards black — the box ffmpeg has no drawtext). Open for that read: whether a
+2.5-second mean cut is the film's pace; whether Act 1 and Act 2, which
+exhaust their clips, should admit more stills (`film.photo_share_by_act`;
+683 of 1550 shots are stills); whether Act 3 should be allowed past its
+1150 s `max_s`.
+
 ## The last full run
 
 S01 + S03.0/.1/.2 on the real corpus, 4.5 hours wall clock. These numbers are
