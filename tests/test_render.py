@@ -408,9 +408,9 @@ MUSIC = {"trk_a": pathlib.Path("/mu/a.mp3"), "trk_b": pathlib.Path("/mu/b.mp3")}
 
 
 def _mixed(tmp_path, cues=CUES, **kw):
-    return render.build_command(ROWS, sources=SRC, out_path=tmp_path / "o.mp4", cues=cues,
-                                audio_sources=AUDIO, music_sources=MUSIC,
-                                envelopes=ENVELOPES, levels=LEVELS, **kw)
+    kw = {"audio_sources": AUDIO, "music_sources": MUSIC,
+          "envelopes": ENVELOPES, "levels": LEVELS} | kw
+    return render.build_command(ROWS, sources=SRC, out_path=tmp_path / "o.mp4", cues=cues, **kw)
 
 
 def test_cue_inputs_follow_the_video_inputs_by_track_in_time_order(tmp_path):
