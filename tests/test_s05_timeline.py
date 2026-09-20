@@ -17,7 +17,6 @@ from datetime import datetime, timedelta, timezone
 
 from nepal import db
 from nepal.config import Config
-from nepal.spine import music as music_mod
 from nepal.stages import s05_cut
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -345,12 +344,27 @@ def test_acts_reach_their_planned_length(tmp_path):
     cfg = _cfg(tmp_path)
     conn = _seed(cfg)
     rep = s05_cut.build_timeline(cfg, conn)
-    card_end = conn.execute("SELECT t_out FROM timeline ORDER BY slot_index LIMIT 1 OFFSET 1").fetchone()[0]
-    planned = music_mod.allocate_act_durations(cfg.act_targets(), rep["planned_s"] - card_end)
     tol = float(cfg.get("film.duration_tolerance_s"))
     for act, (start, end) in rep["act_spans"].items():
-        assert abs((end - start) - planned[int(act)]) <= tol, (act, end - start, planned[int(act)])
+        planned = rep["act_planned_s"][act]
+        assert abs((end - start) - planned) <= tol, (act, end - start, planned)
     conn.close()
+
+
+def test_material_bounds_an_act_band_but_never_below_its_floor(tmp_path):
+    """An act's band is capped by what its rows can put on screen -- every
+    shot once, at most the act's longest slot, a still held that long too --
+    and an act with less than its floor keeps the floor and comes out short."""
+    cfg = _cfg(tmp_path)
+    longest = {a: cfg.get("assemble.shot_duration_s")[a][1] for a in (2, 4)}
+    assert (longest[2], longest[4]) == (6.0, 4.0), "the seed arithmetic below assumes these"
+    rows = ([{"act": 2, "media_kind": "video", "start_s": 0.0, "end_s": 4.0}] * 22       # 88 s
+            + [{"act": 2, "media_kind": "photo", "start_s": 0.0, "end_s": 4.0}] * 2      # 2 x 6 s
+            + [{"act": 4, "media_kind": "video", "start_s": 0.0, "end_s": 20.0}] * 10)   # 10 x 4 s
+    specs = [{"act": 2, "min_s": 50, "max_s": 700}, {"act": 4, "min_s": 90, "max_s": 150}]
+    bounded, material = s05_cut._material_bound(cfg, specs, rows)
+    assert material == {2: 100.0, 4: 40.0}
+    assert [(b["act"], b["min_s"], b["max_s"]) for b in bounded] == [(2, 50, 100.0), (4, 90, 90.0)]
 
 
 def test_build_timeline_is_rebuilt_not_accumulated(tmp_path):

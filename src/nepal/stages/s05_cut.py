@@ -726,6 +726,34 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
     return scenes, mmap, mode, problems
 
 
+def _material_bound(cfg: Config, specs: Sequence[Mapping[str, Any]], rows: Sequence[Mapping[str, Any]]
+                    ) -> tuple[list[dict[str, Any]], dict[int, float]]:
+    """The act bands with each ``max_s`` capped by what the act's rows can
+    put on screen: every shot once, no longer than the act's longest slot
+    (a still held that long too), summed.
+
+    ``allocate_act_durations`` scales every act toward the film's total by
+    its band alone, so act 2 was planned at 511 s on 77 rows and act 1 at
+    136 s on 28 clips and 54 stills, and both ran dry while acts 3 and 5
+    had rows to spare. The surplus an act cannot carry now goes to the acts
+    that can. Under ``min_s`` the band keeps its floor and the act will come
+    out short: a fact about the material, logged rather than hidden.
+    """
+    material: dict[int, float] = {}
+    bounded: list[dict[str, Any]] = []
+    for spec in specs:
+        act = int(spec["act"])
+        longest = _duration_range(cfg, act)[1]
+        material[act] = sum(min(asm.shot_available_s(r), longest) for r in rows if r.get("act") == act)
+        max_s = min(float(spec["max_s"]), material[act])
+        if max_s < float(spec["min_s"]):
+            log.warning("S06 act %d has %.1fs of material against a floor of %.0fs; it will come "
+                        "out short", act, material[act], float(spec["min_s"]))
+            max_s = float(spec["min_s"])
+        bounded.append({**spec, "max_s": max_s})
+    return bounded, material
+
+
 def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     """S06 -- the picture track v2: anchors, pairs, the long take, the fill,
     scenes, music, rhythm; then the table, the map and the OTIO/FCPXML."""
@@ -753,8 +781,12 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         selectivity=float(cfg.get("film.material_selectivity")))
     act0 = _cold_open(cfg, beats, rows)
     t0 = float(act0[-1]["t_out"])
-    # The cold open is carved off the top; the acts share the rest.
-    act_len = music_mod.allocate_act_durations(cfg.act_targets(), total_s - t0)
+    # The cold open is carved off the top; the acts share the rest, each
+    # within what its own material can carry.
+    specs, act_material = _material_bound(cfg, cfg.act_targets(), rows)
+    log.info("S06 material per act: %s", {a: round(m, 1) for a, m in sorted(act_material.items())})
+    act_len = music_mod.allocate_act_durations(specs, total_s - t0)
+    log.info("S06 act allocation over %.1fs: %s", total_s - t0, act_len)
     acts = sorted(act_len)
     similarity = asm.make_similarity(_load_embeddings(cfg),
                                      fallback_weights=cfg.get("assemble.similarity_fallback"))
@@ -979,6 +1011,8 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     return {"n_slots": len(ordered), "duration_s": round(duration, 3), "planned_s": total_s,
             "per_act": per_act, "per_act_sources": db.per_act_sources(conn),
             "act_spans": {str(a): [round(x, 3) for x in final_spans[a]] for a in acts},
+            "act_planned_s": {str(a): act_len[a] for a in acts},
+            "act_material_s": {str(a): round(act_material[a], 3) for a in acts},
             "n_anchors": n_anchors, "n_pairs": len(pairs),
             "long_take": shots_by_id[long_take_id]["recording_id"] if long_take_id else None,
             "n_scenes": len(scenes), "music_assignment": mode,
