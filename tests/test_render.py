@@ -191,6 +191,43 @@ def test_ffmpeg_renders_a_cut_of_the_expected_length(tmp_path):
     assert dur == pytest.approx(7.0, abs=0.3), f"expected 7 s of cut, got {dur}"
 
 
+@pytest.mark.slow
+def test_ffmpeg_renders_a_card_between_real_footage_and_a_still(tmp_path):
+    """A card (lavfi color + drawtext, no file) sitting between a decoded
+    video and a decoded JPEG -- a real photograph decodes to yuvj444p or
+    yuvj420p (full-range), not the yuv420p the encoder is asked for -- must
+    still concat cleanly to one yuv420p file of the sum of the three
+    segment lengths. Checked with ffprobe, not by reading the command back."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("needs ffmpeg")
+    vid = tmp_path / "v.mp4"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc=size=640x480:rate=25:duration=10",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(vid)], check=True)
+    img = tmp_path / "still.jpg"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc=size=1200x900:rate=1:duration=1",
+                    "-pix_fmt", "yuvj444p", "-frames:v", "1", str(img)], check=True)
+    rows = [
+        {"shot_id": "v1", "media_kind": "video", "t_in": 0.0, "t_out": 3.0, "src_in": 0.0},
+        {"kind": "card", "t_in": 3.0, "t_out": 5.0,
+         "motion": json.dumps({"type": "card", "text": "Nepal"})},
+        {"shot_id": "p1", "media_kind": "photo", "t_in": 5.0, "t_out": 9.0},
+    ]
+    out = tmp_path / "draft.mp4"
+    cmd = render.build_command(rows, sources={"v1": vid, "p1": img}, out_path=out)
+    subprocess.run(cmd, check=True)
+    assert out.exists()
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=pix_fmt:format=duration", "-of", "default=nw=1", str(out)],
+        capture_output=True, text=True, check=True).stdout
+    assert "pix_fmt=yuv420p" in probe
+    dur = float([l for l in probe.splitlines() if l.startswith("duration=")][0].split("=")[1])
+    expected = sum(r["t_out"] - r["t_in"] for r in rows)
+    assert dur == pytest.approx(expected, abs=0.3), f"expected {expected} s, got {dur}"
+
+
 # -- the card and split slots (Film v2 step 4) --------------------------
 
 @pytest.mark.skipif(not render.has_drawtext(), reason="ffmpeg has no drawtext")

@@ -9,6 +9,7 @@ actually cross on the box.
 """
 import json
 import math
+import subprocess
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
@@ -320,6 +321,48 @@ def test_build_timeline_is_rebuilt_not_accumulated(tmp_path):
     again = s05_cut.build_timeline(cfg, conn)
     n = conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0]
     assert n == first["n_slots"] == again["n_slots"]
+    conn.close()
+
+
+def test_render_draft_left_join_keeps_the_card_and_matches_row_count(tmp_path, monkeypatch):
+    """render_draft used to INNER JOIN shots, which silently drops the card
+    slot (shot_id NULL by construction) before the missing-media check ever
+    runs -- one row short of the timeline, and nothing here would have caught
+    a regression back to that join without checking the query's own output.
+
+    Every other row gets a real stand-in file (render_draft never reads it;
+    subprocess.run is captured here, not run) so the number of inputs
+    build_command receives can be compared directly against the timeline's
+    own row count -- the count an inner join would have been one short of.
+    """
+    cfg = _cfg(tmp_path)
+    conn = _seed(cfg)
+    s05_cut.build_timeline(cfg, conn)
+    n_rows = conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0]
+
+    for r in conn.execute(
+            "SELECT t.kind, t.shot_id, s.recording_id, s.media_kind FROM timeline t "
+            "LEFT JOIN shots s ON s.shot_id = t.shot_id"):
+        if r["kind"] == "card":
+            continue
+        if r["media_kind"] == "photo":
+            cfg.work("stills", f"{r['shot_id']}.jpg").touch()
+        else:
+            cfg.work("proxies", f"{r['recording_id']}_eq.mp4").touch()
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    rep = s05_cut.render_draft(cfg, conn)
+    assert rep["n_slots"] == n_rows, "an inner join would have made the draft one slot short"
+    cmd = captured["cmd"]
+    assert cmd.count("-i") == n_rows
+    i = cmd.index("-f")
+    assert cmd[i:i + 2] == ["-f", "lavfi"], "the card must reach build_command as a synthesised input"
     conn.close()
 
 

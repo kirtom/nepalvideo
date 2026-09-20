@@ -100,6 +100,8 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
         # only the caption, and only when this ffmpeg can burn one in.
         chain = ["setpts=PTS-STARTPTS", "setsar=1"]
         text = _card_text(row)
+        # This caption is the card's whole content, not the shot_id/timecode
+        # debug label -- it is deliberately independent of the `overlay` flag.
         if has_drawtext() and text:
             chain.append(
                 f"drawtext=text='{escape_drawtext(text)}'"
