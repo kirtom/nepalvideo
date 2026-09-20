@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -329,10 +330,18 @@ def _select(cands: Sequence[Mapping[str, Any]], *, budget: int, similarity, lam:
     return chosen + relaxed, len(relaxed)
 
 
+def _refill_budget(gap_s: float, expected_slot_s: float) -> int:
+    """How many shots a gap left by the rhythm pass takes: the gap at what a
+    slot actually runs once cut, not at the act's plan lengths -- budgeting
+    a 45 s gap at 3-8 s slots laid ten that the retime cut to 25 s, and act
+    3 closed half its gap a round for three rounds and stopped short."""
+    return max(1, math.ceil(gap_s / expected_slot_s))
+
+
 def _fill_gap(cfg: Config, free: Sequence[Mapping[str, Any]], *, act: int, t0: float, t1: float,
               lo: float | None, hi: float | None, similarity,
               existing: Sequence[Mapping[str, Any]], prev_photo: bool,
-              next_photo: bool) -> list[dict[str, Any]]:
+              next_photo: bool, budget: int | None = None) -> list[dict[str, Any]]:
     """The next-best shots for one gap of the act, laid from its start with
     no grid yet -- the rhythm pass snaps them once there is music to snap to.
 
@@ -340,10 +349,11 @@ def _fill_gap(cfg: Config, free: Sequence[Mapping[str, Any]], *, act: int, t0: f
     excluded recording, only budgeted stills); ``lo``/``hi`` its UTC window,
     from which ``_gap_candidates`` draws. ``existing`` are the shot rows
     already on screen in this act, so the per-place cap counts the whole act,
-    not just this gap.
+    not just this gap. ``budget`` defaults to what the gap affords at the
+    act's plan lengths; the refill after the rhythm pass passes its own.
     """
     rng = _duration_range(cfg, act)
-    budget = asm.slot_budget(t1 - t0, rng)
+    budget = asm.slot_budget(t1 - t0, rng) if budget is None else budget
     cands, n_inside = _gap_candidates(free, lo, hi, budget=budget)
     place_cap = int(cfg.get("assemble.max_shots_per_place_per_act"))
     run_cap = int(cfg.get("assemble.max_consecutive_recording"))
@@ -729,22 +739,30 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
 def _material_bound(cfg: Config, specs: Sequence[Mapping[str, Any]], rows: Sequence[Mapping[str, Any]]
                     ) -> tuple[list[dict[str, Any]], dict[int, float]]:
     """The act bands with each ``max_s`` capped by what the act's rows can
-    put on screen: every shot once, no longer than the act's longest slot
-    (a still held that long too), summed.
+    put on screen: every clip once, at ``assemble.expected_slot_s`` or its
+    own length if shorter, summed; stills only as the share of the act the
+    photo budget admits, on top of the clips.
 
     ``allocate_act_durations`` scales every act toward the film's total by
     its band alone, so act 2 was planned at 511 s on 77 rows and act 1 at
     136 s on 28 clips and 54 stills, and both ran dry while acts 3 and 5
-    had rows to spare. The surplus an act cannot carry now goes to the acts
-    that can. Under ``min_s`` the band keeps its floor and the act will come
-    out short: a fact about the material, logged rather than hidden.
+    had rows to spare. Counting each clip at the act's longest slot was
+    honest about seconds and wrong about the film, which is cut in count:
+    the rhythm pass runs a 15 s clip for 2.5 s. The surplus an act cannot
+    carry goes to the acts that can. Under ``min_s`` the band keeps its
+    floor and the act will come out short: a fact about the material,
+    logged rather than hidden.
     """
+    per_slot = float(cfg.get("assemble.expected_slot_s"))
+    share_by_act = {int(k): float(v) for k, v in (cfg.get("film.photo_share_by_act") or {}).items()}
     material: dict[int, float] = {}
     bounded: list[dict[str, Any]] = []
     for spec in specs:
         act = int(spec["act"])
-        longest = _duration_range(cfg, act)[1]
-        material[act] = sum(min(asm.shot_available_s(r), longest) for r in rows if r.get("act") == act)
+        share = share_by_act.get(act, float(cfg.get("film.photo_share")))
+        clips = sum(min(asm.shot_available_s(r), per_slot)
+                    for r in rows if r.get("act") == act and not _is_photo(r))
+        material[act] = clips / (1.0 - share)
         max_s = min(float(spec["max_s"]), material[act])
         if max_s < float(spec["min_s"]):
             log.warning("S06 act %d has %.1fs of material against a floor of %.0fs; it will come "
@@ -784,7 +802,8 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     # The cold open is carved off the top; the acts share the rest, each
     # within what its own material can carry.
     specs, act_material = _material_bound(cfg, cfg.act_targets(), rows)
-    log.info("S06 material per act: %s", {a: round(m, 1) for a, m in sorted(act_material.items())})
+    log.info("S06 material per act at %.1fs a slot: %s", float(cfg.get("assemble.expected_slot_s")),
+             {a: round(m, 1) for a, m in sorted(act_material.items())})
     act_len = music_mod.allocate_act_durations(specs, total_s - t0)
     log.info("S06 act allocation over %.1fs: %s", total_s - t0, act_len)
     acts = sorted(act_len)
@@ -850,6 +869,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     # -- rhythm, act by act, each act ending where its last cut lands ------
     rhythm = cfg.get("assemble.rhythm")
     max_loops = int(cfg.get("assemble.max_reassembly_loops"))
+    expected_slot_s = float(cfg.get("assemble.expected_slot_s"))
     final: dict[int, list[dict[str, Any]]] = {}
     final_spans: dict[int, tuple[float, float]] = {}
     shifts: dict[int, float] = {}
@@ -918,7 +938,8 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
                                    similarity=similarity,
                                    existing=existing + [shots_by_id[s["shot_id"]] for s in added],
                                    prev_photo=bool(prev and prev.get("kind") == "photo"),
-                                   next_photo=bool(nxt and nxt.get("kind") == "photo"))
+                                   next_photo=bool(nxt and nxt.get("kind") == "photo"),
+                                   budget=_refill_budget(g1 - g0, expected_slot_s))
                 log.debug("S06 act %d round %d gap %.1f-%.1fs (%.1fs): utc window %s..%s, "
                           "%d free row(s), %d slot(s) laid to %.1fs", act, round_no,
                           g0, g1, g1 - g0, lo, hi, len(free), len(filled),

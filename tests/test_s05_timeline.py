@@ -11,6 +11,8 @@ import json
 import math
 import subprocess
 import sys, pathlib
+
+import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from datetime import datetime, timedelta, timezone
@@ -352,19 +354,29 @@ def test_acts_reach_their_planned_length(tmp_path):
 
 
 def test_material_bounds_an_act_band_but_never_below_its_floor(tmp_path):
-    """An act's band is capped by what its rows can put on screen -- every
-    shot once, at most the act's longest slot, a still held that long too --
-    and an act with less than its floor keeps the floor and comes out short."""
+    """An act's band is capped by what its rows can put on screen: every clip
+    once at what a slot actually runs (its own length if shorter), stills
+    only as the share the photo budget admits on top -- and an act with less
+    than its floor keeps the floor and comes out short."""
     cfg = _cfg(tmp_path)
-    longest = {a: cfg.get("assemble.shot_duration_s")[a][1] for a in (2, 4)}
-    assert (longest[2], longest[4]) == (6.0, 4.0), "the seed arithmetic below assumes these"
-    rows = ([{"act": 2, "media_kind": "video", "start_s": 0.0, "end_s": 4.0}] * 22       # 88 s
-            + [{"act": 2, "media_kind": "photo", "start_s": 0.0, "end_s": 4.0}] * 2      # 2 x 6 s
-            + [{"act": 4, "media_kind": "video", "start_s": 0.0, "end_s": 20.0}] * 10)   # 10 x 4 s
+    assert (cfg.get("assemble.expected_slot_s"), cfg.get("film.photo_share")) == (2.5, 0.1), \
+        "the arithmetic below assumes these"
+    rows = ([{"act": 2, "media_kind": "video", "start_s": 0.0, "end_s": 15.0}] * 36      # 36 x 2.5 = 90 s
+            + [{"act": 2, "media_kind": "photo", "start_s": 0.0, "end_s": 4.0}] * 20     # only as the 10 % share
+            + [{"act": 4, "media_kind": "video", "start_s": 0.0, "end_s": 1.0}] * 10)    # 10 x 1.0 = 10 s
     specs = [{"act": 2, "min_s": 50, "max_s": 700}, {"act": 4, "min_s": 90, "max_s": 150}]
     bounded, material = s05_cut._material_bound(cfg, specs, rows)
-    assert material == {2: 100.0, 4: 40.0}
-    assert [(b["act"], b["min_s"], b["max_s"]) for b in bounded] == [(2, 50, 100.0), (4, 90, 90.0)]
+    assert material[2] == pytest.approx(100.0) and material[4] == pytest.approx(10.0 / 0.9)
+    assert [(b["act"], b["min_s"]) for b in bounded] == [(2, 50), (4, 90)]
+    assert bounded[0]["max_s"] == pytest.approx(100.0) and bounded[1]["max_s"] == 90.0
+
+
+def test_refill_budget_is_the_gap_at_what_a_slot_actually_runs():
+    """A 25 s gap left by the rhythm pass takes ten shots at 2.5 s each, not
+    the four or five the act's plan lengths would say; never fewer than one."""
+    assert s05_cut._refill_budget(25.0, 2.5) == 10
+    assert s05_cut._refill_budget(26.0, 2.5) == 11
+    assert s05_cut._refill_budget(0.5, 2.5) == 1
 
 
 def test_build_timeline_is_rebuilt_not_accumulated(tmp_path):
