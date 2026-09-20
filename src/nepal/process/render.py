@@ -222,7 +222,19 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
         parts.append(f"[{music_idx}:a]loudnorm=I={music_lufs:g}:TP=-1.5:LRA=11[aout]")
         maps += ["-map", "[aout]", "-shortest"]
 
-    cmd += ["-filter_complex", ";".join(parts), *maps, "-r", str(fps),
+    # A 564-slot draft put this whole graph past Linux's MAX_ARG_STRLEN
+    # (128 KiB) as a single -filter_complex argument, and subprocess.run
+    # raised OSError: Argument list too long -- the real film runs 500-800
+    # slots. ffmpeg reads the identical graph from a file just as well, so
+    # it goes on disk instead of on the command line. Written through a
+    # temporary name and renamed, per this pipeline's checkpoint rule.
+    graph = ";".join(parts)
+    filters_path = out_path.with_suffix(".filters")
+    tmp_filters_path = filters_path.with_name(filters_path.name + ".tmp")
+    tmp_filters_path.write_text(graph)
+    tmp_filters_path.rename(filters_path)
+
+    cmd += ["-filter_complex_script", str(filters_path), *maps, "-r", str(fps),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
             "-pix_fmt", "yuv420p"]
     if music_idx is not None:
@@ -232,5 +244,18 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
 
 
 def describe(cmd: Sequence[str]) -> str:
-    """The command as a copyable line, for the log and for a bug report."""
+    """The command as a copyable line, for the log and for a bug report.
+
+    The graph itself now lives in a script file, not in ``cmd`` -- a bare
+    path tells a DEBUG log nothing, so this inlines the file's content in
+    place of the path, exactly where ``-filter_complex`` used to show it.
+    Falls back to the path if the file is gone by the time this runs.
+    """
+    cmd = list(cmd)
+    try:
+        i = cmd.index("-filter_complex_script")
+        graph = Path(cmd[i + 1]).read_text()
+        cmd[i], cmd[i + 1] = "-filter_complex", graph
+    except (ValueError, OSError):
+        pass
     return " ".join(shlex.quote(c) for c in cmd)

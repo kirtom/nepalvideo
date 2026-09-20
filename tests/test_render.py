@@ -16,6 +16,12 @@ ROWS = [
 SRC = {"a#0001": pathlib.Path("/m/a.mp4"), "b#0002": pathlib.Path("/m/b.mp4")}
 
 
+def _graph(cmd):
+    """The filter graph now lives in a script file next to out_path, not in
+    the command itself -- read it back the way ffmpeg would."""
+    return pathlib.Path(cmd[cmd.index("-filter_complex_script") + 1]).read_text()
+
+
 # -- timecode and escaping ---------------------------------------------
 
 @pytest.mark.parametrize("s,want", [(0, "0:00"), (9.4, "0:09"), (61, "1:01"), (252, "4:12")])
@@ -33,12 +39,12 @@ def test_drawtext_escapes_what_ffmpeg_would_eat():
 
 # -- the filter chain ---------------------------------------------------
 
-def test_each_shot_is_trimmed_at_the_input_not_after_the_decoder():
+def test_each_shot_is_trimmed_at_the_input_not_after_the_decoder(tmp_path):
     """A trim filter runs after decoding, so a shot twenty minutes into a
     recording costs twenty minutes of decode. Measured: no output frames at
     all in three minutes over this timeline. Seek at the input instead."""
     assert "trim=" not in render.segment_filters(ROWS[0], 0)
-    cmd = render.build_command(ROWS, sources=SRC, out_path=pathlib.Path("/o.mp4"))
+    cmd = render.build_command(ROWS, sources=SRC, out_path=tmp_path / "o.mp4")
     i = cmd.index("-i")
     assert cmd[i - 4] == "-ss" and cmd[i - 3] == "5.000"
     assert cmd[i - 2] == "-t" and cmd[i - 1] == "3.000"
@@ -64,14 +70,14 @@ def test_the_overlay_names_a_row_someone_can_find():
     assert "b#0002" in f and r"0\:03" in f
 
 
-def test_an_ffmpeg_without_drawtext_still_renders(monkeypatch):
+def test_an_ffmpeg_without_drawtext_still_renders(monkeypatch, tmp_path):
     """Many distribution builds omit libfreetype. The overlay is lost, which
     the stage says out loud -- but the draft still gets made."""
     monkeypatch.setattr(render, "has_drawtext", lambda **kw: False)
     f = render.segment_filters(ROWS[0], 0, overlay=True)
     assert "drawtext" not in f
-    cmd = render.build_command(ROWS, sources=SRC, out_path=pathlib.Path("/o.mp4"))
-    assert "drawtext" not in " ".join(cmd)
+    cmd = render.build_command(ROWS, sources=SRC, out_path=tmp_path / "o.mp4")
+    assert "drawtext" not in _graph(cmd)
 
 
 def test_the_overlay_can_be_turned_off():
@@ -80,23 +86,23 @@ def test_the_overlay_can_be_turned_off():
 
 # -- the command --------------------------------------------------------
 
-def test_every_shot_becomes_an_input_and_a_concat_leg():
-    cmd = render.build_command(ROWS, sources=SRC, out_path=pathlib.Path("/o.mp4"))
+def test_every_shot_becomes_an_input_and_a_concat_leg(tmp_path):
+    cmd = render.build_command(ROWS, sources=SRC, out_path=tmp_path / "o.mp4")
     assert cmd.count("-i") == 2
-    fc = cmd[cmd.index("-filter_complex") + 1]
+    fc = _graph(cmd)
     assert "concat=n=2:v=1:a=0[vout]" in fc
 
 
-def test_music_is_normalised_to_the_spec_target_not_assumed():
-    cmd = render.build_command(ROWS, sources=SRC, out_path=pathlib.Path("/o.mp4"),
+def test_music_is_normalised_to_the_spec_target_not_assumed(tmp_path):
+    cmd = render.build_command(ROWS, sources=SRC, out_path=tmp_path / "o.mp4",
                                music_path=pathlib.Path("/m/bed.mp3"), music_lufs=-14.0)
-    fc = cmd[cmd.index("-filter_complex") + 1]
+    fc = _graph(cmd)
     assert "loudnorm=I=-14" in fc
     assert "-shortest" in cmd, "the bed must not outlast the picture"
 
 
-def test_without_music_there_is_no_audio_stream_to_map():
-    cmd = render.build_command(ROWS, sources=SRC, out_path=pathlib.Path("/o.mp4"))
+def test_without_music_there_is_no_audio_stream_to_map(tmp_path):
+    cmd = render.build_command(ROWS, sources=SRC, out_path=tmp_path / "o.mp4")
     assert "[aout]" not in " ".join(cmd)
     assert "-c:a" not in cmd
 
@@ -114,30 +120,29 @@ def test_an_empty_timeline_refuses_rather_than_rendering_nothing():
 
 # -- photographs --------------------------------------------------------
 
-def test_a_photograph_is_held_for_its_slot_not_shown_for_one_frame():
+def test_a_photograph_is_held_for_its_slot_not_shown_for_one_frame(tmp_path):
     """94 of the first draft's 220 slots were stills, and without -loop each
     contributed a single frame: the cut lost half its running time."""
     rows = [{"shot_id": "p1", "media_kind": "photo", "t_in": 0.0, "t_out": 3.0}]
     cmd = render.build_command(rows, sources={"p1": pathlib.Path("/m/a.jpg")},
-                               out_path=pathlib.Path("/o.mp4"))
+                               out_path=tmp_path / "o.mp4")
     # the hold is in the filter graph, not a -loop input option: that option
     # is private to image2 and absent from the demuxer that reads HEIC
     assert "-loop" not in cmd
     assert "-ss" not in cmd, "a still has nowhere to seek to"
-    fc = cmd[cmd.index("-filter_complex") + 1]
+    fc = _graph(cmd)
     assert "loop=loop=-1:size=1" in fc and "trim=duration=3.000" in fc
 
 
-def test_video_and_stills_can_share_one_timeline():
+def test_video_and_stills_can_share_one_timeline(tmp_path):
     rows = [{"shot_id": "v1", "media_kind": "video", "t_in": 0.0, "t_out": 2.0, "src_in": 7.0},
             {"shot_id": "p1", "media_kind": "photo", "t_in": 2.0, "t_out": 5.0}]
     cmd = render.build_command(rows, sources={"v1": pathlib.Path("/m/v.mp4"),
                                               "p1": pathlib.Path("/m/a.jpg")},
-                               out_path=pathlib.Path("/o.mp4"))
+                               out_path=tmp_path / "o.mp4")
     assert "-ss" in cmd
-    fc0 = cmd[cmd.index("-filter_complex") + 1]
-    assert "loop=loop=-1" in fc0, "the still is held"
-    fc = cmd[cmd.index("-filter_complex") + 1]
+    fc = _graph(cmd)
+    assert "loop=loop=-1" in fc, "the still is held"
     assert "concat=n=2" in fc
 
 
@@ -180,6 +185,12 @@ def test_ffmpeg_renders_a_cut_of_the_expected_length(tmp_path):
         srcs[name] = p
     out = tmp_path / "draft.mp4"
     cmd = render.build_command(ROWS, sources=srcs, out_path=out)
+    # The graph goes through a script file, not the command line -- confirm
+    # ffmpeg actually reads and renders it from there, not just that the
+    # command shape looks right.
+    assert "-filter_complex_script" in cmd
+    filters_path = out.with_suffix(".filters")
+    assert filters_path.read_text(), "the script file must hold the real graph"
     subprocess.run(cmd, check=True)
     assert out.exists()
     probe = subprocess.run(
@@ -231,23 +242,23 @@ def test_ffmpeg_renders_a_card_between_real_footage_and_a_still(tmp_path):
 # -- the card and split slots (Film v2 step 4) --------------------------
 
 @pytest.mark.skipif(not render.has_drawtext(), reason="ffmpeg has no drawtext")
-def test_a_card_row_becomes_a_black_frame_with_its_caption():
+def test_a_card_row_becomes_a_black_frame_with_its_caption(tmp_path):
     """A card slot (the cold-open title) has no shot behind it -- the inner
     join in render_draft used to drop it, shortening the draft by exactly
     its length. It must still take a slot in the concat, at its own length,
     with its caption escaped like any other drawtext."""
     row = {"kind": "card", "t_in": 0.0, "t_out": 2.5,
            "motion": json.dumps({"type": "card", "text": "Nepal: the trek"})}
-    cmd = render.build_command([row], sources={}, out_path=pathlib.Path("/o.mp4"))
+    cmd = render.build_command([row], sources={}, out_path=tmp_path / "o.mp4")
     assert cmd.count("-i") == 1
     i = cmd.index("-i")
     assert cmd[i - 2:i] == ["-f", "lavfi"], "no file backs a card -- lavfi synthesises it"
     assert "color=" in cmd[i + 1] and "d=2.500" in cmd[i + 1]
-    fc = cmd[cmd.index("-filter_complex") + 1]
+    fc = _graph(cmd)
     assert r"drawtext=text='Nepal\: the trek'" in fc, "the caption is escaped, not passed through raw"
 
 
-def test_a_card_without_drawtext_is_plain_black(monkeypatch):
+def test_a_card_without_drawtext_is_plain_black(monkeypatch, tmp_path):
     """Same tradeoff as the shot overlay: no libfreetype means no caption,
     not a failed render -- the card still holds its length as plain black."""
     monkeypatch.setattr(render, "has_drawtext", lambda **kw: False)
@@ -255,11 +266,11 @@ def test_a_card_without_drawtext_is_plain_black(monkeypatch):
            "motion": json.dumps({"type": "card", "text": "Nepal"})}
     f = render.segment_filters(row, 0)
     assert "drawtext" not in f
-    cmd = render.build_command([row], sources={}, out_path=pathlib.Path("/o.mp4"))
-    assert "drawtext" not in " ".join(cmd)
+    cmd = render.build_command([row], sources={}, out_path=tmp_path / "o.mp4")
+    assert "drawtext" not in _graph(cmd)
 
 
-def test_a_split_slot_renders_its_primary_only():
+def test_a_split_slot_renders_its_primary_only(tmp_path):
     """pairs.find_pairs (src/nepal/process/pairs.py:119-132) writes the
     primary's own shot_id/src_in onto the slot; secondary_shot_id and
     secondary_src_in describe the other phone's clip for a future
@@ -268,12 +279,13 @@ def test_a_split_slot_renders_its_primary_only():
            "secondary_shot_id": "z#9999", "secondary_src_in": 1.0,
            "motion": json.dumps({"type": "split"})}
     cmd = render.build_command([row], sources={"a#0001": pathlib.Path("/m/a.mp4")},
-                               out_path=pathlib.Path("/o.mp4"))
+                               out_path=tmp_path / "o.mp4")
     assert cmd.count("-i") == 1
     assert "z#9999" not in " ".join(cmd)
+    assert "z#9999" not in _graph(cmd)
 
 
-def test_a_mixed_timeline_keeps_concat_order_and_one_input_per_row():
+def test_a_mixed_timeline_keeps_concat_order_and_one_input_per_row(tmp_path):
     rows = [
         {"kind": "card", "t_in": 0.0, "t_out": 1.0,
          "motion": json.dumps({"type": "card", "text": "x"})},
@@ -284,15 +296,15 @@ def test_a_mixed_timeline_keeps_concat_order_and_one_input_per_row():
     ]
     cmd = render.build_command(rows, sources={"a#0001": pathlib.Path("/m/a.mp4"),
                                               "b#0002": pathlib.Path("/m/b.mp4")},
-                               out_path=pathlib.Path("/o.mp4"))
+                               out_path=tmp_path / "o.mp4")
     assert cmd.count("-i") == len(rows)
-    fc = cmd[cmd.index("-filter_complex") + 1]
+    fc = _graph(cmd)
     assert "[v0][v1][v2]concat=n=3:v=1:a=0[vout]" in fc, "concat must list the legs in row order"
 
 
 # -- one frame rate (Film v2 step 1) ------------------------------------
 
-def test_every_segment_is_resampled_and_the_output_rate_is_fixed():
+def test_every_segment_is_resampled_and_the_output_rate_is_fixed(tmp_path):
     """15 fps proxies, 25 fps stills and 60 fps phone clips concatenated
     without a rate came out as a 120 fps file."""
     rows = [{"shot_id": "v1", "media_kind": "video", "t_in": 0.0, "t_out": 2.0,
@@ -300,8 +312,24 @@ def test_every_segment_is_resampled_and_the_output_rate_is_fixed():
             {"shot_id": "p1", "media_kind": "photo", "t_in": 2.0, "t_out": 5.0}]
     cmd = render.build_command(rows, sources={"v1": pathlib.Path("/m/v.mp4"),
                                               "p1": pathlib.Path("/m/a.jpg")},
-                               out_path=pathlib.Path("/o.mp4"), fps=30)
-    fc = cmd[cmd.index("-filter_complex") + 1]
+                               out_path=tmp_path / "o.mp4", fps=30)
+    fc = _graph(cmd)
     assert fc.count("fps=30") == 2
     assert cmd[cmd.index("-r") + 1] == "30"
     assert "fps=25" not in fc
+
+
+# -- the argument-length ceiling (564 slots is real, 700 is headroom) --
+
+def test_a_700_row_timeline_keeps_every_argument_short(tmp_path):
+    """564 slots put the whole filter graph past Linux's MAX_ARG_STRLEN
+    (128 KiB) as a single -filter_complex argument, and subprocess.run
+    raised OSError: Argument list too long. The graph now goes to a file
+    beside out_path, so no argument should even approach the limit."""
+    rows = [{"shot_id": f"s#{i:04d}", "t_in": float(i), "t_out": float(i + 1),
+             "src_in": 0.0} for i in range(700)]
+    sources = {r["shot_id"]: pathlib.Path(f"/m/{r['shot_id']}.mp4") for r in rows}
+    cmd = render.build_command(rows, sources=sources, out_path=tmp_path / "o.mp4")
+    assert max(len(c) for c in cmd) < 128 * 1024
+    assert "-filter_complex_script" in cmd
+    assert "-filter_complex" not in cmd
