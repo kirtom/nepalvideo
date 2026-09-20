@@ -256,7 +256,8 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any], fl
     has it print what it hears, and ``measured`` -- those numbers -- has it
     apply one static gain (``linear=true``: a bare gain, no limiter; ffmpeg
     refuses linear mode when that gain would push a peak past TP, and
-    reverts to dynamic).
+    reverts to dynamic; its LRA option is then a precondition, so it is
+    raised to the measured range).
     """
     parts: list[str] = []
 
@@ -294,27 +295,36 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any], fl
                         f",volume='{envelopes['music']}':eval=frame" if music else "", "[mus]"))
 
     target_i, target_tp = float(levels["final_lufs"]), float(levels["true_peak_db"])
-    final = f"loudnorm=I={target_i:g}:TP={target_tp:g}:LRA={LRA}"
     if measure_only:
-        final += ":print_format=json"
+        final = f"loudnorm=I={target_i:g}:TP={target_tp:g}:LRA={LRA}:print_format=json"
     elif measured:
         m = {k: float(measured[k]) for k in ("input_i", "input_lra", "input_tp", "input_thresh")}
         gain = target_i - m["input_i"]
-        if (m["input_lra"] > LRA or m["input_tp"] + gain > target_tp
+        # In linear mode the LRA option is not a target but a precondition
+        # (af_loudnorm.c, init: measured_lra <= target_lra, else dynamic):
+        # a static gain compresses nothing, so the range is whatever the
+        # envelope designed. Speech over a quiet bed with a silence window
+        # measured 15.6 LU on a twelve-second fixture; the film will be
+        # wider still. Asking for the measured range keeps the mode linear
+        # and changes nothing about the gain.
+        lra = max(LRA, math.ceil(m["input_lra"]))
+        if (m["input_tp"] + gain > target_tp
                 # af_loudnorm.c's own sentinels for "not measured"
                 or m["input_lra"] == 0 or m["input_thresh"] == -70 or m["input_i"] == 0
                 or m["input_tp"] == 99):
-            # loudnorm's own rule (af_loudnorm.c, init): a source range wider
-            # than the target's, a gain that would push a true peak past the
-            # ceiling, or a value it reads as unset, and it quietly reverts
-            # to dynamic mode -- the second pass then buys nothing, which
-            # nobody would hear until Gate 3.
-            log.warning("S07 measured I %.1f, LRA %.1f against a target of %d, thresh %.1f, true "
-                        "peak %.1f dBTP after %.1f dB of gain: loudnorm will revert to dynamic "
-                        "normalisation and re-level the mix", m["input_i"], m["input_lra"], LRA,
-                        m["input_thresh"], m["input_tp"] + gain, gain)
-        final += (f":measured_I={m['input_i']:g}:measured_LRA={m['input_lra']:g}"
-                  f":measured_TP={m['input_tp']:g}:measured_thresh={m['input_thresh']:g}:linear=true")
+            # loudnorm's other rules: a gain that would push a true peak
+            # past the ceiling, or a value it reads as unset, and it quietly
+            # reverts to dynamic mode -- the second pass then buys nothing,
+            # which nobody would hear until Gate 3.
+            log.warning("S07 measured I %.1f, LRA %.1f, thresh %.1f, true peak %.1f dBTP after "
+                        "%.1f dB of gain: loudnorm will revert to dynamic normalisation and "
+                        "re-level the mix", m["input_i"], m["input_lra"], m["input_thresh"],
+                        m["input_tp"] + gain, gain)
+        final = (f"loudnorm=I={target_i:g}:TP={target_tp:g}:LRA={lra}"
+                 f":measured_I={m['input_i']:g}:measured_LRA={m['input_lra']:g}"
+                 f":measured_TP={m['input_tp']:g}:measured_thresh={m['input_thresh']:g}:linear=true")
+    else:
+        final = f"loudnorm=I={target_i:g}:TP={target_tp:g}:LRA={LRA}"
     parts.append(f"[speech][loc][mus]amix=inputs=3:normalize=0,{final}[aout]")
     return parts
 

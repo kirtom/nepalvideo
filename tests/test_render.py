@@ -634,6 +634,10 @@ def test_a_measured_render_applies_one_static_gain(tmp_path):
                        ":measured_TP=-3.68:measured_thresh=-20.68:linear=true[aout]")
     assert "print_format" not in fc
     assert "[vout]" in fc and "-c:v" in cmd and cmd[-1].endswith("o.mp4"), "a full render otherwise"
+    # In linear mode LRA is a precondition (measured <= target, else
+    # dynamic), not a target: a mix wider than 11 LU asks for its own range.
+    wide = _graph(_mixed(tmp_path, loudnorm_measured=measured | {"input_lra": 15.6}))
+    assert ":LRA=16:measured_I=-10.63:measured_LRA=15.6:" in wide
     assert _graph(_mixed(tmp_path)).endswith("LRA=11[aout]"), "without numbers: the single pass, unchanged"
 
 
