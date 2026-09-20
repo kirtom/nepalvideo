@@ -439,6 +439,31 @@ def delete_shots(conn: sqlite3.Connection, *, recording_id: str | None = None,
     return int(cur.rowcount)
 
 
+# -- the cut against the material ---------------------------------------
+
+_SOURCE_JOIN = ("LEFT JOIN recordings rc ON rc.recording_id = s.recording_id "
+                "LEFT JOIN assets a ON a.asset_id = s.asset_id")
+
+
+def per_act_sources(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, int]]]:
+    """Per act, per source: how many slots the cut gives it against how many
+    surviving shots it had -- the number the operator asked to see, so a
+    phone that filmed half the day and got a tenth of the screen is visible
+    rather than felt. The source is the recording's for video and the
+    asset's for a photo, the same way S06 reads it."""
+    out: dict[str, dict[str, dict[str, int]]] = {}
+    for r in conn.execute(
+            "SELECT s.act, COALESCE(rc.source, a.source) AS source, COUNT(*) AS n FROM shots s "
+            f"{_SOURCE_JOIN} WHERE s.status <> 'rejected' AND s.act IS NOT NULL GROUP BY 1, 2"):
+        out.setdefault(str(r["act"]), {})[str(r["source"])] = {"slots": 0, "available": int(r["n"])}
+    for r in conn.execute(
+            "SELECT t.act, COALESCE(rc.source, a.source) AS source, COUNT(*) AS n FROM timeline t "
+            f"JOIN shots s ON s.shot_id = t.shot_id {_SOURCE_JOIN} GROUP BY 1, 2"):
+        cell = out.setdefault(str(r["act"]), {}).setdefault(str(r["source"]), {"slots": 0, "available": 0})
+        cell["slots"] = int(r["n"])
+    return out
+
+
 # -- generic upsert ----------------------------------------------------
 
 def upsert(conn: sqlite3.Connection, table: str, key_cols: Sequence[str],

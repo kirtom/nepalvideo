@@ -23,7 +23,6 @@ import numpy as np
 
 from nepal import db, freshness
 from nepal import select as select_mod
-from nepal.cloud import status as status_mod
 from nepal.config import Config
 from nepal.process import assemble as asm, render as render_mod, score as score_mod
 from nepal.process import longtake as longtake_mod, pairs as pairs_mod, rhythm as rhythm_mod
@@ -129,6 +128,11 @@ def score_shots(cfg: Config, conn) -> dict[str, Any]:
 # pictures (the bridge take, the phone pairs) take theirs, the fill goes
 # between them, and only then is there a picture track to group into scenes
 # and hand music; only with music is there a beat grid to re-time against.
+
+# Act 1 is the planning: screenshots, the itinerary, a message or two. Levity
+# cannot be shot there, so the per-act minimum is asked of the trek onward.
+LEVITY_FROM_ACT = 2
+
 
 def _shot_rows(conn) -> list[dict[str, Any]]:
     """Every surviving shot with what assembly reads beyond the row: its
@@ -308,11 +312,19 @@ def _resolve_overlaps(slots: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     for s in ordered:
         if out and float(s["t_in"]) < float(out[-1]["t_out"]) - 1e-6:
             prev = out[-1]
-            if prev.get("locked") and not s.get("locked"):
+            if prev.get("locked") and s.get("locked"):
+                # A beat never cuts a beat. Two locked slots overlap only
+                # when place_anchors clamped a crowded act's anchors onto
+                # each other, and chronology is already gone there -- so the
+                # later one simply follows, whole.
+                length = float(s["t_out"]) - float(s["t_in"])
+                _set_length(s, float(prev["t_out"]), float(prev["t_out"]) + length)
+            elif prev.get("locked"):
                 continue
-            _set_length(prev, float(prev["t_in"]), float(s["t_in"]))
-            if prev["t_out"] - prev["t_in"] <= 1e-6:
-                out.pop()
+            else:
+                _set_length(prev, float(prev["t_in"]), float(s["t_in"]))
+                if prev["t_out"] - prev["t_in"] <= 1e-6:
+                    out.pop()
         out.append(s)
     return out
 
@@ -331,6 +343,14 @@ def _close_holes(slots: Sequence[dict[str, Any]], t0: float) -> list[dict[str, A
         out.append(s)
         cursor = float(s["t_out"])
     return out
+
+
+def _last_slot(by_act: Mapping[int, Sequence[dict[str, Any]]], acts: Sequence[int], act: int,
+               act0: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """The slot on screen when this act begins: the previous act's last,
+    else the title card (act 0 always ends on it)."""
+    earlier = [a for a in acts if a < act and by_act.get(a)]
+    return by_act[earlier[-1]][-1] if earlier else act0[-1]
 
 
 def _gaps(slots: Sequence[Mapping[str, Any]], t0: float, t1: float, *,
@@ -386,7 +406,7 @@ def plan_act(cfg: Config, act: int, act_rows: Sequence[Mapping[str, Any]],
              beats: Sequence[Mapping[str, Any]], *, t0: float, act_len_s: float,
              act_span_utc: tuple[float | None, float | None], similarity,
              photo_budget: Sequence[str], long_take: Mapping[str, Any] | None,
-             pairs: Sequence[Mapping[str, Any]], used: set[str]
+             pairs: Sequence[Mapping[str, Any]], used: set[str], prev_photo: bool = False
              ) -> tuple[list[dict[str, Any]], list[anchors_mod.Anchor]]:
     """One act's picture track before any music exists.
 
@@ -424,7 +444,6 @@ def plan_act(cfg: Config, act: int, act_rows: Sequence[Mapping[str, Any]],
 
     slots: list[dict[str, Any]] = []
     prev_end, prev_utc = t0, act_span_utc[0]
-    prev_photo = False
     for a in anchors:
         a_end = a.t_in + a.duration_s
         if a.t_in - prev_end > rng[0]:
@@ -551,8 +570,9 @@ def _sections_for_act(entry: Mapping[str, Any], tracks_by_id: Mapping[str, music
 def _check_material(slot: Mapping[str, Any], shots_by_id: Mapping[str, Mapping[str, Any]],
                     recordings_by_id: Mapping[str, Mapping[str, Any]], long_take_id: str | None) -> None:
     """The trap, asserted before anything is written: a slot never claims
-    footage its shot does not have. The bridge take alone is bounded by its
-    recording, because running past the first shot is what a long take is."""
+    footage its shot does not have -- a split on either of its two shots.
+    The bridge take alone is bounded by its recording, because running past
+    the first shot is what a long take is."""
     if slot.get("kind") != "video" or not slot.get("shot_id"):
         return
     shot = shots_by_id[slot["shot_id"]]
@@ -566,6 +586,18 @@ def _check_material(slot: Mapping[str, Any], shots_by_id: Mapping[str, Mapping[s
         raise RuntimeError(
             f"slot on {slot['shot_id']} at {slot['t_in']}s claims {length:.2f}s but the "
             f"source has {avail:.2f}s from src_in={src_in:.2f}: the timeline would over-report")
+    if slot.get("secondary_shot_id"):
+        # A split shows two clips for the same span, so the other half is
+        # bounded the same way from its own offset.
+        other = shots_by_id[slot["secondary_shot_id"]]
+        other_in = float(slot["secondary_src_in"] if slot.get("secondary_src_in") is not None
+                         else other["start_s"])
+        other_avail = float(other["end_s"]) - other_in
+        if length > other_avail + 1e-3:
+            raise RuntimeError(
+                f"split on {slot['shot_id']}+{slot['secondary_shot_id']} at {slot['t_in']}s "
+                f"claims {length:.2f}s but the second source has {other_avail:.2f}s from "
+                f"src_in={other_in:.2f}: the timeline would over-report")
 
 
 def _scene_id_by_time(slot: Mapping[str, Any], scenes: Sequence[scenes_mod.Scene], shift: float
@@ -698,7 +730,8 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
             act_span_utc=act_span_utc.get(act, (None, None)), similarity=similarity,
             photo_budget=photo_plan[act].chosen,
             long_take=long_take if long_take and long_take.get("act") == act else None,
-            pairs=[p for p in pairs if p.get("act") == act], used=used)
+            pairs=[p for p in pairs if p.get("act") == act], used=used,
+            prev_photo=_is_photo(_last_slot(planned, acts, act, act0)))
         planned[act] = slots
         planned_spans[act] = (t, t + act_len[act])
         n_anchors += len(anchors)
@@ -707,7 +740,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
             "needs_subject": asm.needs_subject(chosen_rows, runtime_s=act_len[act],
                                                every_s=float(cfg.get("assemble.subject_shot_every_s"))),
             "missing_levity": asm.missing_levity(chosen_rows, minimum=int(cfg.get("assemble.levity_min_per_act")))
-            if act >= 2 else 0}
+            if act >= LEVITY_FROM_ACT else 0}
         t += act_len[act]
 
     # -- scenes, then music ---------------------------------------------------
@@ -741,10 +774,14 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
                     if s.get("locked") and s.get("shot_id")}
         allowed_photos = set(photo_plan[act].chosen)
 
+        # The burst runs on the act's loudest section, and with one section
+        # that is the whole act: no swell to rank against, no burst.
+        burst = rhythm["burst_slots"] if len(sections) >= 2 else (0, 0)
+
         def retimed(current):
             return _resolve_overlaps(rhythm_mod.retime(
                 current, sections=sections, beats=grid, downbeats=downs, table=rhythm,
-                burst_slots=rhythm["burst_slots"], is_act4=(act == 4),
+                burst_slots=burst, is_act4=(act == 4),
                 held_shot_s=cfg.get("assemble.act4_held_shot_s"), silence_t=silence_t,
                 shots=shots_by_id))
 
@@ -758,7 +795,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
             existing = [shots_by_id[x] for x in on_screen if x in shots_by_id]
             added: list[dict[str, Any]] = []
             for g0, g1, idx in gaps:
-                prev = slots[idx - 1] if idx > 0 else None
+                prev = slots[idx - 1] if idx > 0 else _last_slot(final, acts, act, act0)
                 nxt = slots[idx] if idx < len(slots) else None
                 lo, hi = _utc_window(prev, nxt, shots_by_id, act_span_utc.get(act, (None, None)))
                 taken = on_screen | {s["shot_id"] for s in added}
@@ -776,6 +813,11 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         # What the material could not fill is closed, and the cuts re-snapped
         # to the grid from where they now sit.
         slots = _close_holes(retimed(_close_holes(slots, act_t0)), act_t0)
+        # retime drops slots and the fill sees one gap at a time, so two
+        # stills can still meet -- across an act boundary too. The later
+        # one goes, and what follows it moves up.
+        slots = _close_holes(_no_adjacent_photos(
+            slots, prev_photo=_is_photo(_last_slot(final, acts, act, act0)), next_photo=False), act_t0)
         final[act] = slots
         end = float(slots[-1]["t_out"]) if slots else act_t0
         final_spans[act] = (act_t0, end)
@@ -838,7 +880,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
              total_s / 60, per_act, n_anchors, len(pairs), long_take_id, len(scenes), len(natural))
     log.info("S06 wrote %s and %s", paths["otio"].name, paths["fcpxml"].name)
     return {"n_slots": len(ordered), "duration_s": round(duration, 3), "planned_s": total_s,
-            "per_act": per_act, "per_act_sources": status_mod.per_act_sources(conn),
+            "per_act": per_act, "per_act_sources": db.per_act_sources(conn),
             "act_spans": {str(a): [round(x, 3) for x in final_spans[a]] for a in acts},
             "n_anchors": n_anchors, "n_pairs": len(pairs),
             "long_take": shots_by_id[long_take_id]["recording_id"] if long_take_id else None,

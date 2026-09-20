@@ -88,6 +88,8 @@ def _seed(cfg):
 
     # -- act 2: approach; the bridge recording lives here -----------------
     t = datetime(2024, 4, 27, 4, tzinfo=timezone.utc)
+    # the only material before the arrival is a still, and act 1 ends on one
+    photo("p2z", "phone_kulikov", t - timedelta(hours=16), 2, score=0.8)
     recording("c2", "camera", t, 60)
     shot("c2", 0, 0, 20, t, 2, face=1, face_score=0.8, transcript="Мы приехали, тут жарко",
          source_score=0.8, place="Besisahar")
@@ -229,6 +231,9 @@ def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path)
     assert slots[1]["kind"] == "card" and slots[1]["act"] == 0
     assert slots[1]["t_in"] == slots[0]["t_out"] and slots[1]["t_out"] - slots[1]["t_in"] == 3.0
     assert all(s["act"] >= 1 for s in slots[2:])
+    # act 1's music is one section: nothing there is "the swell", so no burst
+    act1 = [s for s in slots if s["act"] == 1]
+    assert act1 and not all(math.isclose(s["t_out"] - s["t_in"], 0.5, abs_tol=1e-6) for s in act1)
 
     # every speech beat has its slots; the walking beat stays on its own recording
     for beat in ("b_arrive", "b_walk", "b_pass"):
@@ -247,7 +252,9 @@ def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path)
         a, b = shots[s["shot_id"]], shots[s["secondary_shot_id"]]
         assert {r["source"] for r in (recs[a["recording_id"]], recs[b["recording_id"]])} == set(PHONES)
 
-    # the bridge is one unbroken ninety-second take
+    # the bridge is one unbroken ninety-second take. `locked` is not a column
+    # of the table, so "locked" is asserted through its consequence: the take
+    # is still exactly ninety seconds after the rhythm pass re-timed the act.
     assert rep["long_take"] == "rb"
     take = [s for s in slots if s["shot_id"] and shots[s["shot_id"]]["recording_id"] == "rb"]
     assert len(take) == 1 and math.isclose(take[0]["t_out"] - take[0]["t_in"], 90.0, abs_tol=1e-6)
@@ -258,8 +265,10 @@ def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path)
         if int(act) < 1:
             continue
         phone_slots = sum(sources.get(p, {}).get("slots", 0) for p in PHONES)
+        if any(sources.get(p, {}).get("available", 0) for p in PHONES):
+            assert phone_slots > 0, (act, sources)
         for p in PHONES:
-            if sources.get(p, {}).get("available", 0) and phone_slots:
+            if sources.get(p, {}).get("available", 0):
                 assert sources[p]["slots"] / phone_slots >= 0.25, (act, sources)
 
     # scenes and music: the map is on disk, and not every segment starts a track
@@ -289,6 +298,9 @@ def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path)
         else:
             assert length <= shot["end_s"] - s["src_in"] + 1e-6, s
         assert math.isclose(s["src_out"] - s["src_in"], length, abs_tol=1e-3), s
+        if s["secondary_shot_id"]:
+            other = shots[s["secondary_shot_id"]]
+            assert length <= other["end_s"] - s["secondary_src_in"] + 1e-6, s
     assert "c3#0002" not in {s["shot_id"] for s in slots}          # rejected stays out
     assert rep["duration_s"] == slots[-1]["t_out"]
 
@@ -309,3 +321,20 @@ def test_build_timeline_is_rebuilt_not_accumulated(tmp_path):
     n = conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0]
     assert n == first["n_slots"] == again["n_slots"]
     conn.close()
+
+
+def test_two_locked_slots_never_cut_each_other():
+    """A crowded act's anchors are clamped onto each other by place_anchors;
+    the later beat then follows the earlier one, and neither loses a frame."""
+    a = s05_cut._new_slot(kind="video", act=2, shot_id="x", src_in=0.0, locked=1)
+    b = s05_cut._new_slot(kind="video", act=2, shot_id="y", src_in=5.0, locked=1)
+    s05_cut._set_length(a, 10.0, 18.0)
+    s05_cut._set_length(b, 14.0, 20.0)
+    out = s05_cut._resolve_overlaps([a, b])
+    assert [(s["shot_id"], s["t_in"], s["t_out"]) for s in out] == [("x", 10.0, 18.0), ("y", 18.0, 24.0)]
+    assert out[1]["src_out"] - out[1]["src_in"] == 6.0
+    # an unlocked slot that runs into a locked one is cut there
+    c = s05_cut._new_slot(kind="video", act=2, shot_id="z", src_in=0.0)
+    s05_cut._set_length(c, 4.0, 12.0)
+    out = s05_cut._resolve_overlaps([c, a])
+    assert (out[0]["t_out"], out[1]["t_in"]) == (10.0, 10.0) and out[1]["t_out"] == 18.0
