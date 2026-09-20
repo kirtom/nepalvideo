@@ -32,40 +32,59 @@ def fcp_time(seconds: float, fps: int = FPS) -> str:
            f"{1000 if 1000 % fps == 0 else fps}s"
 
 
-def to_otio(rows: Sequence[Mapping[str, Any]], *, name: str = "nepal",
-            fps: int = FPS) -> dict[str, Any]:
-    """An OTIO timeline of one video track, gaps included where they exist."""
-    clips: list[dict[str, Any]] = []
+AUDIO_TRACKS = ("speech", "location", "music")
+
+
+def _range(start_s: float, length_s: float, fps: int) -> dict[str, Any]:
+    return {"OTIO_SCHEMA": "TimeRange.1",
+            "start_time": {"OTIO_SCHEMA": "RationalTime.1", "rate": fps, "value": _frames(start_s, fps)},
+            "duration": {"OTIO_SCHEMA": "RationalTime.1", "rate": fps, "value": _frames(length_s, fps)}}
+
+
+def _items(rows: Sequence[Mapping[str, Any]], *, fps: int, schema: str, name_of, meta_keys) -> list[dict[str, Any]]:
+    """The rows laid on one track in film time, a gap before any that does
+    not start where the last one ended. An OTIO track is sequential -- an
+    item sits where the one before it stopped -- so a cue that starts late
+    is placed by the gap in front of it, not by a time of its own."""
+    items: list[dict[str, Any]] = []
     prev_end = 0.0
     for r in rows:
         t_in, t_out = float(r["t_in"]), float(r["t_out"])
         if t_in > prev_end + 1e-6:
-            clips.append({
-                "OTIO_SCHEMA": "Gap.1", "name": "gap",
-                "source_range": {"OTIO_SCHEMA": "TimeRange.1",
-                                 "start_time": {"OTIO_SCHEMA": "RationalTime.1",
-                                                "rate": fps, "value": 0},
-                                 "duration": {"OTIO_SCHEMA": "RationalTime.1",
-                                              "rate": fps,
-                                              "value": _frames(t_in - prev_end, fps)}}})
-        clips.append({
-            "OTIO_SCHEMA": "Clip.1", "name": str(r.get("shot_id") or r.get("kind")),
-            "source_range": {
-                "OTIO_SCHEMA": "TimeRange.1",
-                "start_time": {"OTIO_SCHEMA": "RationalTime.1", "rate": fps,
-                               "value": _frames(r.get("src_in") or 0.0, fps)},
-                "duration": {"OTIO_SCHEMA": "RationalTime.1", "rate": fps,
-                             "value": _frames(t_out - t_in, fps)}},
-            "metadata": {"nepal": {k: r[k] for k in ("act", "yaw", "shot_id")
-                                   if k in r}},
-        })
+            items.append({"OTIO_SCHEMA": "Gap.1", "name": "gap", "source_range": _range(0.0, t_in - prev_end, fps)})
+        items.append({"OTIO_SCHEMA": schema, "name": name_of(r),
+                      "source_range": _range(r.get("src_in") or 0.0, t_out - t_in, fps),
+                      "metadata": {"nepal": {k: r[k] for k in meta_keys if k in r}}})
         prev_end = t_out
+    return items
+
+
+def to_otio(rows: Sequence[Mapping[str, Any]], *, name: str = "nepal",
+            fps: int = FPS, cues: Sequence[Mapping[str, Any]] = (),
+            overlays: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
+    """An OTIO timeline of one video track, gaps included where they exist,
+    and -- when the cut has sound -- one audio track per cue track and an
+    ``overlays`` track. An overlay is no media, so it is a gap carrying its
+    payload: the editor sees where a card sits without a clip to resolve."""
+    tracks = [{"OTIO_SCHEMA": "Track.1", "name": "V1", "kind": "Video",
+               "children": _items(rows, fps=fps, schema="Clip.1",
+                                  name_of=lambda r: str(r.get("shot_id") or r.get("kind")),
+                                  meta_keys=("act", "yaw", "shot_id"))}]
+    if cues:
+        for track in AUDIO_TRACKS:
+            mine = sorted((c for c in cues if c.get("track") == track), key=lambda c: float(c["t_in"]))
+            tracks.append({"OTIO_SCHEMA": "Track.1", "name": track, "kind": "Audio",
+                           "children": _items(mine, fps=fps, schema="Clip.1", name_of=lambda c: str(c["cue_id"]),
+                                              meta_keys=("source", "gain_lufs", "beat_id"))})
+    if overlays:
+        ordered = sorted(overlays, key=lambda o: float(o["t_in"]))
+        tracks.append({"OTIO_SCHEMA": "Track.1", "name": "overlays", "kind": "Video",
+                       "children": _items(ordered, fps=fps, schema="Gap.1", name_of=lambda o: str(o["overlay_id"]),
+                                          meta_keys=("kind", "payload", "asset_path"))})
     return {
         "OTIO_SCHEMA": "Timeline.1", "name": name,
         "global_start_time": {"OTIO_SCHEMA": "RationalTime.1", "rate": fps, "value": 0},
-        "tracks": {"OTIO_SCHEMA": "Stack.1", "name": "tracks", "children": [
-            {"OTIO_SCHEMA": "Track.1", "name": "V1", "kind": "Video",
-             "children": clips}]},
+        "tracks": {"OTIO_SCHEMA": "Stack.1", "name": "tracks", "children": tracks},
     }
 
 
@@ -111,10 +130,11 @@ def to_fcpxml(rows: Sequence[Mapping[str, Any]], *, media_dir: str,
 
 
 def write(rows: Sequence[Mapping[str, Any]], out_dir: Path, *,
-          media_dir: str, fps: int = FPS) -> dict[str, Path]:
+          media_dir: str, fps: int = FPS, cues: Sequence[Mapping[str, Any]] = (),
+          overlays: Sequence[Mapping[str, Any]] = ()) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     otio_path = out_dir / "timeline.otio"
     fcp_path = out_dir / "timeline.fcpxml"
-    otio_path.write_text(json.dumps(to_otio(rows, fps=fps), indent=1))
+    otio_path.write_text(json.dumps(to_otio(rows, fps=fps, cues=cues, overlays=overlays), indent=1))
     fcp_path.write_text(to_fcpxml(rows, media_dir=media_dir, fps=fps))
     return {"otio": otio_path, "fcpxml": fcp_path}

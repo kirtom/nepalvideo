@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -25,11 +26,12 @@ import numpy as np
 from nepal import db, freshness
 from nepal import select as select_mod
 from nepal.config import Config
-from nepal.process import assemble as asm, cues as cues_mod, render as render_mod, score as score_mod
+from nepal.process import assemble as asm, cues as cues_mod, mix as mix_mod, render as render_mod
+from nepal.process import score as score_mod
 from nepal.process import longtake as longtake_mod, pairs as pairs_mod, rhythm as rhythm_mod
 from nepal.process import timeline_io
 from nepal.spine import effort, music as music_mod, place as place_mod, scenes as scenes_mod
-from nepal.story import anchors as anchors_mod, beats_input
+from nepal.story import anchors as anchors_mod, beats_input, gate3
 from nepal.util.progress import Progress
 
 log = logging.getLogger(__name__)
@@ -1243,16 +1245,14 @@ def photo_source(cfg: Config, row: Mapping[str, Any]) -> Path | None:
     return cfg.data_root / str(key).replace("raw/", "") if key else None
 
 
-def render_draft(cfg: Config, conn) -> dict[str, Any]:
-    """S07 -- render the cut to a watchable file."""
-    rows = [dict(r) for r in conn.execute(
-        "SELECT t.*, s.recording_id, s.media_kind, a.s3_key FROM timeline t "
-        "LEFT JOIN shots s ON s.shot_id = t.shot_id "
-        "LEFT JOIN assets a ON a.asset_id = s.asset_id ORDER BY t.slot_index")]
-    if not rows:
-        return {"skipped": "no timeline"}
+def _draft_sources(cfg: Config, conn, rows: Sequence[dict[str, Any]]
+                   ) -> tuple[dict[str, Path], list[dict[str, Any]], dict[str, int]]:
+    """What the renderer reads for every slot: the proxy for a clip, the
+    still for a photograph, nothing for a card. A split's other clip is
+    mapped too, so both phones render; ``build_command`` shows the primary
+    alone, loudly, when its file is missing."""
     proxies = cfg.work_root / "proxies"
-    sources: dict[str, Any] = {}
+    sources: dict[str, Path] = {}
     usable: list[dict[str, Any]] = []
     missing: dict[str, int] = {}
     for r in rows:
@@ -1262,15 +1262,115 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
             # length. It needs no source file, so it is never "missing".
             usable.append(r)
             continue
-        if r["media_kind"] == "photo":
-            p = photo_source(cfg, r)
-        else:
-            p = proxies / f"{r['recording_id']}_eq.mp4"
+        p = photo_source(cfg, r) if r["media_kind"] == "photo" else proxies / f"{r['recording_id']}_eq.mp4"
         if p is not None and p.exists():
             sources[r["shot_id"]] = p
             usable.append(r)
         else:
             missing[r["media_kind"] or "?"] = missing.get(r["media_kind"] or "?", 0) + 1
+    others = [r["secondary_shot_id"] for r in usable if r.get("secondary_shot_id")]
+    if others:
+        for sid, rid in conn.execute(
+                f"SELECT shot_id, recording_id FROM shots WHERE shot_id IN ({','.join('?' * len(others))})", others):
+            if (proxies / f"{rid}_eq.mp4").exists():
+                sources[sid] = proxies / f"{rid}_eq.mp4"
+    return sources, usable, missing
+
+
+def _cue_sources(cfg: Config, conn, cues: Sequence[dict[str, Any]]
+                 ) -> tuple[list[dict[str, Any]], dict[str, Path], dict[str, Path], int]:
+    """The cues whose file exists, with the file for each: a speech or
+    location cue plays its recording's extracted wav, a music cue the
+    track ingested under ``raw/``. A cue whose file is missing is dropped
+    from the mix and counted, never a crash: one lost wav must not cost
+    the draft, but it must not vanish quietly either."""
+    audio = cfg.work_root / "audio"
+    music = {r["track_id"]: cfg.data_root / str(r["s3_key"]).removeprefix("raw/")
+             for r in conn.execute("SELECT track_id, s3_key FROM music_tracks WHERE s3_key IS NOT NULL")}
+    audio_sources: dict[str, Path] = {}
+    music_sources: dict[str, Path] = {}
+    kept: list[dict[str, Any]] = []
+    dropped: dict[str, int] = {}
+    for c in cues:
+        src = str(c["source"])
+        p = music.get(src) if c["track"] == "music" else audio / f"{src}.wav"
+        if p is not None and p.exists():
+            (music_sources if c["track"] == "music" else audio_sources)[src] = p
+            kept.append(c)
+        else:
+            dropped[c["track"]] = dropped.get(c["track"], 0) + 1
+    if dropped:
+        log.warning("S07 %d cue(s) have no audio file and are dropped from the mix: %s",
+                    sum(dropped.values()), dropped)
+    return kept, audio_sources, music_sources, sum(dropped.values())
+
+
+def _envelopes(cfg: Config, conn, rows: Sequence[Mapping[str, Any]],
+               cues: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """The mix's two ``volume`` expressions. Timing comes from what the cues
+    step laid, never from the map's planned spans: the speech spans are the
+    speech cues, the natural-sound windows the report's, and the silence
+    the map's window rebased onto the table's own act spans -- the same
+    three sources ``build_cues`` read, so the bed ducks where the cues say
+    the voice and the wind are."""
+    total = max(float(r["t_out"]) for r in rows)
+    natural = _reported_windows(cfg)
+    if natural is None:
+        shots_by_id = {r["shot_id"]: dict(r) for r in conn.execute("SELECT * FROM shots")}
+        natural, _ = _natural_windows(cfg, effort.profile(place_mod.load_track(conn)), rows, shots_by_id)
+    silence = None
+    map_path = cfg.work_root / "music" / "music_map.json"
+    if map_path.exists():
+        spans: dict[int, tuple[float, float]] = {}
+        for s in rows:
+            lo, hi = spans.get(int(s["act"]), (math.inf, -math.inf))
+            spans[int(s["act"])] = (min(lo, float(s["t_in"])), max(hi, float(s["t_out"])))
+        silence = cues_mod.map_on_film_time(json.loads(map_path.read_text()), spans).get("silence_window")
+    return {
+        "music": mix_mod.volume_expr(mix_mod.music_envelope(
+            total_s=total, speech_spans=[(float(c["t_in"]), float(c["t_out"])) for c in cues if c["track"] == "speech"],
+            windows=natural, silence=silence,
+            under_speech_db=float(cfg.get("render.duck_lufs_speech")) - float(cfg.get("render.music_lufs")),
+            window_fade_s=float(cfg.get("render.window_fade_s")), cue_fade_s=float(cfg.get("render.cue_fade_s")))),
+        "location": mix_mod.volume_expr(mix_mod.location_envelope(
+            total_s=total, cues=[c for c in cues if c["track"] == "location"],
+            full_lufs=float(cfg.get("render.location_full_lufs")), cue_fade_s=float(cfg.get("render.cue_fade_s")))),
+    }
+
+
+def _draft_seconds(path: Path) -> float | None:
+    """The picture's length as ffprobe reads it back -- the video stream's,
+    not the container's: the mix runs one crossfade past the last cut, and
+    the number Gate 3 holds against the timeline is the picture's."""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                              "stream=duration", "-of", "csv=p=0", str(path)],
+                             capture_output=True, text=True, check=True).stdout
+        return round(float(out.strip()), 3)
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        log.warning("S07 could not probe the draft's length: %s", e)
+        return None
+
+
+def render_draft(cfg: Config, conn) -> dict[str, Any]:
+    """S07 -- render the cut to a watchable file, with its three audio
+    tracks, and write the Gate 3 page beside it.
+
+    Two ffmpeg passes when there is sound: the measurement pass hears the
+    mix audio-only and the render applies its numbers as one static gain
+    (see ``render.audio_filters``). A measurement that fails is logged
+    and the draft renders single-pass: the operator is waiting for a
+    draft, not for a normalisation.
+    """
+    rows = [dict(r) for r in conn.execute(
+        "SELECT t.*, s.recording_id, s.media_kind, s.start_utc, s.start_s, a.s3_key, "
+        "COALESCE(rc.source, a.source) AS source_name FROM timeline t "
+        "LEFT JOIN shots s ON s.shot_id = t.shot_id "
+        "LEFT JOIN assets a ON a.asset_id = s.asset_id "
+        "LEFT JOIN recordings rc ON rc.recording_id = s.recording_id ORDER BY t.slot_index")]
+    if not rows:
+        return {"skipped": "no timeline"}
+    sources, usable, missing = _draft_sources(cfg, conn, rows)
     if not usable:
         return {"skipped": "no source media for any slot"}
     if missing:
@@ -1280,23 +1380,65 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
         log.warning("S07 %d slot(s) have no source media and are omitted, "
                     "which shortens the cut: %s", sum(missing.values()), missing)
 
-    out = cfg.workdir("gates", "gate3") / "draft.mp4"
+    all_cues = [dict(r) for r in conn.execute("SELECT * FROM audio_cues ORDER BY track, t_in")]
+    overlays = [dict(r) for r in conn.execute("SELECT * FROM overlays ORDER BY t_in")]
+    cues, audio_sources, music_sources, n_dropped = _cue_sources(cfg, conn, all_cues)
+    n_cues = {t: sum(1 for c in cues if c["track"] == t) for t in ("speech", "location", "music")}
+
+    gate = cfg.workdir("gates", "gate3")
+    out = gate / "draft.mp4"
     d = cfg.get("render.draft")
-    cmd = render_mod.build_command(
-        usable, sources=sources, out_path=out,
-        width=int(d["width"]), height=int(d["height"]), crf=int(d["crf"]),
-        fps=int(cfg.get("render.fps", render_mod.DRAFT_FPS)))
+    kw: dict[str, Any] = dict(
+        sources=sources, out_path=out, width=int(d["width"]), height=int(d["height"]),
+        crf=int(d["crf"]), fps=int(cfg.get("render.fps", render_mod.DRAFT_FPS)))
+    measured = None
+    if cues:
+        kw.update(cues=cues, audio_sources=audio_sources, music_sources=music_sources,
+                  envelopes=_envelopes(cfg, conn, usable, cues),
+                  levels={k: float(cfg.get(f"render.{k}")) for k in (
+                      "speech_lufs", "location_full_lufs", "final_lufs", "true_peak_db",
+                      "music_xfade_s", "cue_fade_s", "audio_bitrate_k")})
+        log.info("S07 measuring the mix: %s cue(s)", n_cues)
+        proc = subprocess.run(render_mod.build_command(usable, measure_only=True, **kw),
+                              capture_output=True, text=True)
+        try:
+            if proc.returncode != 0:
+                raise ValueError(f"ffmpeg exited {proc.returncode}: {(proc.stderr or '')[-300:].strip()}")
+            measured = render_mod.parse_loudnorm_json(proc.stderr or "")
+            log.info("S07 the mix measures %s", measured)
+        except ValueError as e:
+            log.warning("S07 the measurement pass failed, rendering single-pass: %s", e)
+    cmd = render_mod.build_command(usable, loudnorm_measured=measured, script_path=gate / "draft.filters", **kw)
     log.info("S07 rendering %d of %d slot(s) to %s", len(usable), len(rows), out)
     log.debug("S07 %s", render_mod.describe(cmd))
-    import subprocess
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         log.error("S07 render failed: %s", (proc.stderr or "")[-600:])
         return {"error": (proc.stderr or "")[-600:], "n_slots": len(usable)}
     size = out.stat().st_size if out.exists() else 0
     log.info("S07 draft written: %s (%.1f MB)", out, size / 1e6)
-    return {"path": str(out), "bytes": size, "n_slots": len(usable),
-            "n_skipped": len(rows) - len(usable)}
+    report = {"path": str(out), "bytes": size, "n_slots": len(usable), "n_skipped": len(rows) - len(usable),
+              "audio_tracks": len(n_cues) if cues else 0, "n_cues": n_cues, "n_dropped_cues": n_dropped,
+              "two_pass": measured is not None, "draft_s": _draft_seconds(out) if out.exists() else None}
+
+    # The editor's files again, now with the tracks the cues step laid --
+    # the timeline step wrote them before any cue existed.
+    timeline_io.write(rows, cfg.workdir("."), media_dir=str(cfg.work_root / "proxies"),
+                      fps=int(cfg.get("render.fps")), cues=cues, overlays=overlays)
+    # The same lettering the beat sheet's prompt gave the authors, from the
+    # same rows in the same order, so "A" on the page is the "A" on the card.
+    cast = beats_input.Cast.build(
+        [r["author"] for r in beats_input.chat_rows(conn, max_chars=int(cfg.get("beats.chat_max_chars")))], ())
+    so_far: dict[str, Any] = {}
+    try:
+        so_far = json.loads((cfg.work_root / "reports" / "s05_cut.json").read_text())
+    except (OSError, ValueError):
+        pass
+    page = gate / "index.html"
+    page.write_text(gate3.render_gate3(rows, cues, overlays, per_act_sources=db.per_act_sources(conn),
+                                       report={**so_far, "draft": report}, cast_tags=cast.tags))
+    log.info("S07 Gate 3 page: %s", page)
+    return {**report, "page": str(page)}
 
 
 def _write_report(cfg: Config, report: Mapping[str, Any]) -> None:
