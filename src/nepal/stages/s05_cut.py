@@ -13,6 +13,7 @@ merely usable.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import math
@@ -25,11 +26,11 @@ import numpy as np
 from nepal import db, freshness
 from nepal import select as select_mod
 from nepal.config import Config
-from nepal.process import assemble as asm, render as render_mod, score as score_mod
+from nepal.process import assemble as asm, cues as cues_mod, render as render_mod, score as score_mod
 from nepal.process import longtake as longtake_mod, pairs as pairs_mod, rhythm as rhythm_mod
 from nepal.process import timeline_io
 from nepal.spine import effort, music as music_mod, place as place_mod, scenes as scenes_mod
-from nepal.story import anchors as anchors_mod
+from nepal.story import anchors as anchors_mod, beats_input
 from nepal.util.progress import Progress
 
 log = logging.getLogger(__name__)
@@ -864,6 +865,33 @@ def _material_bound(cfg: Config, specs: Sequence[Mapping[str, Any]], rows: Seque
     return bounded, material
 
 
+def _natural_windows(cfg: Config, prof: Sequence[effort.Effort], ordered: Sequence[Mapping[str, Any]],
+                     shots_by_id: Mapping[str, Mapping[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """The natural-sound windows on film time, through the slot whose shot
+    was rolling at each window's centre; and how many hit no slot. Shared
+    by the timeline step and the cues step, so a cues re-run without the
+    report on disk lands on the same windows the timeline was built with."""
+    windows = effort.hardest_windows(
+        prof, count=int(cfg.get("assemble.natural_sound_windows")),
+        window_s=sum(float(x) for x in cfg.get("assemble.natural_sound_window_s")) / 2.0)
+    natural: list[dict[str, Any]] = []
+    for w0, w1 in windows:
+        centre = w0 + (w1 - w0) / 2
+        for i, s in enumerate(ordered):
+            if not s.get("shot_id"):
+                continue
+            s_utc = _slot_utc(s, shots_by_id[s["shot_id"]])
+            if s_utc is None:
+                continue
+            length = float(s["t_out"]) - float(s["t_in"])
+            if s_utc <= centre <= s_utc + timedelta(seconds=length):
+                mid = float(s["t_in"]) + (centre - s_utc).total_seconds()
+                half = (w1 - w0).total_seconds() / 2
+                natural.append({"t_in": round(mid - half, 3), "t_out": round(mid + half, 3), "slot_index": i})
+                break
+    return natural, len(windows) - len(natural)
+
+
 def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     """S06 -- the picture track v2: anchors, pairs, the long take, the fill,
     scenes, music, rhythm; then the table, the map and the OTIO/FCPXML."""
@@ -1086,25 +1114,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     for p in problems:
         log.warning("S06 music map: %s", p)
 
-    # -- the natural-sound windows, on film time through the slot they hit --
-    windows = effort.hardest_windows(
-        prof, count=int(cfg.get("assemble.natural_sound_windows")),
-        window_s=sum(float(x) for x in cfg.get("assemble.natural_sound_window_s")) / 2.0)
-    natural: list[dict[str, Any]] = []
-    for w0, w1 in windows:
-        centre = w0 + (w1 - w0) / 2
-        for i, s in enumerate(ordered):
-            if not s.get("shot_id"):
-                continue
-            s_utc = _slot_utc(s, shots_by_id[s["shot_id"]])
-            if s_utc is None:
-                continue
-            length = float(s["t_out"]) - float(s["t_in"])
-            if s_utc <= centre <= s_utc + timedelta(seconds=length):
-                mid = float(s["t_in"]) + (centre - s_utc).total_seconds()
-                half = (w1 - w0).total_seconds() / 2
-                natural.append({"t_in": round(mid - half, 3), "t_out": round(mid + half, 3), "slot_index": i})
-                break
+    natural, n_unplaced = _natural_windows(cfg, prof, ordered, shots_by_id)
 
     # -- the write ---------------------------------------------------------------
     for s in ordered:
@@ -1134,8 +1144,93 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
             "n_scenes": len(scenes), "music_assignment": mode,
             "music_map_recomputed": sorted(moved), "music_map_problems": problems,
             "cold_open_beat": act0[0].get("beat_id") if act0 and act0[0]["kind"] == "video" else None,
-            "natural_windows": natural, "n_natural_windows_unplaced": len(windows) - len(natural),
+            "natural_windows": natural, "n_natural_windows_unplaced": n_unplaced,
             "quality": quality}
+
+
+def _reported_windows(cfg: Config) -> list[dict[str, Any]] | None:
+    """The natural windows the last timeline run reported, or None when the
+    report is missing or predates the key."""
+    path = cfg.work_root / "reports" / "s05_cut.json"
+    try:
+        return json.loads(path.read_text())["timeline"]["natural_windows"]
+    except (OSError, KeyError, TypeError, ValueError):
+        return None
+
+
+def build_cues(cfg: Config, conn) -> dict[str, Any]:
+    """S05.cues -- the three audio tracks and the chat cards, from what the
+    timeline step persisted: the table, the beats, the map and the report.
+    Reading only artefacts is what lets ``--redo cues`` run alone."""
+    slots = [dict(r) for r in conn.execute(
+        "SELECT t.*, s.recording_id FROM timeline t LEFT JOIN shots s ON s.shot_id = t.shot_id "
+        "ORDER BY t.slot_index")]
+    if not slots:
+        return {"skipped": "no timeline"}
+    shots_by_id = {r["shot_id"]: dict(r) for r in conn.execute("SELECT * FROM shots")}
+    beats = [dict(r) for r in conn.execute(
+        "SELECT b.*, m.author FROM story_beats b LEFT JOIN messages m ON m.msg_id = b.msg_id "
+        "ORDER BY b.rank, b.beat_id")]
+
+    # The speech anchors as the timeline step built them; each is placed
+    # where the first slot carrying its beat reaches the words -- the locked
+    # slot opens on them, the cold open runs into them after its extension,
+    # so the offset between the slot's source and the anchor's is the offset
+    # on film time too. A beat the fill never gave a slot has no voice.
+    anchors = anchors_mod.speech_anchors(
+        [b for b in beats if b.get("kind") == "speech" and b.get("shot_id") in shots_by_id],
+        shots_by_id, face_hold_s=float(cfg.get("beats.face_hold_s")),
+        pre_roll_s=float(cfg.get("beats.pre_roll_s")),
+        own_picture_below=float(cfg.get("beats.own_picture_face_score_below")))
+    first_slot: dict[str, Mapping[str, Any]] = {}
+    for s in slots:
+        if s.get("beat_id") and s["beat_id"] not in first_slot:
+            first_slot[s["beat_id"]] = s
+    placed: list[anchors_mod.Anchor] = []
+    for a in anchors:
+        slot = first_slot.get(a.beat_id)
+        if slot is None:
+            log.warning("S05.cues speech beat %s has no slot on the timeline; it gets no cue", a.beat_id)
+            continue
+        placed.append(dataclasses.replace(
+            a, t_in=float(slot["t_in"]) + a.src_in - float(slot["src_in"] or 0.0)))
+
+    map_path = cfg.work_root / "music" / "music_map.json"
+    if not map_path.exists():
+        return {"skipped": "no music map; the timeline step writes it"}
+    mmap = json.loads(map_path.read_text())
+    natural = _reported_windows(cfg)
+    if natural is None:
+        natural, _ = _natural_windows(cfg, effort.profile(place_mod.load_track(conn)), slots, shots_by_id)
+    cues = (cues_mod.speech_cues(placed, lufs=float(cfg.get("render.speech_lufs")),
+                                 fade_s=float(cfg.get("render.cue_fade_s")))
+            + cues_mod.location_cues(
+                slots, lufs_under_music=float(cfg.get("render.duck_lufs")),
+                lufs_full=float(cfg.get("render.location_full_lufs")),
+                lufs_under_speech=float(cfg.get("render.location_under_speech_lufs")),
+                speech_spans=cues_mod.speech_spans(slots), windows=natural,
+                silence=mmap.get("silence_window"), fade_s=float(cfg.get("render.cue_fade_s")),
+                window_fade_s=float(cfg.get("render.window_fade_s")))
+            + cues_mod.music_cues(mmap, lufs=float(cfg.get("render.music_lufs")),
+                                  xfade_s=float(cfg.get("render.music_xfade_s")),
+                                  window_fade_s=float(cfg.get("render.window_fade_s"))))
+    # The same lettering the beat sheet's prompt gave the authors, from the
+    # same rows in the same order, so "A" on a card is the "A" Claude quoted.
+    cast = beats_input.Cast.build(
+        [r["author"] for r in beats_input.chat_rows(conn, max_chars=int(cfg.get("beats.chat_max_chars")))], ())
+    overlays = cues_mod.overlay_rows(beats, slots, chat_card_s=float(cfg.get("assemble.chat_card_s")),
+                                     closing_card_s=float(cfg.get("assemble.closing_card_s")),
+                                     cast_tags=cast.tags)
+
+    # Rebuilt, not accumulated: upsert never removes a cue an earlier run laid.
+    conn.execute("DELETE FROM audio_cues")
+    conn.execute("DELETE FROM overlays")
+    db.upsert(conn, "audio_cues", ["cue_id"], cues)
+    db.upsert(conn, "overlays", ["overlay_id"], overlays)
+    conn.commit()
+    n_cues = {t: sum(1 for c in cues if c["track"] == t) for t in ("speech", "location", "music")}
+    log.info("S05.cues %s; %d overlay(s); %d natural-sound window(s)", n_cues, len(overlays), len(natural))
+    return {"n_cues": n_cues, "n_overlays": len(overlays), "natural_windows": natural}
 
 
 def photo_source(cfg: Config, row: Mapping[str, Any]) -> Path | None:
@@ -1219,6 +1314,7 @@ def run(cfg: Config, *, force: bool = False,
     # operator is actively tuning, so they always re-run.
     for name, fn in (("score", lambda: score_shots(cfg, conn)),
                      ("timeline", lambda: build_timeline(cfg, conn)),
+                     ("cues", lambda: build_cues(cfg, conn)),
                      ("draft", lambda: render_draft(cfg, conn))):
         if redo and name not in redo:
             continue

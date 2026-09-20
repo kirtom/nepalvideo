@@ -6,7 +6,7 @@
     nepal s02 [--force] [--skip-asr] [--redo UNITS]
     nepal s03 [--force] [--redo STEPS]   per-clip processing
     nepal s04 [--force] [--redo STEPS]   semantic layer (CLIP embeddings)
-    nepal cut [--redo score,timeline,draft]  score, assemble, render the draft
+    nepal cut [--redo score,timeline,cues,draft]  score, assemble, lay the sound, render the draft
     nepal fov-check              Gate 1 seam comparison sheets
     nepal report                 the chronological checkpoint table
     nepal decisions              auto-solved values with confidence
@@ -97,8 +97,8 @@ def main(argv: list[str] | None = None) -> int:
 
     pcut = sub.add_parser("cut", help="S05-S07 -- score, assemble and render the draft")
     pcut.add_argument("--force", action="store_true")
-    pcut.add_argument("--redo", metavar="STEPS", default="score,timeline,draft",
-                      help="comma-separated: score,timeline,draft (default: all)")
+    pcut.add_argument("--redo", metavar="STEPS", default="score,timeline,cues,draft",
+                      help="comma-separated: score,timeline,cues,draft (default: all)")
 
     pfc = sub.add_parser("fov-check",
                          help="render the Gate 1 FOV comparison sheets")
