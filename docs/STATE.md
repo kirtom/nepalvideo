@@ -314,14 +314,19 @@ keller 42/226, kulikov 198/398; Act 4 camera 12/13, keller 21/72, kulikov
 27/66; Act 5 camera 39/46, keller 48/170, kulikov 63/129. 15 anchors
 placed, 7 pairs, the long take on `camera_20240415_044025`, cold open on
 beat b18, 30 scenes assigned per scene, one natural-sound window (Act 3,
-t=1145 s). The 25 % phone-share rule does not yet hold after the re-fill
-rounds (Act 3: keller 42 against kulikov 198) — parked for the next round.
+t=1145 s). The 25 % phone-share rule reads as "each phone's clips as far
+as it has them": keller's phone shot 39 clips in Act 3 and 33 are on
+screen (the rest sit on a speech beat's recording), 47 in Act 5 and 42 on
+screen; the 226 "available" were mostly stills, and the dashboard now
+counts clips apart from stills. The seventh cut (re-fill laid at the
+measured slot length, so a gap's picks stay before their anchor; the
+relaxed second pass penalised against the first; the rounding fix under
+test) is the one on disk: 735 slots, 30.2 min, 7 pairs.
 
 **What it cost.** The box would not boot: its 60 GB disk was full once
 raw/ reached 69 GB, cloud-init died with ENOSPC and never wrote the ssh
 keys; recreated with 150 GB (config says so now). Six cuts plus tests,
-about 1.5 h of on-demand box time; ledger 4.65 of 25 USD before this
-session's box hours are booked at `remote down`.
+about 1.9 h of on-demand box time; ledger 5.21 of 25 USD.
 A local run was started by mistake on a misread instruction and killed
 mid-render; nothing of the pipeline runs locally.
 
