@@ -49,7 +49,11 @@ ACT_UTC = {
 }
 
 
-def _seed(cfg):
+def _seed(cfg, *, lopsided_act=None):
+    """``lopsided_act``: that act's bulk comes five parts keller to one
+    kulikov, keller a fifth of a point stronger -- the corpus's act 3, not
+    the round-robin symmetry of the other acts, which hides a share rule
+    that only ever ran per gap."""
     cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = db.init(cfg.db_path)
     recordings: list[tuple] = []
@@ -187,12 +191,15 @@ def _seed(cfg):
                                      (3, datetime(2024, 5, 1, 5, tzinfo=timezone.utc), 34, 6.5),
                                      (4, datetime(2024, 5, 4, 1, 30, tzinfo=timezone.utc), 10, 6.5),
                                      (5, datetime(2024, 5, 8, 8, tzinfo=timezone.utc), 26, 6.5)):
-        for i in range(n_recs):
+        lopsided = act == lopsided_act
+        for i in range(30 if lopsided else n_recs):
             rid, start = f"f{act}_{i:02d}", day + timedelta(minutes=4 * i)
-            recording(rid, ("phone_keller", "phone_kulikov", "camera")[i % 3], start, 20)
+            src = (("phone_kulikov" if i % 6 == 0 else "phone_keller") if lopsided
+                   else ("phone_keller", "phone_kulikov", "camera")[i % 3])
+            recording(rid, src, start, 20)
             for j in range(3):
                 shot(rid, j, shot_s * j, shot_s * (j + 1), start, act,
-                     source_score=0.4 + 0.05 * ((i + j) % 5))
+                     source_score=0.4 + 0.05 * ((i + j) % 5) + (0.2 if lopsided and src == "phone_keller" else 0.0))
 
     conn.executemany("INSERT INTO recordings(recording_id, source, is_360, start_utc, duration_s, "
                      "asset_count) VALUES (?,?,?,?,?,?)", recordings)
@@ -438,6 +445,23 @@ def test_refill_budget_is_the_gap_at_what_a_slot_actually_runs():
     assert s05_cut._refill_budget(25.0, 2.5) == 10
     assert s05_cut._refill_budget(26.0, 2.5) == 11
     assert s05_cut._refill_budget(0.5, 2.5) == 1
+
+
+def test_a_starved_phone_gets_its_share_of_the_act_not_of_each_gap(tmp_path):
+    """source_share_repair runs per gap over that gap's picks and never over
+    the act, so with one phone holding five times the rows and a score edge
+    the other ended far under its share of the act. After the refill rounds
+    the act is re-balanced by swapping shots, slot for slot, until the
+    starved phone holds its share of the act's phone video slots."""
+    cfg = _cfg(tmp_path)
+    conn = _seed(cfg, lopsided_act=5)
+    s05_cut.build_timeline(cfg, conn)
+    by_source = {r["source"]: r["n"] for r in conn.execute(
+        "SELECT rc.source AS source, COUNT(*) AS n FROM timeline t JOIN shots s ON s.shot_id = t.shot_id "
+        "JOIN recordings rc ON rc.recording_id = s.recording_id WHERE t.act = 5 AND t.kind = 'video' GROUP BY 1")}
+    phone = sum(by_source.get(p, 0) for p in PHONES)
+    assert phone and by_source.get("phone_kulikov", 0) / phone >= float(cfg.get("assemble.source_share_min")), by_source
+    conn.close()
 
 
 def test_build_timeline_is_rebuilt_not_accumulated(tmp_path):
