@@ -126,7 +126,7 @@ def _mmap():
          "segments": [{"track_id": "t2", "t_in": 0.0, "t_end": 23.0, "src_in": 90.0, "src_out": 113.0}]},
         {"act": 1, "t_start": 23.0, "t_end": 83.0,
          "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 40.0, "src_in": 0.0, "src_out": 40.0},
-                      {"track_id": "t2", "t_in": 40.0, "t_end": 60.0, "src_in": 10.0, "src_out": 30.0}]},
+                      {"track_id": "t2", "t_in": 40.0, "t_end": 58.7, "src_in": 10.0, "src_out": 28.7}]},
         {"act": 2, "t_start": 83.0, "t_end": 90.0, "segments": []},
         {"act": 4, "t_start": 90.0, "t_end": 150.0,
          "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 60.0, "src_in": 40.0, "src_out": 100.0}]},
@@ -143,8 +143,11 @@ def test_music_cues_cover_every_act_end_to_end_on_film_time():
     assert (by_id["mu_0_0"]["t_in"], by_id["mu_0_0"]["t_out"]) == (0.0, 23.0)
     assert by_id["mu_0_0"]["source"] == "t2" and by_id["mu_0_0"]["src_in"] == 90.0
     assert (by_id["mu_1_0"]["t_in"], by_id["mu_1_0"]["t_out"]) == (23.0, 63.0)
+    # the map's last segment stops at its last scene, 1.3 s short of the act:
+    # the bed runs on to the act's end rather than dropping out before the cut
     assert (by_id["mu_1_1"]["t_in"], by_id["mu_1_1"]["t_out"]) == (63.0, 83.0)
-    assert by_id["mu_1_1"]["src_in"] == 10.0 and by_id["mu_1_1"]["fade_in_s"] == 2.0
+    assert (by_id["mu_1_1"]["src_in"], by_id["mu_1_1"]["src_out"]) == (10.0, 30.0)
+    assert by_id["mu_1_1"]["fade_in_s"] == 2.0
     for a in _mmap()["acts"]:
         if not a["segments"] or a["act"] == 5:
             continue

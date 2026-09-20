@@ -138,15 +138,23 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
     silence window gets no music: a segment inside it is dropped, one that
     runs into it stops at its edge and fades over the window fade, one that
     starts inside it resumes where the silence ends, the track advanced by
-    the same amount so the map's beat grid still lines up."""
+    the same amount so the map's beat grid still lines up.
+
+    An act's last segment runs on to the act's ``t_end``: the map's segments
+    are scene runs, which stop at the last slot the scenes were grouped on,
+    and the second or two between that and the act's end would be a hole in
+    the bed right before the cut, not a pause."""
     q = mmap.get("silence_window") or {}
     q0, q1 = (float(q["t_start"]), float(q["t_end"])) if q else (math.inf, math.inf)
     out: list[dict[str, Any]] = []
     for entry in mmap.get("acts", []):
-        t_start = float(entry["t_start"])
-        for i, seg in enumerate(entry.get("segments") or []):
+        t_start, t_end = float(entry["t_start"]), float(entry["t_end"])
+        segments = entry.get("segments") or []
+        for i, seg in enumerate(segments):
             t0, t1 = t_start + float(seg["t_in"]), t_start + float(seg["t_end"])
             src_in, src_out = float(seg["src_in"]), float(seg["src_out"])
+            if i == len(segments) - 1 and t1 < t_end:
+                src_out, t1 = src_out + (t_end - t1), t_end
             if t0 < q1 and t1 > q0:
                 if t0 >= q0 and t1 <= q1:
                     continue
