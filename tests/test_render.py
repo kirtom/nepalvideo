@@ -157,8 +157,8 @@ def test_ffmpeg_holds_a_real_photograph_for_its_full_slot(tmp_path):
                     "-frames:v", "1", str(img)], check=True)
     out = tmp_path / "held.mp4"
     rows = [{"shot_id": "p1", "media_kind": "photo", "t_in": 0.0, "t_out": 3.0}]
-    subprocess.run(render.build_command(rows, sources={"p1": img}, out_path=out),
-                   check=True)
+    assert render.run_render(render.build_command(rows, sources={"p1": img}, out_path=out),
+                             out).returncode == 0
     dur = float(subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "csv=p=0", str(out)], capture_output=True, text=True,
@@ -190,7 +190,7 @@ def test_ffmpeg_renders_a_cut_of_the_expected_length(tmp_path):
     assert "-filter_complex_script" in cmd
     filters_path = out.with_suffix(".filters")
     assert filters_path.read_text(), "the script file must hold the real graph"
-    subprocess.run(cmd, check=True)
+    assert render.run_render(cmd, out).returncode == 0
     assert out.exists()
     probe = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
@@ -226,7 +226,7 @@ def test_ffmpeg_renders_a_card_between_real_footage_and_a_still(tmp_path):
     ]
     out = tmp_path / "draft.mp4"
     cmd = render.build_command(rows, sources={"v1": vid, "p1": img}, out_path=out)
-    subprocess.run(cmd, check=True)
+    assert render.run_render(cmd, out).returncode == 0
     assert out.exists()
     probe = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
@@ -392,7 +392,8 @@ def test_ffmpeg_renders_a_split_between_two_shots_at_the_frame_size(tmp_path):
              "motion": json.dumps({"type": "split"})},
             {"shot_id": "tall", "t_in": 5.0, "t_out": 7.0, "src_in": 0.0}]
     out = tmp_path / "draft.mp4"
-    subprocess.run(render.build_command(rows, sources=srcs, out_path=out), check=True)
+    assert render.run_render(render.build_command(rows, sources=srcs, out_path=out),
+                             out).returncode == 0
     probe = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
          "stream=width,height:format=duration", "-of", "default=nw=1", str(out)],
@@ -801,7 +802,7 @@ def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
     kw = dict(sources={"v1": vid, "v2": vid}, cues=cues, audio_sources={"r": speech},
               music_sources={"low": low, "mid": mid}, envelopes=envelopes, levels=LEVELS)
     out = tmp_path / "draft.mp4"
-    subprocess.run(render.build_command(rows, out_path=out, **kw), check=True)
+    assert render.run_render(render.build_command(rows, out_path=out, **kw), out).returncode == 0
     dur = float(subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
          "stream=duration", "-of", "csv=p=0", str(out)],
@@ -814,7 +815,8 @@ def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
     measured = render.parse_loudnorm_json(measure.stderr)
     assert measured["input_i"] < 0 and measured["input_tp"] < 0
     out2 = tmp_path / "draft2.mp4"
-    subprocess.run(render.build_command(rows, out_path=out2, loudnorm_measured=measured, **kw), check=True)
+    assert render.run_render(
+        render.build_command(rows, out_path=out2, loudnorm_measured=measured, **kw), out2).returncode == 0
 
     def probe(a, b):
         return render.probe_loudness(out2, t_in=a, t_out=b)
@@ -843,9 +845,10 @@ def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
     # designed. Asked at the real boundary, because that is where it was
     # wrong.
     out3 = tmp_path / "draft3.mp4"
-    subprocess.run(render.build_command(rows, out_path=out3,
-                                        loudnorm_measured=measured | {"input_lra": 24.3}, **kw),
-                   check=True)
+    assert render.run_render(
+        render.build_command(rows, out_path=out3,
+                             loudnorm_measured=measured | {"input_lra": 24.3}, **kw),
+        out3).returncode == 0
     wide_alone = render.probe_loudness(out3, t_in=0.0, t_out=2.0)
     wide_late = render.probe_loudness(out3, t_in=10.5, t_out=12.0)
     assert abs(wide_late - wide_alone) < 1.5, (
@@ -897,14 +900,14 @@ def test_the_concatenated_location_track_sounds_like_the_summed_one(tmp_path, mo
     joined, summed = tmp_path / "joined.mp4", tmp_path / "summed.mp4"
     cmd = render.build_command(rows, out_path=joined, **kw)
     assert "concat=n=4:v=0:a=1" in _graph(cmd), "two cues, the dead air between them, and the third"
-    subprocess.run(cmd, check=True)
+    assert render.run_render(cmd, joined).returncode == 0
 
     # A tolerance no abutting pair can satisfy: every join now reads as an
     # overlap, so the same cues take the amix path untouched.
     monkeypatch.setattr(render, "_EDGE_TOL_S", -1.0)
     cmd = render.build_command(rows, out_path=summed, **kw)
     assert "[lo0][lo1][lo2]amix=inputs=3:normalize=0" in _graph(cmd)
-    subprocess.run(cmd, check=True)
+    assert render.run_render(cmd, summed).returncode == 0
 
     windows = {"the first cue": (0.5, 3.5), "the second": (4.5, 6.5),
                "the dead air": (7.3, 8.7), "the cue after it": (9.5, 12.5)}
@@ -920,3 +923,29 @@ def test_the_concatenated_location_track_sounds_like_the_summed_one(tmp_path, mo
     assert abs((heard["the first cue"] - heard["the second"]) - 6.0) <= 1.0, heard
     assert abs(heard["the cue after it"] - heard["the first cue"]) <= 1.0, heard
     assert heard["the dead air"] < -50.0, heard
+
+
+# -- the draft is published only once it is whole -----------------------
+
+def test_the_render_writes_a_part_file_and_renames_it_on_success(tmp_path):
+    """The rule this pipeline already has for anything measured in hours,
+    now for the one output that is: the draft appears at its name only
+    after ffmpeg has exited 0."""
+    out = tmp_path / "draft.mp4"
+    cmd = render.build_command(ROWS, sources=SRC, out_path=out)
+    # ffmpeg picks its muxer from the extension, so the temporary keeps one
+    assert cmd[-1] == str(tmp_path / "draft.part.mp4")
+    assert render.part_path(out).suffix == ".mp4"
+
+    render.part_path(out).write_bytes(b"rendered")
+    proc = render.run_render(["true"], out)
+    assert proc.returncode == 0
+    assert out.read_bytes() == b"rendered" and not render.part_path(out).exists()
+
+
+def test_a_failed_render_leaves_the_previous_draft_alone(tmp_path):
+    out = tmp_path / "draft.mp4"
+    out.write_bytes(b"last good draft")
+    render.part_path(out).write_bytes(b"half a render")
+    assert render.run_render(["false"], out).returncode != 0
+    assert out.read_bytes() == b"last good draft"

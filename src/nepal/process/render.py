@@ -579,8 +579,34 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
             "-pix_fmt", "yuv420p"]
     if cues:
         cmd += ["-c:a", "aac", "-b:a", f"{int(levels['audio_bitrate_k'])}k", "-ar", str(AUDIO_RATE)]
-    cmd.append(str(out_path))
+    cmd.append(str(part_path(out_path)))
     return cmd
+
+
+def part_path(out_path: Path) -> Path:
+    """Where the render actually writes, until it has finished writing.
+
+    The extension is kept because ffmpeg picks its muxer from it -- a bare
+    ``.part`` would fail at "Unable to find a suitable output format".
+    """
+    return out_path.with_suffix(".part" + out_path.suffix)
+
+
+def run_render(cmd: Sequence[str], out_path: Path) -> subprocess.CompletedProcess:
+    """Run the render and publish its output only if ffmpeg succeeded.
+
+    A render measured in tens of minutes that is killed, preempted or
+    rsynced over leaves a truncated file where the good draft was, and
+    everything downstream -- the Gate 3 page, the measured length, whoever
+    watches it -- reads that as the draft. Written through a temporary name
+    and renamed, which is atomic on one filesystem, so draft.mp4 is either
+    the last complete render or nothing at all.
+    """
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    part = part_path(out_path)
+    if proc.returncode == 0 and part.exists():
+        part.replace(out_path)
+    return proc
 
 
 def describe(cmd: Sequence[str]) -> str:
