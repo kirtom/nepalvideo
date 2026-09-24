@@ -414,7 +414,10 @@ assemble:
   # -- Film v2 section 4.3: assembly v2's alternation and rhythm rules --
   pair_window_s: 60
   pairs_per_act: 2
-  max_consecutive_recording: 2   # outside a beat
+  max_consecutive_recording: 2   # outside a beat. The fill counts the run behind a pick;
+                                 # the share repair counts both neighbours of the slot it
+                                 # would swap, locked or not -- a run on screen is a run,
+                                 # whatever placed the clips either side of it.
   source_alternation_after: 3    # soft: prefer another source after this many in a row
   source_share_min: 0.25         # of an act's phone slots, to each phone that has material
   long_take_s: [60, 90]

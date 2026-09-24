@@ -265,6 +265,9 @@ def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path)
     shots = _shots(conn)
     recs = {r["recording_id"]: dict(r) for r in conn.execute("SELECT * FROM recordings")}
     assert rep["n_slots"] == len(slots) > 10
+    # every locked slot the run lost -- pushed past its act's end or squeezed
+    # to nothing before the write -- is counted, and a healthy seed loses none
+    assert rep["n_dropped_locked"] == 0
 
     # the cold open, then the card, before act 1 begins
     assert slots[0]["kind"] == "video" and slots[0]["act"] == 0 and slots[0]["t_in"] == 0.0
@@ -503,6 +506,27 @@ def test_the_share_repair_will_not_swap_in_a_shot_that_breaks_the_run_rule():
                                      min_share=0.4, run_cap=2) == [("u1", "k3")]
 
 
+def test_a_refused_candidate_is_counted_once_per_giver_not_once_per_round(caplog):
+    """The repair re-reads the same pools every round, so a plain counter
+    reported the same refusal again on every pass. Here keller needs two
+    swaps and never gets the second: the first giver refuses both candidates
+    in round one and the surviving one again in round two -- three counts by
+    loop pass, two by (giver, candidate)."""
+    slots = ([_phone_slot(0, "k1"), _phone_slot(1, "u1"), _phone_slot(2, "k2"),
+              _phone_slot(3, "u2")]
+             + [_phone_slot(i, f"u{i - 1}", beat_id=f"b{i}") for i in range(4, 12)])
+    rows = ([_phone_row("k1", "phone_keller", "rk"), _phone_row("k2", "phone_keller", "rk"),
+             _phone_row("kA", "phone_keller", "rk"), _phone_row("kB", "phone_keller", "rk")]
+            + [_phone_row(f"u{i}", "phone_kulikov", "rku") for i in range(1, 11)])
+    shots = {r["shot_id"]: r for r in rows}
+
+    with caplog.at_level(logging.INFO, logger="nepal.stages.s05_cut"):
+        swaps = s05_cut._rebalance_phones(slots, rows, shots, act=5, act0=[], excluded=set(),
+                                          min_share=0.4, run_cap=2)
+    assert swaps == [("u2", "kA")], "only the giver whose neighbours leave room takes one"
+    assert "2 long-enough candidate(s) refused by the run rule" in caplog.text
+
+
 def test_build_timeline_is_rebuilt_not_accumulated(tmp_path):
     cfg = _cfg(tmp_path)
     conn = _seed(cfg)
@@ -640,6 +664,28 @@ def test_a_locked_slot_pushed_past_the_act_end_is_named_and_counted(caplog):
         assert s05_cut._count_dropped_locked(resolved, kept, act=2) == 1
     assert "b_second" in caplog.text and "act 2" in caplog.text
     assert s05_cut._count_dropped_locked(resolved, resolved, act=2) == 0
+
+
+def test_a_locked_slot_squeezed_to_nothing_is_counted_with_the_ones_pushed_off_the_end(caplog):
+    """A locked slot is not only lost by being pushed past its act's end --
+    the rounds before the write can also close it to zero length, and the
+    pre-write filter then drops it just as silently. Same loss, same count:
+    ``n_dropped_locked`` is the only line that says a beat the film was cut
+    around is not in the film."""
+    def slot(shot_id, t_in, t_out, locked=0):
+        return s05_cut._set_length(
+            s05_cut._new_slot(kind="video", act=1, shot_id=shot_id, beat_id="b1" if locked else None,
+                              src_in=0.0, locked=locked), t_in, t_out)
+
+    slots = [slot("a", 0.0, 4.0), slot("b", 4.0, 4.0, locked=1),
+             slot("c", 4.0, 8.0), slot("d", 8.0, 8.0)]
+    with caplog.at_level(logging.WARNING):
+        kept, n_locked = s05_cut._drop_empty(slots)
+    assert [s["shot_id"] for s in kept] == ["a", "c"]
+    assert n_locked == 1, "the unlocked zero-length slot goes too, but costs the film nothing"
+    assert "zero-length" in caplog.text
+
+    assert s05_cut._drop_empty([slot("a", 0.0, 4.0)]) == ([slots[0]], 0)
 
 
 def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):

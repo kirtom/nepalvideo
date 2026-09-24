@@ -449,6 +449,27 @@ def _count_dropped_locked(before: Sequence[Mapping[str, Any]], after: Sequence[M
     return len(lost)
 
 
+def _drop_empty(slots: Sequence[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """The slots that survive to the table, and how many locked ones were
+    squeezed to nothing on the way.
+
+    Nothing of zero length reaches the table, whatever produced it: render
+    would ask ffmpeg for nothing and every count downstream would be off by
+    a slot. A locked slot squeezed to zero is as absent from the film as one
+    pushed past its act's end, and costs the same thing -- a story beat or
+    the bridge crossing the cut was built around is simply not in it -- so it
+    belongs to the same count rather than disappearing into a drop line.
+    ``n_dropped_locked`` in the report is what says so out loud.
+    """
+    empty = [s for s in slots if float(s["t_out"]) <= float(s["t_in"])]
+    if empty:
+        log.warning("S06 dropped %d zero-length slot(s) before the write, first act %s shot %s at %.3fs "
+                    "(locked %s)", len(empty), empty[0].get("act"), empty[0].get("shot_id"),
+                    float(empty[0]["t_in"]), bool(empty[0].get("locked")))
+    return ([s for s in slots if float(s["t_out"]) > float(s["t_in"])],
+            sum(1 for s in empty if s.get("locked")))
+
+
 def _close_holes(slots: Sequence[dict[str, Any]], t0: float) -> list[dict[str, Any]]:
     """Whatever no material could cover is closed, not left black: every
     slot after a hole moves up by the hole's length, locked or not -- an
@@ -776,7 +797,8 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
         scenes, assignment, tracks, act_spans=act_spans,
         silence_s=float(cfg.get("assemble.silence_window_s")), act0_span=act0_span)
     problems = music_mod.check_music_map(
-        mmap, target_s=total_s, tolerance_s=float(cfg.get("film.duration_tolerance_s")))
+        mmap, target_s=total_s, tolerance_s=float(cfg.get("film.duration_tolerance_s")),
+        track_s={t.track_id: t.duration_s for t in tracks if t.duration_s})
     return scenes, mmap, mode, problems
 
 
@@ -849,7 +871,7 @@ def _rebalance_phones(slots: list[dict[str, Any]], act_rows: Sequence[Mapping[st
                  "candidate(s) refused by the run rule", act, counts,
                  len(phone_slots), {p: len(available[p]) for p in phones}, starved,
                  {p: len(pools[p]) for p in starved}, len(givers), ahead, len(swaps), swaps,
-                 n_refused_run)
+                 len(refused_run))
         return swaps
 
     available = {p: [r for r in act_rows if r.get("source") == p and not _is_photo(r)] for p in phones}
@@ -859,7 +881,7 @@ def _rebalance_phones(slots: list[dict[str, Any]], act_rows: Sequence[Mapping[st
     first = state()
     phone_slots, counts, starved, pools, ahead, givers = first
     swaps: list[tuple[str, str]] = []
-    n_refused_run = 0
+    refused_run: set[tuple[int, str]] = set()
     while True:
         if not starved:
             return done()
@@ -870,7 +892,11 @@ def _rebalance_phones(slots: list[dict[str, Any]], act_rows: Sequence[Mapping[st
             length = float(s["t_out"]) - float(s["t_in"])
             long_enough = [r for r in pool if asm.shot_available_s(r) >= length]
             fits = [r for r in long_enough if run_ok(r, pos[id(s)])]
-            n_refused_run += len(long_enough) - len(fits)
+            # By (giver slot, candidate), not by loop pass: the while loop
+            # re-reads the same pools every round, so a plain counter would
+            # report the same refusal once per iteration.
+            ok = {id(r) for r in fits}
+            refused_run.update((pos[id(s)], r["shot_id"]) for r in long_enough if id(r) not in ok)
             if not fits:
                 continue
             here = anchors_mod._epoch(shots_by_id[s["shot_id"]].get("start_utc"))
@@ -1041,6 +1067,11 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     all_slots = list(act0) + [s for a in acts for s in planned[a]]
     scenes, mmap, mode, problems = _scenes_and_map(
         cfg, all_slots, attrs, tracks, act_spans=planned_spans, act0_span=(0.0, t0), total_s=total_s)
+    # Before the acts are cut against it, not after: every act below is timed
+    # on this map's grid, so a problem read at the end of the run is a
+    # problem read after it has already shaped the film.
+    for p in problems:
+        log.warning("S06 music map: %s", p)
     tracks_by_id = {tr.track_id: tr for tr in tracks}
 
     # -- rhythm, act by act, each act ending where its last cut lands ------
@@ -1153,28 +1184,21 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     # earns a new one, because the cuts above were timed against its grid.
     moved = {a for a in acts if abs((final_spans[a][1] - final_spans[a][0]) - act_len[a])
              > float(cfg.get("music.min_scene_s"))}
-    ordered = list(act0) + [s for a in acts for s in final[a]]
-    # Nothing of zero length reaches the table, whatever produced it: render
-    # would ask ffmpeg for nothing and every count downstream would be off
-    # by a slot. Dropped here, before scenes and windows index the list.
-    empty = [s for s in ordered if float(s["t_out"]) <= float(s["t_in"])]
-    if empty:
-        log.warning("S06 dropped %d zero-length slot(s) before the write, first act %s shot %s at %.3fs "
-                    "(locked %s)", len(empty), empty[0].get("act"), empty[0].get("shot_id"),
-                    float(empty[0]["t_in"]), bool(empty[0].get("locked")))
-        ordered = [s for s in ordered if float(s["t_out"]) > float(s["t_in"])]
+    # Zero-length slots go before scenes and windows index the list.
+    ordered, n_squeezed = _drop_empty(list(act0) + [s for a in acts for s in final[a]])
+    n_dropped_locked += n_squeezed
     if moved:
         scenes, mmap, mode, problems = _scenes_and_map(
             cfg, ordered, attrs, tracks, act_spans=final_spans, act0_span=(0.0, t0), total_s=total_s)
         for sc in scenes:
             for i in sc.slot_indices:
                 ordered[i]["scene_id"] = sc.scene_id
+        for p in problems:
+            log.warning("S06 music map, rebuilt on the acts the picture has: %s", p)
     else:
         for s in ordered:
             s["scene_id"] = _scene_id_by_time(s, scenes, shifts.get(int(s["act"]), 0.0))
     cfg.work("music", "music_map.json").write_text(json.dumps(mmap, indent=2, ensure_ascii=False))
-    for p in problems:
-        log.warning("S06 music map: %s", p)
 
     natural, n_unplaced = _natural_windows(cfg, prof, ordered, shots_by_id)
 
@@ -1257,6 +1281,11 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
         lo, hi = act_spans.get(int(s["act"]), (math.inf, -math.inf))
         act_spans[int(s["act"])] = (min(lo, float(s["t_in"])), max(hi, float(s["t_out"])))
     mmap = cues_mod.map_on_film_time(json.loads(map_path.read_text()), act_spans)
+    # The act the table has can be up to music.min_scene_s longer than the one
+    # the map was planned on, and that difference all lands on the act's last
+    # cue -- which the track may not have. The durations say when to loop.
+    track_s = {r["track_id"]: float(r["duration_s"]) for r in conn.execute(
+        "SELECT track_id, duration_s FROM music_tracks WHERE duration_s IS NOT NULL")}
     natural = _reported_windows(cfg)
     if natural is None:
         natural, _ = _natural_windows(cfg, effort.profile(place_mod.load_track(conn)), slots, shots_by_id)
@@ -1271,7 +1300,8 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
                 window_fade_s=float(cfg.get("render.window_fade_s")))
             + cues_mod.music_cues(mmap, lufs=float(cfg.get("render.music_lufs")),
                                   xfade_s=float(cfg.get("render.music_xfade_s")),
-                                  window_fade_s=float(cfg.get("render.window_fade_s"))))
+                                  window_fade_s=float(cfg.get("render.window_fade_s")),
+                                  track_s=track_s))
     # The same lettering the beat sheet's prompt gave the authors, from the
     # same rows in the same order, so "A" on a card is the "A" Claude quoted.
     cast = beats_input.Cast.build(
