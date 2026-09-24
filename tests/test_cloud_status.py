@@ -1,5 +1,6 @@
 """The status document: what is running, what has run, what it cost."""
 import json
+import os
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
@@ -7,6 +8,16 @@ from datetime import datetime, timezone
 
 from nepal import db
 from nepal.cloud import spend, status
+
+
+def _write_newest(path, report):
+    """Write a report and make it the newest one. Two files written in the
+    same second have the same mtime, and which of them `sorted` calls last
+    is then the directory's business, not the test's."""
+    path.write_text(json.dumps(report))
+    newest = max(p.stat().st_mtime for p in path.parent.glob("s0*.json"))
+    os.utime(path, (newest + 1, newest + 1))
+    return path
 
 
 def _seed(tmp_path):
@@ -74,9 +85,10 @@ def test_a_report_with_no_finished_stamp_is_running_not_unknown(tmp_path):
     for the whole of a cut with `finished_utc` null. The page said nothing
     at all for the hours that mattered most."""
     conn, led, reports = _seed(tmp_path)
-    (reports / "s05_cut.json").write_text(json.dumps(
-        {"stage": "S05", "started_utc": "2026-09-18T05:30:00+00:00",
-         "skipped_stale": False, "score": {"n": 3}, "timeline": {"slots": 1}}))
+    running = _write_newest(reports / "s05_cut.json",
+                            {"stage": "S05", "started_utc": "2026-09-18T05:30:00+00:00",
+                             "skipped_stale": False, "score": {"n": 3},
+                             "timeline": {"slots": 1}})
     st = status.build_status(conn, led, reports)
     rep = st["last_report"]
     assert rep["name"] == "s05_cut.json" and rep["finished_utc"] is None
@@ -85,9 +97,8 @@ def test_a_report_with_no_finished_stamp_is_running_not_unknown(tmp_path):
     assert rep["updated_utc"].endswith("+00:00")           # the last checkpoint
     assert "running since 2026-09-18T05:30:00+00:00" in status.render_html(st)
     # and a finished report still reads as finished
-    (reports / "s05_cut.json").write_text(json.dumps(
-        {"stage": "S05", "started_utc": "2026-09-18T05:30:00+00:00",
-         "finished_utc": "2026-09-18T06:30:00+00:00", "score": {"n": 3}}))
+    _write_newest(running, {"stage": "S05", "started_utc": "2026-09-18T05:30:00+00:00",
+                            "finished_utc": "2026-09-18T06:30:00+00:00", "score": {"n": 3}})
     done = status.build_status(conn, led, reports)["last_report"]
     assert done["finished_utc"] == "2026-09-18T06:30:00+00:00" and "steps_done" not in done
 
