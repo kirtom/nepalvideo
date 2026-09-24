@@ -495,16 +495,42 @@ def test_an_arrival_window_is_kept_over_a_merely_longer_one():
 def test_act_five_keeps_its_last_window_not_its_longest():
     """Act 5 is the descent and the return: its one cue belongs as late as
     eligibility allows, resolving into the credits."""
-    scenes = [_scene(scene_id=1, act=5, t_in=0.0, t_out=400.0, activity="descending"),
-              _scene(scene_id=2, act=5, t_in=400.0, t_out=460.0, activity="descending"),
-              _scene(scene_id=3, act=5, t_in=460.0, t_out=560.0, activity="descending")]
-    blocked = _spans(natural_spans=[(420.0, 430.0)])
-    assert [x.scene_ids for x in music_windows(
-        scenes, blocked=blocked, min_window_s=60, max_windows_per_act=2,
-        max_windows_by_act={5: 1}, prefer_late_acts=[5])] == [(3,)]
+    # gain set on purpose: act 5's first scene follows act 4's summit, so the
+    # arrival branch is live here -- ranking on arrival first would hand the
+    # act's one slot to the window it must not be in.
+    scenes = [_scene(scene_id=0, act=4, t_in=-100.0, t_out=0.0, gain_m_per_h=500.0),
+              _scene(scene_id=1, act=5, t_in=0.0, t_out=400.0, activity="descending",
+                     gain_m_per_h=10.0),
+              _scene(scene_id=2, act=5, t_in=400.0, t_out=460.0, activity="descending",
+                     gain_m_per_h=10.0),
+              _scene(scene_id=3, act=5, t_in=460.0, t_out=560.0, activity="descending",
+                     gain_m_per_h=10.0)]
+    blocked = _spans(natural_spans=[(420.0, 430.0), (-50.0, -40.0)])
+    kept = music_windows(scenes, blocked=blocked, min_window_s=60, max_windows_per_act=2,
+                         max_windows_by_act={5: 1}, prefer_late_acts=[5],
+                         arrival_gain_m_per_h=100.0, climb_gain_m_per_h=300.0)
+    assert [x.scene_ids for x in kept] == [(3,)], \
+        "the film resolves into the credits, it does not end in silence"
+    assert not kept[0].arrival, "an arrival is read inside an act, never across its opening"
     # any other act, with the same shape, keeps the longer one instead
     other = [_scene(scene_id=x.scene_id, act=3, t_in=x.t_in, t_out=x.t_out,
                     activity=x.activity) for x in scenes]
     assert [x.scene_ids for x in music_windows(
         other, blocked=blocked, min_window_s=60, max_windows_per_act=1,
         prefer_late_acts=[5])] == [(1,)]
+
+
+def test_an_arrival_is_never_read_across_an_act_boundary():
+    """Act 5 opens off the summit, so a cross-boundary read would make every
+    act 5's first scene an arrival -- and act 5 keeps its last window."""
+    scenes = [_scene(scene_id=1, act=4, t_in=0.0, t_out=100.0, gain_m_per_h=500.0),
+              _scene(scene_id=2, act=5, t_in=100.0, t_out=200.0, gain_m_per_h=5.0)]
+    w = music_windows(scenes, blocked=_spans(), min_window_s=60,
+                      arrival_gain_m_per_h=100.0, climb_gain_m_per_h=300.0)
+    assert [(x.act, x.arrival) for x in w] == [(4, False), (5, False)]
+    # the same two scenes inside one act do read as an arrival
+    same = [_scene(scene_id=1, act=3, t_in=0.0, t_out=100.0, gain_m_per_h=500.0),
+            _scene(scene_id=2, act=3, t_in=100.0, t_out=200.0, gain_m_per_h=5.0)]
+    assert [x.arrival for x in music_windows(
+        same, blocked=_spans(natural_spans=[(50.0, 60.0)]), min_window_s=60,
+        arrival_gain_m_per_h=100.0, climb_gain_m_per_h=300.0)] == [True]

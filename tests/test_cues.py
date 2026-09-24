@@ -167,17 +167,25 @@ def test_the_silence_window_is_full_location_sound():
 
 # -- music ----------------------------------------------------------------
 
+def _whole(t_start, t_end):
+    """An act that is one window end to end -- what every map meant before
+    Gate 3, said outright, because a map that names no window now means no
+    music rather than a bed everywhere."""
+    return [{"t_start": t_start, "t_end": t_end}]
+
+
 def _mmap():
     return {"acts": [
-        {"act": 0, "t_start": 0.0, "t_end": 23.0,
+        {"act": 0, "t_start": 0.0, "t_end": 23.0, "music_windows": _whole(0.0, 23.0),
          "segments": [{"track_id": "t2", "t_in": 0.0, "t_end": 23.0, "src_in": 90.0, "src_out": 113.0}]},
-        {"act": 1, "t_start": 23.0, "t_end": 83.0,
+        {"act": 1, "t_start": 23.0, "t_end": 83.0, "music_windows": _whole(23.0, 83.0),
          "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 40.0, "src_in": 0.0, "src_out": 40.0},
                       {"track_id": "t2", "t_in": 40.0, "t_end": 58.7, "src_in": 10.0, "src_out": 28.7}]},
-        {"act": 2, "t_start": 83.0, "t_end": 90.0, "segments": []},
-        {"act": 4, "t_start": 90.0, "t_end": 150.0,
+        {"act": 2, "t_start": 83.0, "t_end": 90.0, "music_windows": _whole(83.0, 90.0),
+         "segments": []},
+        {"act": 4, "t_start": 90.0, "t_end": 150.0, "music_windows": _whole(90.0, 150.0),
          "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 60.0, "src_in": 40.0, "src_out": 100.0}]},
-        {"act": 5, "t_start": 150.0, "t_end": 200.0,
+        {"act": 5, "t_start": 150.0, "t_end": 200.0, "music_windows": _whole(150.0, 200.0),
          "segments": [{"track_id": "t2", "t_in": 0.0, "t_end": 50.0, "src_in": 0.0, "src_out": 50.0}]},
     ], "silence_window": {"t_start": 150.0, "t_end": 162.0}}
 
@@ -234,6 +242,7 @@ def test_the_map_is_laid_on_the_acts_the_table_actually_has():
 
 def test_a_segment_that_begins_past_the_acts_real_end_is_dropped():
     mmap = {"acts": [{"act": 3, "t_start": 100.0, "t_end": 150.0,
+                      "music_windows": _whole(100.0, 150.0),
                       "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 30.0, "src_in": 0.0, "src_out": 30.0},
                                    {"track_id": "t2", "t_in": 30.0, "t_end": 50.0, "src_in": 0.0, "src_out": 20.0}]}],
             "silence_window": {}}
@@ -249,6 +258,7 @@ def test_the_last_cue_loops_rather_than_ask_for_a_track_that_has_run_out():
     act's closing shots. Here the table's act is 40 s longer than the map
     planned and the track has 10 s left past where the cue already plays."""
     mmap = {"acts": [{"act": 3, "t_start": 0.0, "t_end": 60.0,
+                      "music_windows": _whole(0.0, 60.0),
                       "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 60.0,
                                     "src_in": 20.0, "src_out": 80.0}]}],
             "silence_window": {}}
@@ -283,6 +293,7 @@ def test_a_track_with_no_measured_duration_keeps_its_one_unbounded_cue():
     any of this, because shortening it would make t_out - t_in disagree with
     src_out - src_in. ``build_cues`` is where that gets said out loud."""
     mmap = {"acts": [{"act": 3, "t_start": 0.0, "t_end": 60.0,
+                      "music_windows": _whole(0.0, 60.0),
                       "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 60.0,
                                     "src_in": 20.0, "src_out": 80.0}]}],
             "silence_window": {}}
@@ -295,6 +306,7 @@ def test_a_track_with_no_measured_duration_keeps_its_one_unbounded_cue():
 
 def test_a_segment_wholly_inside_the_silence_is_dropped():
     mmap = {"acts": [{"act": 5, "t_start": 150.0, "t_end": 160.0,
+                      "music_windows": _whole(150.0, 160.0),
                       "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 10.0, "src_in": 0.0, "src_out": 10.0}]}],
             "silence_window": {"t_start": 150.0, "t_end": 162.0}}
     assert cues.music_cues(mmap, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0) == []
@@ -432,6 +444,7 @@ def test_the_bed_arrives_and_leaves_on_a_cut():
     slots = [{"t_in": 0.0, "t_out": 18.4}, {"t_in": 18.4, "t_out": 47.9},
              {"t_in": 47.9, "t_out": 83.2}, {"t_in": 83.2, "t_out": 122.6},
              {"t_in": 122.6, "t_out": 181.0}, {"t_in": 181.0, "t_out": 200.0}]
+    slots = [dict(sl, act=3) for sl in slots]
     snapped = cues.snap_windows_to_cuts(_windowed_map(), slots)
     assert snapped["acts"][0]["music_windows"] == [{"t_start": 18.4, "t_end": 83.2},
                                                   {"t_start": 122.6, "t_end": 181.0}]
@@ -443,7 +456,8 @@ def test_the_bed_arrives_and_leaves_on_a_cut():
 def test_a_window_that_snaps_onto_one_cut_is_dropped_not_played_at_zero_length():
     """One shot spanning the act: both edges of both windows land on the
     same pair of cuts, so neither window has anything left to play."""
-    snapped = cues.snap_windows_to_cuts(_windowed_map(), [{"t_in": 0.0, "t_out": 200.0}])
+    snapped = cues.snap_windows_to_cuts(_windowed_map(),
+                                        [{"t_in": 0.0, "t_out": 200.0, "act": 3}])
     assert snapped["acts"][0]["music_windows"] == []
     assert cues.music_cues(snapped, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0) == []
     assert cues.music_spans(snapped) == []
@@ -466,3 +480,96 @@ def test_the_summit_keeps_the_level_the_rest_of_the_film_gave_up():
     # without a swell level named, every act plays at the film's own
     assert all(r["gain_lufs"] == -17.0 for r in
                cues.music_cues(mmap, lufs=-17.0, xfade_s=2.0, window_fade_s=1.0))
+
+
+def _act_slots(act, edges):
+    return [{"t_in": a, "t_out": b, "act": act} for a, b in zip(edges, edges[1:])]
+
+
+def _one_window_map():
+    """One act, one window from 20 to 180, tiled by two segments."""
+    return {"acts": [{"act": 3, "t_start": 0.0, "t_end": 200.0,
+                      "music_windows": [{"t_start": 20.0, "t_end": 180.0}],
+                      "segments": [
+                          {"track_id": "t1", "t_in": 20.0, "t_end": 100.0, "src_in": 0.0, "src_out": 80.0},
+                          {"track_id": "t1", "t_in": 100.0, "t_end": 180.0, "src_in": 80.0, "src_out": 160.0}]}],
+            "silence_window": {}}
+
+
+def test_a_window_the_picture_moved_a_line_into_is_trimmed_clear_of_it():
+    """The map is only rebuilt when an act's LENGTH moves, but the rhythm
+    pass moves the speech slots inside an act that kept its length -- so a
+    boundary placed four seconds after a line can be several seconds off by
+    the time the cues are laid, and one cut of drift is the bed over the
+    next line's opening."""
+    slots = _act_slots(3, [0.0, 20.0, 50.0, 80.0, 110.0, 140.0, 170.0, 200.0])
+    plain = cues.snap_windows_to_cuts(_one_window_map(), slots)
+    assert plain["acts"][0]["music_windows"] == [{"t_start": 20.0, "t_end": 170.0}]
+
+    line = [(45.0, 55.0)]                       # a speech span, its margins included
+    trimmed = cues.snap_windows_to_cuts(_one_window_map(), slots, blocked=line)
+    assert trimmed["acts"][0]["music_windows"] == [{"t_start": 80.0, "t_end": 170.0}], \
+        "the bed comes in at the first cut clear of the line, not where it was placed"
+    rows = cues.music_cues(trimmed, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0)
+    assert rows and not any(r["t_in"] < 55.0 and r["t_out"] > 45.0 for r in rows)
+
+
+def test_a_window_trimmed_under_the_minimum_is_dropped_not_played_short():
+    """A window trimmed below the floor is no longer the cue the placement
+    rule admitted; playing it anyway is the sting the ruling is about."""
+    slots = _act_slots(3, [0.0, 20.0, 50.0, 80.0, 110.0, 140.0, 170.0, 200.0])
+    late_line = [(100.0, 180.0)]
+    kept = cues.snap_windows_to_cuts(_one_window_map(), slots, blocked=late_line,
+                                     min_window_s=45)
+    assert kept["acts"][0]["music_windows"] == [{"t_start": 20.0, "t_end": 80.0}]
+    dropped = cues.snap_windows_to_cuts(_one_window_map(), slots, blocked=late_line,
+                                        min_window_s=70)
+    assert dropped["acts"][0]["music_windows"] == []
+    assert cues.music_cues(dropped, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0) == []
+
+
+def test_a_window_snaps_to_its_own_acts_cuts_not_the_films():
+    """A window is a stretch of one act; the nearest cut film-wide can be in
+    the next one, which would run the bed over the act boundary."""
+    mmap = {"acts": [{"act": 2, "t_start": 0.0, "t_end": 100.0,
+                      "music_windows": [{"t_start": 10.0, "t_end": 96.0}],
+                      "segments": [{"track_id": "t1", "t_in": 10.0, "t_end": 96.0,
+                                    "src_in": 0.0, "src_out": 86.0}]}],
+            "silence_window": {}}
+    slots = _act_slots(2, [0.0, 12.0, 90.0, 100.0]) + _act_slots(3, [100.0, 130.0, 160.0])
+    snapped = cues.snap_windows_to_cuts(mmap, slots, min_window_s=10)
+    assert snapped["acts"][0]["music_windows"] == [{"t_start": 12.0, "t_end": 100.0}], \
+        "100.0 is act 2's own last cut; 130.0 is act 3's and is never a candidate"
+
+
+def test_a_map_from_before_placement_gets_no_bed_and_says_so(caplog):
+    """A stale map re-read by --redo cues used to mean "the act is one
+    window", which is music back over the cold open."""
+    stale = {"acts": [{"act": 0, "t_start": 0.0, "t_end": 25.0,
+                       "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 25.0,
+                                     "src_in": 0.0, "src_out": 25.0}]}],
+             "silence_window": {}}
+    with caplog.at_level("WARNING"):
+        assert cues.music_spans(stale) == []
+        assert cues.music_cues(stale, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0) == []
+    assert any("predates music placement" in r.message for r in caplog.records)
+    # and through the pass `--redo cues` on a stale map actually takes
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        rebased = cues.map_on_film_time(stale, {0: (0.0, 25.0)})
+    assert rebased["acts"][0]["music_windows"] == []
+    assert any("predates music placement" in r.message for r in caplog.records)
+
+
+def test_a_window_that_ran_to_the_acts_end_follows_the_act_that_grew():
+    """It stopped there because the act did, not because the film had
+    something to say -- so it follows the act's real end, the same 8.4 s of
+    drift the last-cue stretch exists for. A window that stopped short of the
+    act keeps its own end: that one had a reason."""
+    mmap = {"acts": [{"act": 3, "t_start": 0.0, "t_end": 100.0,
+                      "music_windows": [{"t_start": 10.0, "t_end": 40.0},
+                                        {"t_start": 60.0, "t_end": 100.0}],
+                      "segments": []}], "silence_window": {}}
+    grown = cues.map_on_film_time(mmap, {3: (0.0, 140.0)})
+    assert grown["acts"][0]["music_windows"] == [{"t_start": 10.0, "t_end": 40.0},
+                                                 {"t_start": 60.0, "t_end": 140.0}]

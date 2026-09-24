@@ -659,13 +659,21 @@ _LOOP_MIN_PIECE_S = 8.0
 
 
 def _act_windows(a: Mapping[str, Any]) -> list[tuple[float, float]]:
-    """The act's music windows, act-local. A map with no ``music_windows`` at
-    all is one written before Gate 3 put music in windows, and it means what
-    it always meant: the act is one window from end to end."""
+    """The act's music windows, act-local.
+
+    A map with no ``music_windows`` at all was written before Gate 3 put
+    music in windows. It gets none rather than the whole act: reading a
+    stale map as "the bed runs end to end" is how music comes back over the
+    cold open, and a map that cannot say where its music belongs should be
+    rebuilt, not guessed at.
+    """
     t0 = float(a.get("t_start", 0.0))
     wins = a.get("music_windows")
     if wins is None:
-        return [(0.0, float(a.get("t_end", 0.0)) - t0)]
+        log.warning("act %s has no music_windows: this map predates music placement "
+                    "(Gate 3, 2026-09-24); its segments cannot be checked against a window",
+                    a.get("act"))
+        return []
     return [(float(w["t_start"]) - t0, float(w["t_end"]) - t0) for w in wins]
 
 

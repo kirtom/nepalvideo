@@ -771,7 +771,7 @@ def _scene_id_by_time(slot: Mapping[str, Any], scenes: Sequence[scenes_mod.Scene
 
 
 def _info_spans(cfg: Config, slots: Sequence[Mapping[str, Any]], beats: Sequence[Mapping[str, Any]],
-                prof: Sequence[effort.Effort], shots_by_id: Mapping[str, Mapping[str, Any]], *,
+                natural: Sequence[Mapping[str, Any]], *,
                 cold_open_end_s: float) -> list[tuple[float, float]]:
     """Where something other than music already carries the information
     (Gate 3), read off the same slots the cues step will read: the speech
@@ -783,9 +783,11 @@ def _info_spans(cfg: Config, slots: Sequence[Mapping[str, Any]], beats: Sequence
     a bed playing over a card, which is precisely what the operator watched
     and objected to. ``cast_tags`` is empty because only the spans are
     wanted here; the tag is a property of the payload, which nothing in this
-    path reads.
+    path reads. ``natural`` is handed in rather than recomputed so this and
+    the cue step's own location levels are read off exactly one list of
+    natural-sound windows -- two readings that could disagree is the whole
+    class of fault this function exists to prevent.
     """
-    natural, _ = _natural_windows(cfg, prof, slots, shots_by_id)
     overlays = cues_mod.overlay_rows(beats, slots,
                                      chat_card_s=float(cfg.get("assemble.chat_card_s")),
                                      closing_card_s=float(cfg.get("assemble.closing_card_s")),
@@ -1145,7 +1147,8 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     # -- scenes, then music ---------------------------------------------------
     attrs = _attrs_for(prof, rows, beats=beats)
     all_slots = list(act0) + [s for a in acts for s in planned[a]]
-    info_spans = _info_spans(cfg, all_slots, beats, prof, shots_by_id, cold_open_end_s=t0)
+    planned_natural, _ = _natural_windows(cfg, prof, all_slots, shots_by_id)
+    info_spans = _info_spans(cfg, all_slots, beats, planned_natural, cold_open_end_s=t0)
     scenes, mmap, mode, problems = _scenes_and_map(
         cfg, all_slots, attrs, tracks, act_spans=planned_spans, act0_span=(0.0, t0),
         total_s=total_s, info_spans=info_spans)
@@ -1274,7 +1277,9 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         scenes, mmap, mode, problems = _scenes_and_map(
             cfg, ordered, attrs, tracks, act_spans=final_spans, act0_span=(0.0, t0),
             total_s=total_s,
-            info_spans=_info_spans(cfg, ordered, beats, prof, shots_by_id, cold_open_end_s=t0))
+            info_spans=_info_spans(cfg, ordered, beats,
+                                   _natural_windows(cfg, prof, ordered, shots_by_id)[0],
+                                   cold_open_end_s=t0))
         for sc in scenes:
             for i in sc.slot_indices:
                 ordered[i]["scene_id"] = sc.scene_id
@@ -1313,13 +1318,15 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
             "n_anchors": n_anchors, "n_pairs": len(pairs), "n_dropped_locked": n_dropped_locked,
             "long_take": shots_by_id[long_take_id]["recording_id"] if long_take_id else None,
             "n_scenes": len(scenes), "music_assignment": mode,
-            # Gate 3's own numbers: how much of the film is under music, in
-            # how many windows, and where -- the operator reads this to say
-            # whether "only where nothing else is spoken" landed.
-            "music_share": mmap.get("music_share"),
-            "n_music_windows": mmap.get("n_music_windows"),
-            "music_windows_per_act": {str(a["act"]): a.get("music_windows", [])
-                                      for a in mmap.get("acts", [])},
+            # Gate 3's numbers as PLANNED. The cues step reports the played
+            # ones under the same names without "_planned": it puts the
+            # windows on the cuts the picture really has and re-tests them
+            # against the speech the rhythm pass moved, so the two differ by
+            # exactly that drift -- which is worth being able to read.
+            "music_share_planned": mmap.get("music_share"),
+            "n_music_windows_planned": mmap.get("n_music_windows"),
+            "music_windows_per_act_planned": {str(a["act"]): a.get("music_windows", [])
+                                              for a in mmap.get("acts", [])},
             "music_map_recomputed": sorted(moved), "music_map_problems": problems,
             "cold_open_beat": act0[0].get("beat_id") if act0 and act0[0]["kind"] == "video" else None,
             "natural_windows": natural, "n_natural_windows_unplaced": n_unplaced,
@@ -1372,11 +1379,20 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
     for s in slots:
         lo, hi = act_spans.get(int(s["act"]), (math.inf, -math.inf))
         act_spans[int(s["act"])] = (min(lo, float(s["t_in"])), max(hi, float(s["t_out"])))
-    # The windows are placed on scene bounds and the acts drifted under
-    # them; snapped last so the bed arrives and leaves on a cut the rhythm
-    # pass already put on the beat.
+    natural = _reported_windows(cfg)
+    if natural is None:
+        natural, _ = _natural_windows(cfg, effort.profile(place_mod.load_track(conn)), slots, shots_by_id)
+    # The windows are placed on scene bounds against the PLANNED timeline,
+    # and the map is only rebuilt when an act's length moves -- so the speech
+    # slots inside an act that kept its length have drifted under them. The
+    # spans are recomputed from the final slots and the windows re-tested
+    # against them, because a window four seconds clear of a line when it was
+    # placed is not necessarily clear of it now.
+    cold_open_end = max((float(x["t_out"]) for x in slots if int(x["act"]) == 0), default=0.0)
     mmap = cues_mod.snap_windows_to_cuts(
-        cues_mod.map_on_film_time(json.loads(map_path.read_text()), act_spans), slots)
+        cues_mod.map_on_film_time(json.loads(map_path.read_text()), act_spans), slots,
+        blocked=_info_spans(cfg, slots, beats, natural, cold_open_end_s=cold_open_end),
+        min_window_s=float(cfg.get("music.placement.min_window_s")))
     # The act the table has can be up to music.min_scene_s longer than the one
     # the map was planned on, and that difference all lands on the act's last
     # cue -- which the track may not have. The durations say when to loop.
@@ -1388,9 +1404,6 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
     for tid in sorted(t for t, d in track_s.items() if not d):
         log.warning("S06 music track %s has no measured duration: its cues cannot be bounded and "
                     "ffmpeg will stop where the file ends", tid)
-    natural = _reported_windows(cfg)
-    if natural is None:
-        natural, _ = _natural_windows(cfg, effort.profile(place_mod.load_track(conn)), slots, shots_by_id)
     cues = (cues_mod.speech_cues(placed, lufs=float(cfg.get("render.speech_lufs")),
                                  fade_s=float(cfg.get("render.cue_fade_s")))
             + cues_mod.location_cues(
@@ -1424,12 +1437,21 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
     db.upsert(conn, "overlays", ["overlay_id"], overlays)
     conn.commit()
     n_cues = {t: sum(1 for c in cues if c["track"] == t) for t in ("speech", "location", "music")}
-    music_s = sum(b - a for a, b in cues_mod.music_spans(mmap))
-    log.info("S05.cues %s; %d overlay(s); %d natural-sound window(s); music over %.0fs in %d "
-             "window(s)", n_cues, len(overlays), len(natural), music_s,
-             len(cues_mod.music_spans(mmap)))
+    # Seconds of bed actually played, off the cues themselves -- not the
+    # windows, which are the room the bed was allowed, and not the planned
+    # map, whose windows the snap above has since trimmed. This is what the
+    # Gate 3 page shows, because it is what the operator hears.
+    music_s = sum(float(c["t_out"]) - float(c["t_in"]) for c in cues if c["track"] == "music")
+    film_s = max((float(x["t_out"]) for x in slots), default=0.0)
+    windows = cues_mod.music_spans(mmap)
+    log.info("S05.cues %s; %d overlay(s); %d natural-sound window(s); music over %.0fs of %.0fs "
+             "(%.0f%%) in %d window(s)", n_cues, len(overlays), len(natural), music_s, film_s,
+             100 * music_s / film_s if film_s else 0.0, len(windows))
     return {"n_cues": n_cues, "n_overlays": len(overlays), "natural_windows": natural,
-            "music_s": round(music_s, 1), "n_music_windows": len(cues_mod.music_spans(mmap))}
+            "music_s": round(music_s, 1), "n_music_windows": len(windows),
+            "music_share": round(music_s / film_s, 4) if film_s else 0.0,
+            "music_windows_per_act": {str(a["act"]): a.get("music_windows", [])
+                                      for a in mmap.get("acts", [])}}
 
 
 def photo_source(cfg: Config, row: Mapping[str, Any]) -> Path | None:

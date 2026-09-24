@@ -244,20 +244,48 @@ def _rebase_act(entry: Mapping[str, Any], t_start: float, t_end: float) -> dict[
     delta = t_start - float(entry["t_start"])
     out = dict(entry, t_start=round(t_start, 3), t_end=round(t_end, 3))
     if entry.get("music_windows") is not None:
-        moved = [(float(w["t_start"]) + delta, min(float(w["t_end"]) + delta, t_end))
+        was_end = float(entry["t_end"])
+        # A window that ran to the act's own end was bounded by the act, not
+        # by anything the film had to say there, so it follows the act's real
+        # end -- short would be a hole in the bed right before the cut, which
+        # is the 8.4 s of act 4 the last-cue stretch exists for. Every other
+        # end moves by the act's delta and is clamped into it: it stopped
+        # where it did for a reason, and running it into the next act would
+        # play a bed over that act's opening.
+        moved = [(float(w["t_start"]) + delta,
+                  t_end if math.isclose(float(w["t_end"]), was_end, abs_tol=_EDGE_TOL_S)
+                  else min(float(w["t_end"]) + delta, t_end))
                  for w in entry["music_windows"]]
         out["music_windows"] = [{"t_start": round(w0, 3), "t_end": round(w1, 3)}
                                 for w0, w1 in moved if w1 - w0 > _EDGE_TOL_S]
+    else:
+        # A map written before Gate 3 put music in windows. Reading it as
+        # "the act is one window" is music back over the cold open, so it
+        # gets none -- and this is the pass a `--redo cues` on a stale map
+        # actually goes through, which is why the warning is here and not
+        # only in _entry_windows.
+        log.warning("S05.cues act %s has no music_windows: this map predates music placement "
+                    "(Gate 3, 2026-09-24) and gets no bed. Re-run the timeline step.",
+                    entry.get("act"))
+        out["music_windows"] = []
     return out
 
 
 def _entry_windows(entry: Mapping[str, Any]) -> list[tuple[float, float]]:
-    """One act's music windows on film time. No ``music_windows`` key at all
-    is a map from before Gate 3: the act is one window, which is what it
-    meant then and still means for the per-act assignment mode."""
+    """One act's music windows on film time.
+
+    No ``music_windows`` key at all is a map written before Gate 3, when the
+    bed ran under every act end to end. Reading that as "the act is one
+    window" would put music over the cold open the moment ``--redo cues``
+    met a stale map -- the exact thing the operator asked for the removal
+    of -- so it means no music, and says why.
+    """
     wins = entry.get("music_windows")
     if wins is None:
-        return [(float(entry["t_start"]), float(entry["t_end"]))]
+        log.warning("S05.cues act %s has no music_windows: this map predates music placement "
+                    "(Gate 3, 2026-09-24) and gets no bed. Re-run the timeline step.",
+                    entry.get("act"))
+        return []
     return [(float(w["t_start"]), float(w["t_end"])) for w in wins]
 
 
@@ -304,40 +332,106 @@ def _loop_cuts(t0: float, t1: float, src_in: float, duration: float | None,
     return cuts
 
 
-def snap_windows_to_cuts(mmap: Mapping[str, Any],
-                         slots: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Every music window's edges moved onto the nearest cut.
+def _subtract(span: tuple[float, float],
+              blocked: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    """``span`` with every blocked span cut out of it."""
+    pieces = [span]
+    for b0, b1 in blocked:
+        out: list[tuple[float, float]] = []
+        for a0, a1 in pieces:
+            if b1 <= a0 or b0 >= a1:
+                out.append((a0, a1))
+                continue
+            if b0 > a0:
+                out.append((a0, b0))
+            if b1 < a1:
+                out.append((b1, a1))
+        pieces = out
+    return pieces
+
+
+def snap_windows_to_cuts(mmap: Mapping[str, Any], slots: Sequence[Mapping[str, Any]], *,
+                         blocked: Sequence[tuple[float, float]] = (),
+                         min_window_s: float = 0.0) -> dict[str, Any]:
+    """Every music window's edges moved onto a cut of its own act, clear of
+    everything that carries information, and still long enough to be a cue.
 
     The bed arrives and leaves on a cut, never inside a shot (operator,
-    2026-09-24): a fade coming up mid-shot reads as a mistake, one on the
-    cut reads as the film doing it. The windows were placed on scene bounds,
-    which *are* slot bounds -- but the rhythm pass re-timed every slot
-    afterwards and ``map_on_film_time`` only shifts each window by its act's
-    delta, so by the time the cues are laid an edge has drifted off the cut
-    it was placed on. The cut it lands on is one ``retime`` snapped to the
-    music's own beat grid (downbeats above the high band), so entering on a
-    cut is also entering on the beat.
+    2026-09-24): a fade coming up mid-shot reads as a mistake, one on the cut
+    reads as the film doing it. The cut it lands on is one ``retime`` snapped
+    to the music's own beat grid (downbeats above the high band), so entering
+    on a cut is also entering on the beat. The act's OWN cuts, because a
+    window is a stretch of one act and the nearest cut film-wide could be in
+    the next one.
 
-    A window that collapses onto one cut is dropped: the map's segments
-    inside it then lie outside every window, which ``music_cues`` skips and
-    ``check_music_map`` would report.
+    ``blocked`` is why this is not a snap alone. The windows were placed on
+    scene bounds against the planned timeline, but the map is only rebuilt
+    when an act's *length* moves by more than a scene -- and ``retime`` and
+    ``_close_holes`` move the speech slots *inside* an act that kept its
+    length. So a boundary placed four seconds after a line can be several
+    seconds off by the time the cues are laid, and one cut of drift puts the
+    bed over the next line's opening. The window is therefore re-tested
+    against the same spans ``spine.scenes.blocking_spans`` produced, from the
+    final slots: what is left after cutting them out is the longest surviving
+    piece, snapped INWARD to cuts (inward can only shrink, so it cannot
+    re-introduce the overlap the trim just removed).
+
+    ``min_window_s`` is applied again for the same reason: a 61 s window
+    trimmed and snapped to 58 is no longer the cue the placement rule
+    admitted, and playing it anyway is the sting the operator objected to.
+
+    A window that loses everything is dropped; the map's segments inside it
+    then lie outside every window, which ``music_cues`` skips.
     """
-    cuts = sorted({float(s["t_in"]) for s in slots} | {float(s["t_out"]) for s in slots})
-    if not cuts:
-        return dict(mmap)
-
-    def nearest(t: float) -> float:
-        return min(cuts, key=lambda c: abs(c - t))
+    by_act: dict[Any, list[float]] = {}
+    for sl in slots:
+        by_act.setdefault(sl.get("act"), []).extend((float(sl["t_in"]), float(sl["t_out"])))
+    cuts_of = {a: sorted(set(v)) for a, v in by_act.items()}
 
     acts = []
     for entry in mmap.get("acts", []):
-        wins = entry.get("music_windows")
-        if wins is None:
-            acts.append(dict(entry))
+        wins = _entry_windows(entry)
+        cuts = cuts_of.get(int(entry["act"])) or cuts_of.get(entry.get("act"))
+        if not wins or not cuts:
+            acts.append(dict(entry, music_windows=[{"t_start": round(a, 3), "t_end": round(b, 3)}
+                                                   for a, b in wins]))
             continue
-        moved = [(nearest(float(w["t_start"])), nearest(float(w["t_end"]))) for w in wins]
+        kept: list[tuple[float, float]] = []
+        for w0, w1 in wins:
+            snapped = (min(cuts, key=lambda c: abs(c - w0)), min(cuts, key=lambda c: abs(c - w1)))
+            pieces = _subtract(snapped, [(float(a), float(b)) for a, b in blocked])
+            if not pieces:
+                log.info("S05.cues music window %.1f-%.1fs of act %s is dropped: everything in "
+                         "it carries information by the time the picture was cut",
+                         w0, w1, entry["act"])
+                continue
+            p0, p1 = max(pieces, key=lambda p: p[1] - p[0])
+            if (p1 - p0) < (snapped[1] - snapped[0]) - _EDGE_TOL_S:
+                log.info("S05.cues music window %.1f-%.1fs of act %s trimmed to %.1f-%.1fs: the "
+                         "picture moved what it was placed clear of", w0, w1, entry["act"], p0, p1)
+            # Inward, never outward: the trim above is the whole point.
+            starts = [c for c in cuts if c >= p0 - _EDGE_TOL_S]
+            ends = [c for c in cuts if c <= p1 + _EDGE_TOL_S]
+            if kept:
+                starts = [c for c in starts if c >= kept[-1][1] - _EDGE_TOL_S]
+            # The tolerance as well as the minimum: with no minimum
+            # configured a window that snapped onto a single cut would
+            # otherwise survive as a zero-length one.
+            if not starts or not ends or ends[-1] - starts[0] <= _EDGE_TOL_S \
+                    or ends[-1] - starts[0] < min_window_s:
+                log.info("S05.cues music window %.1f-%.1fs of act %s is dropped: %.1fs left of a "
+                         "%.0fs minimum once it was put on the cuts the picture has",
+                         w0, w1, entry["act"],
+                         (ends[-1] - starts[0]) if starts and ends else 0.0, min_window_s)
+                continue
+            kept.append((starts[0], ends[-1]))
+        for (a0, a1), (b0, _) in zip(kept, kept[1:]):
+            # Two windows of one act are two disjoint runs of scenes and only
+            # ever shrink here, so a crossing would mean this function itself
+            # broke the map -- and a crossed pair lays two beds at once.
+            assert a1 <= b0 + _EDGE_TOL_S, f"act {entry['act']}: windows {a0}-{a1} and {b0}- cross"
         acts.append(dict(entry, music_windows=[{"t_start": round(a, 3), "t_end": round(b, 3)}
-                                               for a, b in moved if b - a > _EDGE_TOL_S]))
+                                               for a, b in kept]))
     return dict(mmap, acts=acts)
 
 
@@ -400,7 +494,7 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
     for entry in mmap.get("acts", []):
         t_start, t_end = float(entry["t_start"]), float(entry["t_end"])
         segments = entry.get("segments") or []
-        for w0, w1 in by_act[int(entry["act"])]:
+        for w0, w1 in by_act.get(int(entry["act"]), []):
             starts_music = not any(math.isclose(w0, e, abs_tol=_EDGE_TOL_S) for e in all_ends)
             ends_music = not any(math.isclose(w1, a, abs_tol=_EDGE_TOL_S) for a in all_starts)
             kept = [i for i, seg in enumerate(segments)

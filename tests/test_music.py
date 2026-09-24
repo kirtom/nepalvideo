@@ -977,6 +977,7 @@ def test_a_track_whose_duration_was_never_measured_says_so_instead_of_claiming_i
                     "ffmpeg stops where the file ends and nothing here knows where that is"]
     # once per track, not once per segment, and nothing at all with no library
     two = {"act": 3, "t_start": 0.0, "t_end": 60.0,
+           "music_windows": [{"t_start": 0.0, "t_end": 60.0}],
            "segments": [{"track_id": "nodur", "t_in": 0.0, "t_end": 30.0, "src_in": 0.0, "src_out": 30.0},
                         {"track_id": "nodur", "t_in": 30.0, "t_end": 60.0, "src_in": 0.0, "src_out": 30.0}]}
     assert _segment_problems(two, {"nodur": None}) == said

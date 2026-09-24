@@ -476,7 +476,10 @@ def _is_arrival(opening: Scene, scenes: Sequence[Scene], *, arrival_gain_m_per_h
 
     Read against the scene immediately before it in film order, blocked or
     not: what makes an arrival is the climb that preceded it, and whether
-    that climb could have carried music has nothing to do with it.
+    that climb could have carried music has nothing to do with it. But not
+    across an act boundary -- act 5 opens off the summit, so every act 5
+    would read as an arrival at its very first scene, which is the one place
+    its single window must not be.
     """
     if opening.gain_m_per_h is None or opening.gain_m_per_h >= arrival_gain_m_per_h:
         return False
@@ -484,6 +487,8 @@ def _is_arrival(opening: Scene, scenes: Sequence[Scene], *, arrival_gain_m_per_h
     if i == 0:
         return False
     before = scenes[i - 1]
+    if before.act != opening.act:
+        return False
     return before.gain_m_per_h is not None and before.gain_m_per_h > climb_gain_m_per_h
 
 
@@ -520,8 +525,11 @@ def music_windows(scenes: Sequence[Scene], *, blocked: Sequence[tuple[float, flo
 
     What an act may keep when it has more than its share: an arrival first
     (the climb before it stays silent, the top gets the cue), then the
-    longest -- or, for an act in ``prefer_late_acts``, the latest, which is
-    act 5 resolving into the credits rather than opening on the descent.
+    longest. An act in ``prefer_late_acts`` ranks on lateness ALONE -- not on
+    lateness after arrival -- because the two rules want opposite ends of the
+    act and act 5's whole point is where its one cue sits: latest, resolving
+    into the credits. Ranking arrival first there would hand the slot to the
+    first window of the descent and end the film in silence.
     """
     spans = [(float(a), float(b)) for a, b in blocked if b > a]
     runs: list[list[Scene]] = []
@@ -557,8 +565,7 @@ def music_windows(scenes: Sequence[Scene], *, blocked: Sequence[tuple[float, flo
         cap = caps.get(act, max_windows_per_act)
         mine = [w for w in windows if w.act == act]
         if cap is not None and len(mine) > cap:
-            late = act in prefer_late_acts
-            mine = sorted(mine, key=lambda w: (not w.arrival,
-                                               -w.t_in if late else -(w.t_out - w.t_in)))[:cap]
+            mine = sorted(mine, key=(lambda w: -w.t_in) if act in prefer_late_acts
+                          else (lambda w: (not w.arrival, -(w.t_out - w.t_in))))[:cap]
         kept += mine
     return sorted(kept, key=lambda w: w.t_in)

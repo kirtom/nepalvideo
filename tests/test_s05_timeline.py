@@ -273,13 +273,13 @@ def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path)
     shots = _shots(conn)
     recs = {r["recording_id"]: dict(r) for r in conn.execute("SELECT * FROM recordings")}
     assert rep["n_slots"] == len(slots) > 10
-    # Gate 3's own numbers, on the report the operator reads at the gate
-    assert 0.0 <= rep["music_share"] <= 1.0 and rep["n_music_windows"] >= 1
-    assert rep["music_share"] < 1.0, "music no longer runs from end to end"
-    assert set(rep["music_windows_per_act"]) == {str(a["act"]) for a in
-                                                 json.loads((cfg.work_root / "music" /
-                                                             "music_map.json").read_text())["acts"]}
-    assert rep["music_windows_per_act"]["0"] == [], "the film does not open on music"
+    # Gate 3's numbers as planned; the cues step reports what is played
+    assert 0.0 <= rep["music_share_planned"] < 1.0, "music no longer runs from end to end"
+    assert rep["n_music_windows_planned"] >= 1
+    assert set(rep["music_windows_per_act_planned"]) == {str(a["act"]) for a in
+                                                         json.loads((cfg.work_root / "music" /
+                                                                     "music_map.json").read_text())["acts"]}
+    assert rep["music_windows_per_act_planned"]["0"] == [], "the film does not open on music"
     # every locked slot the run lost -- pushed past its act's end or squeezed
     # to nothing before the write -- is counted, and a healthy seed loses none
     assert rep["n_dropped_locked"] == 0
@@ -752,6 +752,7 @@ def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
     rep = s05_cut.build_cues(cfg, conn)
     slots = [dict(r) for r in conn.execute("SELECT * FROM timeline ORDER BY slot_index")]
     shots = _shots(conn)
+    beats_rows = [dict(r) for r in conn.execute("SELECT * FROM story_beats ORDER BY rank, beat_id")]
     by_track: dict[str, list[dict]] = {}
     for c in conn.execute("SELECT * FROM audio_cues"):
         by_track.setdefault(c["track"], []).append(dict(c))
@@ -799,10 +800,26 @@ def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
         abs(spans[a["act"]][0] - a["t_start"]) > 1.0 for a in mmap["acts"])
     q0 = spans[4][1]
     q1 = q0 + float(cfg.get("assemble.silence_window_s"))
-    # the same two passes build_cues makes: onto the acts the table has, then
-    # onto the cuts the picture has
+    # the same three passes build_cues makes: onto the acts the table has,
+    # onto the cuts the picture has, and clear of everything the rhythm pass
+    # moved under the windows after they were placed
+    natural_now, _ = s05_cut._natural_windows(
+        cfg, s05_cut.effort.profile(s05_cut.place_mod.load_track(conn)), slots, shots)
+    blocked = s05_cut._info_spans(
+        cfg, slots, beats_rows, natural_now,
+        cold_open_end_s=max((s["t_out"] for s in slots if s["act"] == 0), default=0.0))
     on_film = s05_cut.cues_mod.snap_windows_to_cuts(
-        s05_cut.cues_mod.map_on_film_time(mmap, spans), slots)
+        s05_cut.cues_mod.map_on_film_time(mmap, spans), slots, blocked=blocked,
+        min_window_s=float(cfg.get("music.placement.min_window_s")))
+    # the bed never plays over a line, a card or a natural-sound window
+    assert not any(c["t_in"] < b1 and c["t_out"] > b0
+                   for c in by_track["music"] for b0, b1 in blocked), \
+        "a window the picture moved a line into must be trimmed clear of it"
+    # and the gate reads what was played, not what was planned
+    assert rep["music_share"] <= rep_tl["music_share_planned"] + 1e-6
+    assert rep["music_share"] == pytest.approx(
+        sum(c["t_out"] - c["t_in"] for c in by_track["music"]) /
+        max(s["t_out"] for s in slots), abs=1e-3)
     music_spans = s05_cut.cues_mod.music_spans(on_film)
     assert music_spans, "the seeded film has somewhere music may play"
     for a in on_film["acts"]:
