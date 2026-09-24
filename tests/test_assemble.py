@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from nepal import db
+from nepal.config import Config
 from nepal.process import assemble
 
 
@@ -129,6 +130,49 @@ def test_fallback_similarity_is_deterministic_and_graded():
     assert assemble.fallback_similarity(a, e, weights=w) == 0.0
 
 
+def test_the_same_recording_still_counts_when_a_stamp_is_missing_or_unparseable():
+    """Two shots of one recording are the same material whether or not either
+    carries a readable clock; only the 60 s and the hour need one. A stamp
+    that cannot be parsed must read as "no time", never as time zero."""
+    w = _FALLBACK_W
+    a = {"recording_id": "r1", "start_utc": "2024-05-01T04:00:00+00:00", "place_name": "Deng"}
+    no_stamp = {"recording_id": "r1", "place_name": "Deng"}
+    unparseable = {"recording_id": "r1", "start_utc": "01/05/2024 04:00", "place_name": "Deng"}
+    assert assemble.fallback_similarity(a, no_stamp, weights=w) == 0.6
+    assert assemble.fallback_similarity(a, unparseable, weights=w) == 0.6
+    # Different recordings in one place: without two clocks there is no hour
+    # to share, so the pair claims nothing rather than the 0.3.
+    assert assemble.fallback_similarity(a, {"recording_id": "r2", "place_name": "Deng"},
+                                        weights=w) == 0.0
+    assert assemble.fallback_similarity(a, {"recording_id": "r2", "place_name": "Deng",
+                                            "start_utc": "01/05/2024 04:00"}, weights=w) == 0.0
+
+
+def test_a_fallback_weight_missing_from_the_config_raises_with_its_own_name():
+    """`assemble.similarity_fallback` is the single source of these three
+    numbers. A key dropped from it must stop the run naming itself, not be
+    quietly restored by a default this function remembers -- a silent 0.6
+    would be a diversity pressure nobody configured."""
+    a = {"recording_id": "r1", "start_utc": "2024-05-01T04:00:00+00:00"}
+    b = {"recording_id": "r1", "start_utc": "2024-05-01T04:00:30+00:00"}
+    with pytest.raises(KeyError, match="same_recording_60s"):
+        assemble.fallback_similarity(a, b, weights={"same_recording": 0.6})
+
+
+def test_the_real_config_carries_every_weight_the_fallback_reads():
+    """The other half of the rule above: indexing only helps if the config
+    actually holds all three keys, so this reads the real file."""
+    root = pathlib.Path(__file__).resolve().parents[1]
+    w = Config.load(root / "config" / "pipeline.yaml").get("assemble.similarity_fallback")
+    a = {"recording_id": "r1", "start_utc": "2024-05-01T04:00:00+00:00", "place_name": "Deng"}
+    b = {"recording_id": "r1", "start_utc": "2024-05-01T04:00:30+00:00", "place_name": "Deng"}
+    c = {"recording_id": "r1", "start_utc": "2024-05-01T05:30:00+00:00", "place_name": "Deng"}
+    d = {"recording_id": "r2", "start_utc": "2024-05-01T04:20:00+00:00", "place_name": "Deng"}
+    assert (assemble.fallback_similarity(a, b, weights=w),
+            assemble.fallback_similarity(a, c, weights=w),
+            assemble.fallback_similarity(a, d, weights=w)) == (1.0, 0.6, 0.3)
+
+
 def test_the_fill_breaks_up_a_run_of_one_recording_without_embeddings():
     """The first draft's runs of one recording: with no CLIP, similarity was
     0.0 and MMR was score order. The fallback alone prevents it."""
@@ -149,6 +193,41 @@ def test_recording_run_limit_and_source_alternation():
     chosen3 = [{"source": "camera"}] * 3
     assert assemble.source_alternation_bonus({"source": "phone_keller"}, chosen3, after=3) > 0
     assert assemble.source_alternation_bonus({"source": "camera"}, chosen3, after=3) == 0
+
+
+def test_a_recording_already_broken_up_is_not_a_run():
+    """Only the tail counts. r1, r2, r1 is a recording that has already been
+    interrupted once, so a third r1 is allowed at limit 2 -- counting every
+    appearance instead would ban a recording for the rest of its act after
+    two slots, however far apart they fell."""
+    chosen = [{"recording_id": "r1"}, {"recording_id": "r2"}, {"recording_id": "r1"}]
+    assert assemble.recording_run_ok({"recording_id": "r1"}, chosen, limit=2)
+    chosen.append({"recording_id": "r1"})                     # now the tail really is two
+    assert not assemble.recording_run_ok({"recording_id": "r1"}, chosen, limit=2)
+
+
+def test_source_share_repair_stops_when_the_pool_runs_dry():
+    """One spare Keller shot cannot buy a quarter of eight slots. The repair
+    takes what there is and stops, rather than looping forever on a share it
+    can never reach."""
+    chosen = [{"shot_id": f"k{i}", "source": "phone_kulikov", "score_total": 0.9 - i * 0.05}
+              for i in range(8)]
+    pool = [{"shot_id": "e0", "source": "phone_keller", "score_total": 0.4}]
+    out = assemble.source_share_repair(chosen, pool, min_share=0.25)
+    assert len(out) == 8
+    assert [s["shot_id"] for s in out if s["source"] == "phone_keller"] == ["e0"]
+    assert {s["shot_id"] for s in out} >= {"k0", "k1", "k2"}   # the best of kulikov stay
+
+
+def test_source_share_repair_never_drops_the_other_phone_to_zero():
+    """An act with a single phone slot: the starved phone's share is 0, but
+    taking that one slot would erase the phone that has it. Balance, not
+    substitution -- the act keeps both slots as they are."""
+    chosen = [{"shot_id": "cam", "source": "camera", "score_total": 0.9},
+              {"shot_id": "k0", "source": "phone_kulikov", "score_total": 0.3}]
+    pool = [{"shot_id": f"e{i}", "source": "phone_keller", "score_total": 0.8} for i in range(3)]
+    out = assemble.source_share_repair(chosen, pool, min_share=0.25)
+    assert [s["shot_id"] for s in out] == ["cam", "k0"]
 
 
 def test_source_share_repair_gives_the_starved_phone_its_quarter():

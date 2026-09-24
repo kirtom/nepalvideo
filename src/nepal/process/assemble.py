@@ -59,30 +59,53 @@ def snap_to_beat(t: float, beats: Sequence[float], *,
     return float(arr[int(np.argmin(np.abs(arr - float(t))))])
 
 
-def _utc_seconds(row: Mapping[str, Any]) -> float | None:
-    ts = row.get("start_utc")
-    if not ts:
+def parse_utc(iso: Any) -> datetime | None:
+    """An ISO 8601 capture stamp as a ``datetime``, or None for anything that
+    is not one -- a missing or malformed stamp is a fact about the shot, not
+    an error the modules that place shots in time may raise: a shot with no
+    clock still reaches the timeline, it just cannot be placed by chronology
+    or paired with another camera.
+
+    Two entry points over one parse because the callers want two different
+    things back: ``epoch_utc`` for every comparison and fraction the
+    placement math does, this one for the arithmetic that has to come back
+    out as a stamp (``anchors.speech_anchors`` shifts a shot's start by the
+    beat's offset into it and re-serialises the result).
+    """
+    if not iso:
         return None
     try:
-        return datetime.fromisoformat(str(ts)).timestamp()
+        return datetime.fromisoformat(str(iso))
     except ValueError:
         return None
+
+
+def epoch_utc(iso: Any) -> float | None:
+    """``parse_utc`` in epoch seconds."""
+    dt = parse_utc(iso)
+    return None if dt is None else dt.timestamp()
 
 
 def fallback_similarity(a: Mapping[str, Any], b: Mapping[str, Any], *,
                         weights: Mapping[str, float]) -> float:
     """What two shots share when nothing has looked at their pictures. The
     first draft's runs of one recording came from a similarity of 0.0 for
-    every pair; this alone breaks them up."""
+    every pair; this alone breaks them up.
+
+    ``weights`` is indexed, not ``.get``-with-a-default: the three numbers
+    live in `assemble.similarity_fallback` and nowhere else, so a key that
+    goes missing there must raise with its own name rather than quietly
+    restore a value this function happens to remember.
+    """
     if a.get("recording_id") and a.get("recording_id") == b.get("recording_id"):
-        ta, tb = _utc_seconds(a), _utc_seconds(b)
+        ta, tb = epoch_utc(a.get("start_utc")), epoch_utc(b.get("start_utc"))
         if ta is not None and tb is not None and abs(ta - tb) <= 60.0:
-            return float(weights.get("same_recording_60s", 1.0))
-        return float(weights.get("same_recording", 0.6))
+            return float(weights["same_recording_60s"])
+        return float(weights["same_recording"])
     if a.get("place_name") and a.get("place_name") == b.get("place_name"):
-        ta, tb = _utc_seconds(a), _utc_seconds(b)
+        ta, tb = epoch_utc(a.get("start_utc")), epoch_utc(b.get("start_utc"))
         if ta is not None and tb is not None and abs(ta - tb) <= 3600.0:
-            return float(weights.get("same_place_hour", 0.3))
+            return float(weights["same_place_hour"])
     return 0.0
 
 
@@ -252,6 +275,9 @@ def source_share_repair(chosen: list, pool: Sequence, *, min_share: float,
             available = pool_by_phone.get(phone) or []
             if not available:
                 break                   # the pool is dry; the share cannot be repaired
+            # Raw count, not share: with two phones the one ahead by count is
+            # the one ahead by share, and the trek had two. A third phone
+            # would have to compare shares here.
             over_source = max(others, default=None,
                               key=lambda p: sum(1 for s in slots if s.get("source") == p))
             over_slots = [s for s in chosen if s.get("source") == over_source]
