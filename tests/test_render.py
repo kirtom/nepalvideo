@@ -638,27 +638,22 @@ def test_cue_pads_start_after_a_split_secondary(tmp_path):
 
 
 def test_a_measured_render_applies_one_static_gain(tmp_path):
-    """With the numbers from the measuring pass loudnorm scales the mix
-    once -- a bare static gain, no limiter -- leaving the envelope's
-    dynamics as designed; the single pass re-levelled them as it went.
-    ffmpeg refuses linear mode when that gain would push a peak past TP
-    (or the range past LRA, or the numbers are its unset sentinels) and
-    falls back to dynamic, which build_command says out loud."""
+    """With the numbers from the measuring pass the final stage is what
+    loudnorm's linear mode is made of -- one gain to the target, then a
+    true-peak limiter -- and nothing else, so the envelope's dynamics
+    survive. loudnorm's own linear=true carries a precondition the film
+    cannot meet (measured_LRA <= LRA, an option that stops at 20 LU) and
+    reverts to the dynamic re-levelling this pass exists to avoid."""
     measured = {"input_i": -10.63, "input_lra": 1.1, "input_tp": -3.68, "input_thresh": -20.68}
     cmd = _mixed(tmp_path, loudnorm_measured=measured)
     fc = _graph(cmd)
-    assert fc.endswith("loudnorm=I=-14:TP=-1.5:LRA=11:measured_I=-10.63:measured_LRA=1.1"
-                       ":measured_TP=-3.68:measured_thresh=-20.68:linear=true[aout]")
-    assert "print_format" not in fc
+    assert fc.endswith("amix=inputs=3:normalize=0,"
+                       "volume=-3.37dB,alimiter=limit=0.841395:level=false[aout]")
+    assert "loudnorm" not in fc.split("amix=inputs=3")[-1], "no loudnorm left in the final stage"
     assert "[vout]" in fc and "-c:v" in cmd and cmd[-1].endswith("o.mp4"), "a full render otherwise"
-    # In linear mode LRA is a precondition (measured <= target, else
-    # dynamic), not a target: a mix wider than 11 LU asks for its own range.
-    wide = _graph(_mixed(tmp_path, loudnorm_measured=measured | {"input_lra": 15.6}))
-    assert ":LRA=16:measured_I=-10.63:measured_LRA=15.6:" in wide
-    # The option stops at 20, and the whole film is wider than that: it asks
-    # for the widest range there is rather than one ffmpeg refuses to parse.
-    huge = _graph(_mixed(tmp_path, loudnorm_measured=measured | {"input_lra": 20.1}))
-    assert ":LRA=20:measured_I=-10.63:measured_LRA=20.1:" in huge
+    # No range precondition left: a mix far wider than the LRA option could
+    # ever ask for is normalised in exactly the same way.
+    assert _graph(_mixed(tmp_path, loudnorm_measured=measured | {"input_lra": 24.3})) == fc
     assert _graph(_mixed(tmp_path)).endswith("LRA=11[aout]"), "without numbers: the single pass, unchanged"
 
 
@@ -703,15 +698,14 @@ def test_parse_loudnorm_json_names_what_is_missing():
         render.parse_loudnorm_json(LOUDNORM_STDERR.replace('"input_i" : "-10.63"', '"input_i" : "-inf"'))
 
 
-def test_a_measurement_loudnorm_would_read_as_unset_is_said_out_loud(tmp_path, caplog):
-    """af_loudnorm.c treats lra 0, thresh -70, i 0 and tp 99 as 'not
-    measured' and reverts to dynamic mode without a word."""
-    for sentinel in ({"input_lra": 0.0}, {"input_thresh": -70.0}, {"input_i": 0.0}, {"input_tp": 99.0}):
-        caplog.clear()
-        measured = {"input_i": -10.63, "input_lra": 1.1, "input_tp": -3.68, "input_thresh": -20.68} | sentinel
-        with caplog.at_level("WARNING"):
-            _mixed(tmp_path, loudnorm_measured=measured)
-        assert "revert to dynamic" in caplog.text, sentinel
+def _integrated(path):
+    """The rendered file's own integrated loudness, heard the way the
+    measuring pass hears the mix -- loudnorm printing what it measures."""
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-i", str(path), "-vn",
+         "-af", "loudnorm=print_format=json", "-f", "null", "-"],
+        capture_output=True, text=True, check=True)
+    return render.parse_loudnorm_json(proc.stderr)["input_i"]
 
 
 @pytest.mark.slow
@@ -785,12 +779,25 @@ def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
     late = probe(10.5, 12.0)
     assert abs(late - alone) < 1.5, f"the cue after the window reads {late} dB against {alone} dB"
 
+    # Where the mix ends up: one gain from what the first pass measured to
+    # the target, so the file measures the target back.
+    got = _integrated(out2)
+    assert abs(got - LEVELS["final_lufs"]) <= 1.0, \
+        f"the draft measures {got} LUFS, asked for {LEVELS['final_lufs']}"
+
     # And the film's own range, which no fixture this size reaches: the
-    # first end-to-end mix measured 20.1 LU, the graph asked loudnorm for a
-    # range of 21 and ffmpeg refused to parse the option. Asked at the real
-    # boundary, because that is where it was wrong.
+    # first end-to-end mix measured 20.1 LU, past what loudnorm's LRA option
+    # can even be given, so linear mode reverted to dynamic and re-levelled
+    # the envelope. A gain and a limiter have no range to refuse: the same
+    # mix declared far wider must render AND hold the level the envelope
+    # designed. Asked at the real boundary, because that is where it was
+    # wrong.
     out3 = tmp_path / "draft3.mp4"
     subprocess.run(render.build_command(rows, out_path=out3,
                                         loudnorm_measured=measured | {"input_lra": 24.3}, **kw),
                    check=True)
-    assert out3.exists(), "a mix wider than the LRA option still renders"
+    wide_alone = render.probe_loudness(out3, t_in=0.0, t_out=2.0)
+    wide_late = render.probe_loudness(out3, t_in=10.5, t_out=12.0)
+    assert abs(wide_late - wide_alone) < 1.5, (
+        f"a mix wider than the LRA option keeps its envelope: the cue after the window reads "
+        f"{wide_late} dB against {wide_alone} dB for the bed alone")

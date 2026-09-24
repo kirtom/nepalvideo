@@ -39,15 +39,9 @@ CARD_FONTSIZE = 36
 # The speech pass's own ceiling and range. -1.5 dBTP is the ceiling the
 # final pass takes from the config, applied to speech early so that no
 # single loud cue is the thing that trips the final limiter; LRA 11 is
-# loudnorm's own default, written out so both passes visibly ask for the
-# same range.
+# loudnorm's own default, written out so every loudnorm in this graph
+# visibly asks for the same range.
 SPEECH_TP_DB, LRA = -1.5, 11
-# Not a choice: af_loudnorm.c declares LRA over [1, 20] and rejects the
-# graph outright past it. The measured range is asked for in linear mode
-# (see audio_filters) and the whole film's is wider than any fixture's --
-# the first end-to-end mix measured 20.1 LU and the render died at option
-# parsing, having already spent the measuring pass.
-LRA_MAX = 20
 # The film's delivery rate. loudnorm upsamples to 192 kHz and hands that
 # on, and left to itself the encoder negotiated 96 kHz -- the highest it
 # takes -- for a draft whose every source is 48.
@@ -263,11 +257,9 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any], fl
     The final normalisation is two-pass. Single-pass loudnorm re-levels
     what the envelope designed: through three seconds of silence its gain
     rode up and the returning bed came back 3.1 dB hot. So ``measure_only``
-    has it print what it hears, and ``measured`` -- those numbers -- has it
-    apply one static gain (``linear=true``: a bare gain, no limiter; ffmpeg
-    refuses linear mode when that gain would push a peak past TP, and
-    reverts to dynamic; its LRA option is then a precondition, so it is
-    raised to the measured range).
+    has it print what it hears, and ``measured`` -- those numbers -- turns
+    the final stage into what linear mode is made of: one static gain to
+    the target, then a true-peak limiter to keep the ceiling.
     """
     parts: list[str] = []
 
@@ -307,35 +299,19 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any], fl
     if measure_only:
         final = f"loudnorm=I={target_i:g}:TP={target_tp:g}:LRA={LRA}:print_format=json"
     elif measured:
-        m = {k: float(measured[k]) for k in ("input_i", "input_lra", "input_tp", "input_thresh")}
-        gain = target_i - m["input_i"]
-        # In linear mode the LRA option is not a target but a precondition
-        # (af_loudnorm.c, init: measured_lra <= target_lra, else dynamic):
-        # a static gain compresses nothing, so the range is whatever the
-        # envelope designed. Speech over a quiet bed with a silence window
-        # measured 15.6 LU on a twelve-second fixture; the film will be
-        # wider still. Asking for the measured range keeps the mode linear
-        # and changes nothing about the gain -- as far as the option goes:
-        # past LRA_MAX there is no range to ask for, so the graph asks for
-        # the widest there is and loudnorm reverts to dynamic mode, which
-        # is a re-levelled mix and not a dead render.
-        lra = min(LRA_MAX, max(LRA, math.ceil(m["input_lra"])))
-        if (m["input_lra"] > LRA_MAX or m["input_tp"] + gain > target_tp
-                # af_loudnorm.c's own sentinels for "not measured"
-                or m["input_lra"] == 0 or m["input_thresh"] == -70 or m["input_i"] == 0
-                or m["input_tp"] == 99):
-            # loudnorm's other rules: a range past what the option can ask
-            # for, a gain that would push a true peak past the ceiling, or a
-            # value it reads as unset, and it quietly reverts to dynamic
-            # mode -- the second pass then buys nothing, which nobody would
-            # hear until Gate 3.
-            log.warning("S07 measured I %.1f, LRA %.1f, thresh %.1f, true peak %.1f dBTP after "
-                        "%.1f dB of gain: loudnorm will revert to dynamic normalisation and "
-                        "re-level the mix", m["input_i"], m["input_lra"], m["input_thresh"],
-                        m["input_tp"] + gain, gain)
-        final = (f"loudnorm=I={target_i:g}:TP={target_tp:g}:LRA={lra}"
-                 f":measured_I={m['input_i']:g}:measured_LRA={m['input_lra']:g}"
-                 f":measured_TP={m['input_tp']:g}:measured_thresh={m['input_thresh']:g}:linear=true")
+        # Not loudnorm's linear mode but what linear mode is: one gain and a
+        # ceiling. ``linear=true`` is honoured only while measured_LRA <=
+        # LRA (af_loudnorm.c, init), and that option stops at 20 LU -- the
+        # film is a designed three-second silence and half an hour of
+        # envelope, wider than that by construction, so loudnorm warned and
+        # reverted to dynamic, re-levelling the very envelope this second
+        # pass exists to preserve. A gain has no range precondition.
+        gain = target_i - float(measured["input_i"])
+        # alimiter's limit is linear amplitude, not dB; its attack and
+        # release defaults are left alone, and level=false stops it
+        # normalising the output afterwards, which would undo the gain.
+        final = (f"volume={gain:g}dB,"
+                 f"alimiter=limit={10 ** (target_tp / 20):g}:level=false")
     else:
         final = f"loudnorm=I={target_i:g}:TP={target_tp:g}:LRA={LRA}"
     parts.append(f"[speech][loc][mus]amix=inputs=3:normalize=0,{final}[aout]")
