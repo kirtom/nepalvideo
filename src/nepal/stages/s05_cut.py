@@ -783,6 +783,7 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
 def _rebalance_phones(slots: list[dict[str, Any]], act_rows: Sequence[Mapping[str, Any]],
                       shots_by_id: Mapping[str, Mapping[str, Any]], *, act: int,
                       act0: Sequence[Mapping[str, Any]], excluded: set, min_share: float,
+                      run_cap: int,
                       phones: Sequence[str] = ("phone_keller", "phone_kulikov")) -> list[tuple[str, str]]:
     """Each phone's share of the act, after the refill rounds; the swaps
     made, old shot for new.
@@ -793,10 +794,34 @@ def _rebalance_phones(slots: list[dict[str, Any]], act_rows: Sequence[Mapping[st
     ``min_share`` of the act's phone video slots, the weakest unlocked,
     non-beat, non-split video slot of the phone ahead gives its shot up for
     the starved phone's unused row nearest in time to it whose footage
-    covers the slot's length; the slot keeps its place and every other key.
+    covers the slot's length and whose neighbours leave room under
+    ``run_cap``; the slot keeps its place and every other key.
     """
     def source(shot_id):
         return (shots_by_id.get(shot_id) or {}).get("source")
+
+    def run_ok(row, i):
+        """``assemble.max_consecutive_recording``, the same rule the fill
+        enforces through ``recording_run_ok``, read in both directions.
+
+        A swap lands *between* slots already on screen, so the run it would
+        join reaches backwards and forwards; ``recording_run_ok`` only ever
+        sees the tail of what has been chosen so far, which is the whole
+        story for a fill laying shots in order and half of it here. Without
+        this the share repair could undo the run rule the fill had just
+        satisfied, and three clips of one recording would play in a row.
+        """
+        rid = row.get("recording_id")
+        if not rid:
+            return True                 # a row with no recording cannot form a run
+        run = 1
+        for step in (-1, 1):
+            j = i + step
+            while 0 <= j < len(slots) and \
+                    (shots_by_id.get(slots[j].get("shot_id")) or {}).get("recording_id") == rid:
+                run += 1
+                j += step
+        return run <= run_cap
 
     def state():
         phone_slots = [s for s in slots if s.get("kind") == "video" and source(s.get("shot_id")) in phones]
@@ -820,15 +845,21 @@ def _rebalance_phones(slots: list[dict[str, Any]], act_rows: Sequence[Mapping[st
         # other five on a speech anchor's recording, and 187 stills.
         phone_slots, counts, starved, pools, ahead, givers = first
         log.info("S06 act %d phone share: %s of %d phone video slot(s), %s clips available, "
-                 "starved %s with pool %s, %d giver(s) from %s; %d swapped %s", act, counts,
+                 "starved %s with pool %s, %d giver(s) from %s; %d swapped %s, %d long-enough "
+                 "candidate(s) refused by the run rule", act, counts,
                  len(phone_slots), {p: len(available[p]) for p in phones}, starved,
-                 {p: len(pools[p]) for p in starved}, len(givers), ahead, len(swaps), swaps)
+                 {p: len(pools[p]) for p in starved}, len(givers), ahead, len(swaps), swaps,
+                 n_refused_run)
         return swaps
 
     available = {p: [r for r in act_rows if r.get("source") == p and not _is_photo(r)] for p in phones}
+    # The swap only ever replaces a slot's shot, never adds or removes one,
+    # so a slot's index is fixed for the whole repair.
+    pos = {id(s): i for i, s in enumerate(slots)}
     first = state()
     phone_slots, counts, starved, pools, ahead, givers = first
     swaps: list[tuple[str, str]] = []
+    n_refused_run = 0
     while True:
         if not starved:
             return done()
@@ -837,7 +868,9 @@ def _rebalance_phones(slots: list[dict[str, Any]], act_rows: Sequence[Mapping[st
         swapped = False
         for s in givers:
             length = float(s["t_out"]) - float(s["t_in"])
-            fits = [r for r in pool if asm.shot_available_s(r) >= length]
+            long_enough = [r for r in pool if asm.shot_available_s(r) >= length]
+            fits = [r for r in long_enough if run_ok(r, pos[id(s)])]
+            n_refused_run += len(long_enough) - len(fits)
             if not fits:
                 continue
             here = anchors_mod._epoch(shots_by_id[s["shot_id"]].get("start_utc"))
@@ -1099,7 +1132,8 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
                 break
             slots = _resolve_overlaps(slots + added)
         _rebalance_phones(slots, act_rows, shots_by_id, act=act, act0=act0, excluded=excluded,
-                          min_share=float(cfg.get("assemble.source_share_min")))
+                          min_share=float(cfg.get("assemble.source_share_min")),
+                          run_cap=int(cfg.get("assemble.max_consecutive_recording")))
         # What the material could not fill is closed, and the cuts re-snapped
         # to the grid from where they now sit.
         slots = _close_holes(retimed(_close_holes(slots, act_t0)), act_t0)

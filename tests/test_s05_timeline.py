@@ -464,6 +464,45 @@ def test_a_starved_phone_gets_its_share_of_the_act_not_of_each_gap(tmp_path):
     conn.close()
 
 
+def _phone_slot(i, shot_id, **fields):
+    s = s05_cut._new_slot(kind="video", act=5, shot_id=shot_id, src_in=0.0, **fields)
+    return s05_cut._set_length(s, 10.0 * i, 10.0 * i + 4.0)
+
+
+def _phone_row(shot_id, source, recording_id):
+    return {"shot_id": shot_id, "source": source, "recording_id": recording_id,
+            "media_kind": "video", "start_s": 0.0, "end_s": 60.0, "start_utc": None,
+            "score_total": 1.0}
+
+
+def test_the_share_repair_will_not_swap_in_a_shot_that_breaks_the_run_rule():
+    """The swap replaces a slot in place, between two slots already on
+    screen, so a candidate can join a run on both sides at once --
+    max_consecutive_recording has to be checked there or the repair undoes
+    what the fill had just satisfied. keller is starved (2 of 6) and its only
+    unused clip belongs to the recording both of the giver's neighbours came
+    from."""
+    slots = [_phone_slot(0, "k1"), _phone_slot(1, "u1"), _phone_slot(2, "k2"),
+             _phone_slot(3, "u2", beat_id="b1"), _phone_slot(4, "u3", beat_id="b2"),
+             _phone_slot(5, "u4", beat_id="b3")]
+    rows = [_phone_row("k1", "phone_keller", "rk"), _phone_row("k2", "phone_keller", "rk"),
+            _phone_row("u1", "phone_kulikov", "rku"), _phone_row("u2", "phone_kulikov", "rku"),
+            _phone_row("u3", "phone_kulikov", "rku"), _phone_row("u4", "phone_kulikov", "rku"),
+            _phone_row("k3", "phone_keller", "rk")]
+    shots = {r["shot_id"]: r for r in rows}
+
+    swaps = s05_cut._rebalance_phones(list(slots), rows, shots, act=5, act0=[], excluded=set(),
+                                      min_share=0.4, run_cap=2)
+    assert swaps == [], "k3 would make three slots of rk in a row"
+
+    # the same seed with the candidate on its own recording: the swap happens,
+    # so it is the run rule refusing above and not the share or the length
+    rows[-1] = _phone_row("k3", "phone_keller", "rk_other")
+    shots["k3"] = rows[-1]
+    assert s05_cut._rebalance_phones(list(slots), rows, shots, act=5, act0=[], excluded=set(),
+                                     min_share=0.4, run_cap=2) == [("u1", "k3")]
+
+
 def test_build_timeline_is_rebuilt_not_accumulated(tmp_path):
     cfg = _cfg(tmp_path)
     conn = _seed(cfg)
