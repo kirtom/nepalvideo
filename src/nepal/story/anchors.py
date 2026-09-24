@@ -1,4 +1,5 @@
-"""Film v2 step 4 -- anchors from the beat sheet (spec section 3.2/3.3).
+"""Film v2 step 4 -- anchors from the beat sheet (spec section 5.1, and 5.5
+for the cold open) of docs/superpowers/specs/2026-09-16-film-v2-voice-spine-design.md.
 
 `story_beats` says what is said and when it was said; the timeline needs to
 know where each moment sits in the film and how much picture surrounds it.
@@ -20,10 +21,16 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any, Mapping, Sequence
 
-from nepal.process.assemble import SLOT_KEYS
+from nepal.process.assemble import SLOT_KEYS, epoch_utc, parse_utc
+
+# ``_epoch`` is the name seven call sites in s05_cut.py and gate3.py already
+# spell (``anchors_mod._epoch``); the parse itself now lives in assemble.py,
+# next to the fill that shares it. Renaming across those two files is another
+# task's diff, so the old name stays bound to the shared helper here.
+_epoch = epoch_utc
 
 
 @dataclass(frozen=True)
@@ -44,18 +51,6 @@ class Anchor:
     t_in: float = -1.0   # on the film timeline, set by place_anchors
 
 
-def _epoch(iso: str | None) -> float | None:
-    """Parse an ISO 8601 timestamp to epoch seconds, or None for anything
-    that is not one -- a missing stamp is a fact about the shot, not an
-    error this module raises."""
-    if not iso:
-        return None
-    try:
-        return datetime.fromisoformat(str(iso)).timestamp()
-    except ValueError:
-        return None
-
-
 def speech_anchors(beats: Sequence[Mapping[str, Any]],
                    shots_by_id: Mapping[str, Mapping[str, Any]], *,
                    face_hold_s: float, pre_roll_s: float,
@@ -71,14 +66,11 @@ def speech_anchors(beats: Sequence[Mapping[str, Any]],
         src_in = max(shot_start, beat_src_in - float(pre_roll_s))
         src_out = float(b["src_out"])
         duration = src_out - src_in
-        utc = None
-        start_utc = shot.get("start_utc")
-        if start_utc:
-            try:
-                utc = (datetime.fromisoformat(str(start_utc)) +
-                      timedelta(seconds=beat_src_in - shot_start)).isoformat()
-            except ValueError:
-                pass                    # a malformed stamp is this anchor's fact, not the batch's
+        # A malformed or missing stamp is this anchor's fact, not the batch's:
+        # parse_utc returns None and the anchor travels on without a moment.
+        shot_utc = parse_utc(shot.get("start_utc"))
+        utc = None if shot_utc is None else (
+            shot_utc + timedelta(seconds=beat_src_in - shot_start)).isoformat()
         own_picture = float(shot.get("face_score") or 0.0) < float(own_picture_below)
         hold = 0.0 if own_picture else min(float(face_hold_s), duration)
         out.append(Anchor(beat_id=b["beat_id"], act=b.get("act"), kind="speech", utc=utc,
@@ -176,6 +168,11 @@ def broll_candidates(anchor: Anchor, shots: Sequence[Mapping[str, Any]], *,
             continue
         if s.get("recording_id") == anchor.recording_id:
             continue
+        # B-roll under a voice has to move, so a still is not a candidate.
+        # An absent ``media_kind`` reads as video because the column is
+        # `NOT NULL DEFAULT 'video'` (db.py): a row that lacks the key came
+        # from a query that did not select it, not from a shot of unknown
+        # kind, and assemble.shot_available_s defaults it the same way.
         if str(s.get("media_kind") or "video") != "video":
             continue
         s_ts = _epoch(s.get("start_utc"))

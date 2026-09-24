@@ -4,6 +4,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from datetime import datetime
 
+import pytest
+
 from nepal.process.assemble import SLOT_KEYS
 from nepal.story.anchors import (Anchor, broll_candidates, cold_open_pick,
                                   place_anchors, quote_anchors, speech_anchors)
@@ -89,6 +91,18 @@ def test_speech_anchors_survive_a_malformed_or_missing_start_utc():
     assert by_id["b_bad"].src_in == 0.6 and by_id["b_bad"].duration_s == 1.4
 
 
+def test_a_beat_whose_shot_is_missing_stops_the_stage_naming_the_shot():
+    """s05_cut's ``plan_act`` filters an act's beats down to those whose shot
+    is in that act's rows. If that filter is ever dropped or drifts, the
+    lookup here must fail fast and name what it could not find -- an anchor
+    invented for a shot nobody has is a speech cue with no picture under it,
+    and the timeline would only show it at the render."""
+    orphan = _beat("b_orphan", shot_id="gone", src_in=1.0, src_out=2.0)
+    with pytest.raises(KeyError, match="gone"):
+        speech_anchors([orphan], SHOTS, face_hold_s=2.5, pre_roll_s=0.4,
+                       own_picture_below=0.35)
+
+
 def test_quote_anchors_have_no_picture_and_zero_duration():
     anchors = quote_anchors([QUOTE])
     assert len(anchors) == 1
@@ -169,6 +183,18 @@ def test_broll_candidates_excludes_own_recording_other_act_and_photos():
     ]
     got = broll_candidates(anchor, pool, window_s=60)
     assert [s["shot_id"] for s in got] == ["in_window_high", "in_window_low"]   # by score
+
+
+def test_broll_keeps_a_row_that_never_selected_media_kind():
+    """``shots.media_kind`` is NOT NULL DEFAULT 'video', so a row without the
+    key came from a query that did not ask for it, not from a shot of unknown
+    kind. Reading the absence as "not video" would silently shrink the B-roll
+    pool by whatever the caller forgot to select."""
+    anchor = speech_anchors(BEATS, SHOTS, face_hold_s=2.5, pre_roll_s=0.4,
+                            own_picture_below=0.35)[0]        # b1, recording r1, act 3
+    row = {"shot_id": "no_kind", "recording_id": "r2", "act": 3, "score_total": 0.5,
+           "start_utc": "2024-05-03T04:00:20+00:00"}
+    assert [s["shot_id"] for s in broll_candidates(anchor, [row], window_s=60)] == ["no_kind"]
 
 
 # -- cold_open_pick ------------------------------------------------------
