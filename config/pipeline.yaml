@@ -521,10 +521,13 @@ cloud:
   provider: gcp
   # Hard ceiling on what the pipeline may spend, in USD, across API calls and
   # VM hours as the ledger (work/reports/spend.json) records them. The
-  # operator approved 15 on 2026-09-16 and raised it to 25 on 2026-09-18 when
-  # the CPU box went on-demand; the GCP billing budget is 60 and alerts at
+  # operator approved 15 on 2026-09-16, raised it to 25 on 2026-09-18 when the
+  # CPU box went on-demand, and to 45 on 2026-09-24 after a session ended
+  # without `remote down` and the box billed 104 idle hours (~31 USD): the
+  # ledger only books box time at `down`, so `remote status` read 5.21 for
+  # four days while the meter ran. The GCP billing budget is 60 and alerts at
   # 50% and 80%, but that is a warning, this is a refusal.
-  spend_ceiling_usd: 25
+  spend_ceiling_usd: 45
   gcp:
     gcloud: ~/google-cloud-sdk/bin/gcloud
     project: nepalvideo
