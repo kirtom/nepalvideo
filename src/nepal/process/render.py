@@ -42,6 +42,12 @@ CARD_FONTSIZE = 36
 # loudnorm's own default, written out so both passes visibly ask for the
 # same range.
 SPEECH_TP_DB, LRA = -1.5, 11
+# Not a choice: af_loudnorm.c declares LRA over [1, 20] and rejects the
+# graph outright past it. The measured range is asked for in linear mode
+# (see audio_filters) and the whole film's is wider than any fixture's --
+# the first end-to-end mix measured 20.1 LU and the render died at option
+# parsing, having already spent the measuring pass.
+LRA_MAX = 20
 # The film's delivery rate. loudnorm upsamples to 192 kHz and hands that
 # on, and left to itself the encoder negotiated 96 kHz -- the highest it
 # takes -- for a draft whose every source is 48.
@@ -306,16 +312,20 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any], fl
         # envelope designed. Speech over a quiet bed with a silence window
         # measured 15.6 LU on a twelve-second fixture; the film will be
         # wider still. Asking for the measured range keeps the mode linear
-        # and changes nothing about the gain.
-        lra = max(LRA, math.ceil(m["input_lra"]))
-        if (m["input_tp"] + gain > target_tp
+        # and changes nothing about the gain -- as far as the option goes:
+        # past LRA_MAX there is no range to ask for, so the graph asks for
+        # the widest there is and loudnorm reverts to dynamic mode, which
+        # is a re-levelled mix and not a dead render.
+        lra = min(LRA_MAX, max(LRA, math.ceil(m["input_lra"])))
+        if (m["input_lra"] > LRA_MAX or m["input_tp"] + gain > target_tp
                 # af_loudnorm.c's own sentinels for "not measured"
                 or m["input_lra"] == 0 or m["input_thresh"] == -70 or m["input_i"] == 0
                 or m["input_tp"] == 99):
-            # loudnorm's other rules: a gain that would push a true peak
-            # past the ceiling, or a value it reads as unset, and it quietly
-            # reverts to dynamic mode -- the second pass then buys nothing,
-            # which nobody would hear until Gate 3.
+            # loudnorm's other rules: a range past what the option can ask
+            # for, a gain that would push a true peak past the ceiling, or a
+            # value it reads as unset, and it quietly reverts to dynamic
+            # mode -- the second pass then buys nothing, which nobody would
+            # hear until Gate 3.
             log.warning("S07 measured I %.1f, LRA %.1f, thresh %.1f, true peak %.1f dBTP after "
                         "%.1f dB of gain: loudnorm will revert to dynamic normalisation and "
                         "re-level the mix", m["input_i"], m["input_lra"], m["input_thresh"],

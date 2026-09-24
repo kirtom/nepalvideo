@@ -638,6 +638,10 @@ def test_a_measured_render_applies_one_static_gain(tmp_path):
     # dynamic), not a target: a mix wider than 11 LU asks for its own range.
     wide = _graph(_mixed(tmp_path, loudnorm_measured=measured | {"input_lra": 15.6}))
     assert ":LRA=16:measured_I=-10.63:measured_LRA=15.6:" in wide
+    # The option stops at 20, and the whole film is wider than that: it asks
+    # for the widest range there is rather than one ffmpeg refuses to parse.
+    huge = _graph(_mixed(tmp_path, loudnorm_measured=measured | {"input_lra": 20.1}))
+    assert ":LRA=20:measured_I=-10.63:measured_LRA=20.1:" in huge
     assert _graph(_mixed(tmp_path)).endswith("LRA=11[aout]"), "without numbers: the single pass, unchanged"
 
 
@@ -763,3 +767,13 @@ def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
     assert probe(9.1, 9.9) < -50.0, "nothing plays before the late cue's t_in"
     late = probe(10.5, 12.0)
     assert abs(late - alone) < 1.5, f"the cue after the window reads {late} dB against {alone} dB"
+
+    # And the film's own range, which no fixture this size reaches: the
+    # first end-to-end mix measured 20.1 LU, the graph asked loudnorm for a
+    # range of 21 and ffmpeg refused to parse the option. Asked at the real
+    # boundary, because that is where it was wrong.
+    out3 = tmp_path / "draft3.mp4"
+    subprocess.run(render.build_command(rows, out_path=out3,
+                                        loudnorm_measured=measured | {"input_lra": 24.3}, **kw),
+                   check=True)
+    assert out3.exists(), "a mix wider than the LRA option still renders"
