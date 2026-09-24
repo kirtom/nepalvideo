@@ -22,8 +22,9 @@ def _decide(**kw):
 
 def test_a_running_job_keeps_the_box_up_however_old_the_stamp_is():
     """A job launched detached returns at once: its stamp is hours old
-    while it works, so the process is what answers."""
-    stop, why = _decide(jobs_running=1, last_activity=NOW - timedelta(hours=5))
+    while it works, so the process is what answers -- up to the wedge
+    bound, which the next test is about."""
+    stop, why = _decide(jobs_running=1, last_activity=NOW - timedelta(hours=3))
     assert stop is False and "1 job" in why
 
 
