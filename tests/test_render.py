@@ -628,7 +628,8 @@ def test_without_cues_the_command_is_the_silent_draft_byte_for_byte(monkeypatch,
                    "-ss", "0.000", "-t", "4.000", "-i", "/m/b.mp4",
                    "-filter_complex_script", str(tmp_path / "o.filters"), "-map", "[vout]",
                    "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                   "-pix_fmt", "yuv420p", str(out)]
+                   # the render publishes itself by renaming this on exit 0
+                   "-pix_fmt", "yuv420p", str(render.part_path(out))]
     leg = ("fps=30,setpts=PTS-STARTPTS,scale=960:540:force_original_aspect_ratio=decrease"
            ":force_divisible_by=2,pad=960:540:(ow-iw)/2:(oh-ih)/2:black,setsar=1")
     assert _graph(cmd) == f"[0:v]{leg}[v0];[1:v]{leg}[v1];[v0][v1]concat=n=2:v=1:a=0[vout]"
@@ -701,7 +702,7 @@ def test_a_measured_render_applies_one_static_gain(tmp_path):
     assert fc.endswith("amix=inputs=3:normalize=0,"
                        "volume=-3.37dB,alimiter=limit=0.841395:level=false[aout]")
     assert "loudnorm" not in fc.split("amix=inputs=3")[-1], "no loudnorm left in the final stage"
-    assert "[vout]" in fc and "-c:v" in cmd and cmd[-1].endswith("o.mp4"), "a full render otherwise"
+    assert "[vout]" in fc and "-c:v" in cmd and cmd[-1].endswith("o.part.mp4"), "a full render otherwise"
     # No range precondition left: a mix far wider than the LRA option could
     # ever ask for is normalised in exactly the same way.
     assert _graph(_mixed(tmp_path, loudnorm_measured=measured | {"input_lra": 24.3})) == fc
