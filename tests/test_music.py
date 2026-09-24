@@ -927,6 +927,39 @@ def test_an_act_whose_scenes_start_late_and_stop_early_is_still_covered():
     assert _segment_problems(m["acts"][0]) == []
 
 
+def test_a_run_past_the_end_of_its_track_loops_the_section_instead_of_claiming_it():
+    """ffmpeg delivers what the file holds and stops, so a segment asking
+    past its track's end is dead bed under the picture -- 28.6 s of it on
+    the real corpus. The cue restarts instead, as an editor would, and the
+    note says the bed looped."""
+    short = scene_track("short", "Z", 100, [0.5, 0.5], duration=100.0)   # sections at 0 and 50
+    scenes = [trek_scene(1, 2, 0.0, 130.0, "climbing", hr=140)]
+    a = _cue_assignment(scenes, [(short.track_id, short.sections[1]["section_id"])])
+    m = music_map_from_scenes(scenes, a, [short], act_spans={2: (0.0, 130.0)}, silence_s=3.0)
+    segs = m["acts"][0]["segments"]
+    # 50 s of track left from the section cue, 130 s of act to cover
+    assert [(s["t_in"], s["t_end"], s["src_in"], s["src_out"]) for s in segs] == [
+        (0.0, 50.0, 50.0, 100.0), (50.0, 100.0, 50.0, 100.0), (100.0, 130.0, 50.0, 80.0)]
+    assert all(s["src_out"] <= short.duration_s for s in segs)
+    assert "looped" in m["assignment_note"] and "short" in m["assignment_note"]
+    track_s = {short.track_id: short.duration_s}
+    assert _segment_problems(m["acts"][0], track_s) == []
+
+
+def test_check_music_map_flags_a_segment_that_plays_past_its_tracks_end():
+    """The bound that is not true by construction, and the expensive one.
+    It lived only in assignment_note, which nothing in src/ reads back."""
+    tracks = library()
+    m = build_music_map(tracks, assign_acts(tracks), ACT_SPECS, total_s=1200)
+    seg = m["acts"][0]["segments"][0]
+    durations = {t.track_id: 30.0 for t in tracks}
+    assert any("dead bed" in p for p in
+               check_music_map(m, target_s=1200, min_headroom=1.0, track_s=durations))
+    # and without the durations there is nothing to check it against
+    assert not [p for p in check_music_map(m, target_s=1200, min_headroom=1.0) if "dead bed" in p]
+    assert seg["src_out"] > 30.0, "the fixture must actually over-claim for this to mean anything"
+
+
 def test_check_music_map_flags_a_map_whose_segments_do_not_tile_their_act():
     tracks = library()
     gapped = build_music_map(tracks, assign_acts(tracks), ACT_SPECS, total_s=1200)
@@ -1028,6 +1061,27 @@ def test_act0_is_never_silent_when_act4_has_no_swell():
     act0 = next(x for x in m["acts"] if x["act"] == 0)
     assert act0["track_id"] is not None
     assert len(act0["segments"]) == 1
+
+
+def test_the_cold_open_loops_the_swell_rather_than_run_past_the_tracks_end():
+    """Act 0 starts at Act 4's swell, which is by definition late in the
+    piece, so the cold open is the likeliest place in the whole film to ask
+    for audio the file does not hold. Here 30 s is left past the swell and
+    the cold open runs 50 s."""
+    opening = scene_track("opening", "A", 60, [0.1, 0.2])
+    echo = scene_track("echo", "B", 100, [0.1, 0.9], duration=60.0)   # swell at 30s of 60s
+    scenes = [trek_scene(1, 1, 50.0, 110.0, "village", hr=60),
+              trek_scene(2, 4, 110.0, 170.0, "summit", hr=190)]
+    a = _cue_assignment(scenes, [(opening.track_id, opening.sections[0]["section_id"]),
+                                 (echo.track_id, echo.sections[1]["section_id"])])
+    m = music_map_from_scenes(scenes, a, [opening, echo],
+                              act_spans={1: (50.0, 110.0), 4: (110.0, 170.0)}, silence_s=3.0,
+                              act0_span=(0.0, 50.0))
+    act0 = next(x for x in m["acts"] if x["act"] == 0)
+    assert [(s["t_in"], s["t_end"], s["src_in"], s["src_out"]) for s in act0["segments"]] == [
+        (0.0, 30.0, 30.0, 60.0), (30.0, 50.0, 30.0, 50.0)]
+    assert "looped" in m["assignment_note"]
+    assert _segment_problems(act0, {"echo": 60.0}) == []
 
 
 def test_music_map_from_scenes_has_the_same_keys_as_build_music_map():

@@ -645,15 +645,24 @@ def build_music_map(tracks: Sequence[Track], assignment: Assignment,
 _SEGMENT_TOL_S = 2e-3
 
 
-def _segment_problems(a: Mapping[str, Any]) -> list[str]:
+def _segment_problems(a: Mapping[str, Any], track_s: Mapping[str, float] | None = None) -> list[str]:
     """One act's segments must tile it: from 0 to the act's length, no gap
-    and no overlap, each segment claiming exactly as much source as film.
+    and no overlap, each segment claiming exactly as much source as film and
+    no more source than its track holds.
 
     Both builders promise this -- ``fill_act`` by construction, and
     ``_segments_for_act`` by holding each cue until the next -- and the audio
     graph, the cue list and the rhythm pass all read it as given. A hole is
     silence under the picture and an overlap is two beds at once, so the map
     is checked where it is written rather than at whichever consumer notices.
+
+    ``src_out <= duration`` is the one of the four that is not true by
+    construction, and it is the expensive one: ffmpeg delivers what the file
+    has and stops, so an over-claim is dead bed under the picture. It was
+    only ever recorded as prose in ``assignment_note``, which nothing in
+    ``src/`` reads back; ``track_s`` (track_id -> duration_s, absent in the
+    pure tests that build maps without a library) makes it a reported
+    problem the run's report carries.
     """
     segments = a.get("segments") or []
     if not segments:
@@ -670,6 +679,11 @@ def _segment_problems(a: Mapping[str, Any]) -> list[str]:
             out.append(f"act {a['act']}: segment {i} ({seg.get('track_id')}) plays for "
                        f"{t_end - t_in:.3f}s of film from {float(seg['src_out']) - float(seg['src_in']):.3f}s "
                        f"of track -- the map would over- or under-report the source")
+        duration = (track_s or {}).get(seg.get("track_id"))
+        if duration and float(seg["src_out"]) > float(duration) + _SEGMENT_TOL_S:
+            out.append(f"act {a['act']}: segment {i} ({seg.get('track_id')}) plays to "
+                       f"{float(seg['src_out']):.1f}s of a {float(duration):.1f}s track -- "
+                       f"ffmpeg stops at the file's end, so that is dead bed under the picture")
         cursor = t_end
     if act_len > 0 and abs(cursor - act_len) > _SEGMENT_TOL_S:
         out.append(f"act {a['act']}: segments cover {cursor:.3f}s of the act's {act_len:.3f}s")
@@ -679,7 +693,8 @@ def _segment_problems(a: Mapping[str, Any]) -> list[str]:
 def check_music_map(mmap: dict[str, Any], *, target_s: float,
                     tolerance_s: float = 30.0,
                     max_repeats_per_act: int = 2,
-                    min_headroom: float = 2.0) -> list[str]:
+                    min_headroom: float = 2.0,
+                    track_s: Mapping[str, float] | None = None) -> list[str]:
     """Section S02.8 acceptance, plus three checks the spec does not state.
 
     The spec's criteria are that act durations sum to within +/-30 s of target
@@ -726,7 +741,7 @@ def check_music_map(mmap: dict[str, Any], *, target_s: float,
             problems.append(
                 f"act {a['act']}: beat grid covers {grid:.0f}s of {act_len:.0f}s "
                 f"({grid/act_len*100:.0f}%) -- cuts past that cannot be beat-snapped")
-        problems += _segment_problems(a)
+        problems += _segment_problems(a, track_s)
         # A track laid down several times within one act is a loop the audience
         # will hear, whatever the library's total length.
         repeats = int(a.get("max_track_repeats", 0))
@@ -1067,17 +1082,47 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
     return SceneAssignment(by_scene, round(total_cost, 4), note)
 
 
-def _overrun_note(label: str, track: Track, src_out: float) -> str | None:
+def _overrun_note(label: str, track: Track, src_out: float, *, looped: bool = False) -> str | None:
     """Name it rather than hide it: capping ``src_out`` at the track's own
     length would make ``t_end - t_in`` and ``src_out - src_in`` disagree,
     which is the same "timeline silently over-reports" trap CLAUDE.md already
     names -- just read backwards, as an under-report of source length instead
-    of an over-report of footage. So the length is never capped, and instead
-    named here when it runs past what the file actually has."""
+    of an over-report of footage. So a span is never shortened to fit the
+    file; it is either covered by looping the piece (``looped``) or named
+    here as a claim the file cannot answer."""
     if track.duration_s and src_out > track.duration_s + 1e-6:
         return (f"{label}: {track.track_id} needs {src_out - track.duration_s:.1f}s "
-                f"past its {track.duration_s:.1f}s length")
+                f"past its {track.duration_s:.1f}s length"
+                + ("; looped from its section" if looped else ""))
     return None
+
+
+def _loop_spans(src_in: float, length: float, duration: float | None) -> list[tuple[float, float]]:
+    """``length`` seconds of a track from ``src_in``, as (take, its src_in)
+    pieces that each fit inside ``duration``.
+
+    ffmpeg does not invent audio: asked for more than the file holds it
+    delivers what exists and stops, which is silence under the picture for
+    the remainder -- the source side of the trap CLAUDE.md names for
+    footage. What an editor does with a bed that runs short is start it
+    again, so a piece that outlasts its file restarts at the same section
+    cue and plays on. The renderer crossfades contiguous cues by their own
+    fade rows, so the seam is a crossfade rather than a click.
+
+    A track with no known duration, or a section cue already at or past its
+    end, cannot be looped and comes back as one over-claiming piece, which
+    ``_overrun_note`` and ``_segment_problems`` then report.
+    """
+    room = (float(duration) - src_in) if duration else 0.0
+    if room <= 0 or length <= room + 1e-6:
+        return [(length, src_in)]
+    pieces = []
+    remaining = length
+    while remaining > 1e-6:
+        take = min(remaining, room)
+        pieces.append((take, src_in))
+        remaining -= take
+    return pieces
 
 
 def _segments_for_act(act_scenes: Sequence[Scene], assignment: SceneAssignment,
@@ -1102,9 +1147,10 @@ def _segments_for_act(act_scenes: Sequence[Scene], assignment: SceneAssignment,
     two chances to disagree about what the map says; the map says it once.
 
     ``src_out`` is never capped at the track's own duration -- see
-    ``_overrun_note`` -- so a scene that outlasts what is left of its
-    section's piece is named in the returned list rather than silently
-    given less source than it actually claims.
+    ``_overrun_note``. A run that outlasts what is left of its track is
+    covered by looping the same section cue (``_loop_spans``) rather than by
+    claiming source the file does not hold, and the loop is named in the
+    returned list so the report says the bed repeated.
     """
     runs: list[dict[str, Any]] = []
     for sc in act_scenes:
@@ -1133,15 +1179,19 @@ def _segments_for_act(act_scenes: Sequence[Scene], assignment: SceneAssignment,
             continue
         track = by_id[r["state"][0]]
         src_in = float(section_of[r["state"]]["start_s"])
-        src_out = src_in + length
-        note = _overrun_note(f"scene {r['last_scene_id']}", track, src_out)
+        pieces = _loop_spans(src_in, length, track.duration_s)
+        note = _overrun_note(f"scene {r['last_scene_id']}", track, src_in + length,
+                             looped=len(pieces) > 1)
         if note:
             overruns.append(note)
-        segments.append({
-            "track_id": track.track_id, "title": track.title, "artist": track.artist,
-            "t_in": round(t0 - t_start, 3), "t_end": round(t1 - t_start, 3),
-            "src_in": round(src_in, 3), "src_out": round(src_out, 3),
-        })
+        cursor = t0
+        for take, piece_in in pieces:
+            segments.append({
+                "track_id": track.track_id, "title": track.title, "artist": track.artist,
+                "t_in": round(cursor - t_start, 3), "t_end": round(cursor + take - t_start, 3),
+                "src_in": round(piece_in, 3), "src_out": round(piece_in + take, 3),
+            })
+            cursor += take
     return segments, overruns
 
 
@@ -1236,13 +1286,21 @@ def _act0_entry(act0_span: tuple[float, float], act4: Mapping[str, Any],
         seg = act4["segments"][-1]
         swell_src = seg["src_in"]
     track = by_id[seg["track_id"]]
-    src_out = swell_src + length
-    segment = {
-        "track_id": track.track_id, "title": track.title, "artist": track.artist,
-        "t_in": 0.0, "t_end": round(length, 3),
-        "src_in": round(swell_src, 3), "src_out": round(src_out, 3),
-    }
-    return _act_entry(0, None, [segment], t_start, t_end, by_id), _overrun_note("act 0", track, src_out)
+    # The cold open is the likeliest place in the film to run out of track:
+    # it starts at the swell, which is by definition late in the piece. Same
+    # treatment as a scene's run -- loop from the swell rather than claim
+    # source the file does not hold (``_loop_spans``).
+    pieces = _loop_spans(swell_src, length, track.duration_s)
+    segments, cursor = [], 0.0
+    for take, piece_in in pieces:
+        segments.append({
+            "track_id": track.track_id, "title": track.title, "artist": track.artist,
+            "t_in": round(cursor, 3), "t_end": round(cursor + take, 3),
+            "src_in": round(piece_in, 3), "src_out": round(piece_in + take, 3),
+        })
+        cursor += take
+    return (_act_entry(0, None, segments, t_start, t_end, by_id),
+            _overrun_note("act 0", track, swell_src + length, looped=len(pieces) > 1))
 
 
 def _callback_bonus_applied(scenes: Sequence[Scene], assignment: SceneAssignment,
