@@ -187,7 +187,7 @@ def _tracks(conn) -> list[music_mod.Track]:
             key_est=r["key_est"], energy_mean=float(r["energy_mean"] or 0.0),
             energy_p95=float(r["energy_p95"] or 0.0), energy_p10=float(r["energy_p10"] or 0.0),
             centroid=float(r["centroid"] or 0.0), onset_rate=float(r["onset_rate"] or 0.0),
-            assigned_act=r["assigned_act"])
+            artist=r["artist"], assigned_act=r["assigned_act"])
     for r in conn.execute("SELECT * FROM music_sections ORDER BY track_id, start_s"):
         if r["track_id"] in by_id:
             by_id[r["track_id"]].sections.append(
@@ -1622,7 +1622,7 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
     log.info("S07 rendering %d of %d slot(s) to %s", len(usable), len(rows), out)
     log.debug("S07 %s", render_mod.describe(cmd))
     _raise_fd_limit(cmd.count("-i"))
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = render_mod.run_render(cmd, out)
     if proc.returncode != 0:
         log.error("S07 render failed: %s", (proc.stderr or "")[-600:])
         return {"error": (proc.stderr or "")[-600:], "n_slots": len(usable)}
