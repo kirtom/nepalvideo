@@ -94,6 +94,34 @@ def test_an_older_db_gains_the_voice_spine_columns(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM story_beats").fetchone()[0] == 0
 
 
+def test_a_music_track_round_trips_its_artist(tmp_path):
+    """The spec's Act 5 callback is "the same artist or key as Act 1", and
+    the artist was parsed from the file's tags, logged by S02.7 and then
+    dropped: the table had no column for it, so the cut rebuilt every Track
+    with artist=None and the stronger half of that bonus read 0.0. An older
+    database gains the column and the row survives -- upsert never removes,
+    so the next S02.7 fills it."""
+    import sqlite3
+    path = tmp_path / "old.sqlite"
+    raw = sqlite3.connect(path)
+    raw.executescript("CREATE TABLE music_tracks (track_id TEXT PRIMARY KEY, s3_key TEXT, "
+                      "title TEXT, duration_s REAL, tempo_bpm REAL, key_est TEXT, "
+                      "energy_mean REAL, energy_p95 REAL, energy_p10 REAL, centroid REAL, "
+                      "onset_rate REAL, assigned_act INTEGER);")
+    raw.execute("INSERT INTO music_tracks(track_id, title) VALUES ('t1','Glacier')")
+    raw.commit()
+    raw.close()
+    conn = db.init(path)
+    assert conn.execute("SELECT artist FROM music_tracks").fetchone()["artist"] is None
+    db.upsert(conn, "music_tracks", ["track_id"],
+              [{"track_id": "t1", "s3_key": "raw/music/a.mp3", "title": "Glacier",
+                "artist": "Hildur", "duration_s": 210.0, "tempo_bpm": 88.0, "key_est": "C",
+                "energy_mean": 0.1, "energy_p95": 0.2, "energy_p10": 0.05,
+                "centroid": 1100.0, "onset_rate": 1.4, "assigned_act": None}])
+    row = conn.execute("SELECT artist, title FROM music_tracks WHERE track_id='t1'").fetchone()
+    assert (row["artist"], row["title"]) == ("Hildur", "Glacier")
+
+
 def test_a_fresh_db_has_the_picture_and_audio_tables(tmp_path):
     conn = db.init(tmp_path / "n.sqlite")
     ordered_cols = tuple(r[1] for r in conn.execute("PRAGMA table_info(timeline)"))

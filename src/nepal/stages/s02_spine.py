@@ -510,7 +510,10 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
 
     db.upsert(conn, "music_tracks", ["track_id"], [{
         "track_id": t.track_id, "s3_key": t.s3_key, "title": t.title,
-        "duration_s": t.duration_s, "tempo_bpm": t.tempo_bpm, "key_est": t.key_est,
+        # Written, not just logged: S05 rebuilds its Tracks from this table,
+        # and the Act 5 callback is scored on the artist.
+        "artist": t.artist, "duration_s": t.duration_s,
+        "tempo_bpm": t.tempo_bpm, "key_est": t.key_est,
         "energy_mean": t.energy_mean, "energy_p95": t.energy_p95,
         "energy_p10": t.energy_p10, "centroid": t.centroid,
         "onset_rate": t.onset_rate, "assigned_act": None,

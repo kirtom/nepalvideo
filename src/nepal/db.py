@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS music_tracks (
   track_id    TEXT PRIMARY KEY,
   s3_key      TEXT,
   title       TEXT,
+  artist      TEXT,
   duration_s  REAL,
   tempo_bpm   REAL,
   key_est     TEXT,
@@ -300,6 +301,12 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # Set by the deterministic filter (section 4.1); has_speech is 0 for
     # every downstream purpose when this is 1.
     ("shots", "hallucinated", "INTEGER"),
+    # The spec's Act 5 callback is "the same artist or key as Act 1", and the
+    # artist was read from the file's tags, logged, and then dropped: the
+    # table had no column for it, so every Track rebuilt for the cut carried
+    # artist=None and the strongest half of that bonus scored 0.0 on the
+    # real film.
+    ("music_tracks", "artist", "TEXT"),
 )
 
 
