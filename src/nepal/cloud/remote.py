@@ -81,20 +81,38 @@ class Remote:
         if start and st.state in ("RUNNING", "STAGING", "PROVISIONING"):
             hours = max(0.0, (datetime.now(timezone.utc) - start).total_seconds() / 3600)
         elif start and local_since and st.last_stop and st.last_stop > start:
-            self._book(led, (st.last_stop - start).total_seconds() / 3600,
-                       note=f"stopped at {st.last_stop.isoformat(timespec='seconds')} "
-                            f"without `down`")
+            if not self._booked(led, start):
+                self._book(led, (st.last_stop - start).total_seconds() / 3600, start,
+                           note=f"stopped at {st.last_stop.isoformat(timespec='seconds')} "
+                                f"without `down`")
             prof.pop("up_since", None)
             self._save(state)
         running = hours * self.profile.usd_per_h
         return {"status": st, "ledger": led, "booked": led.total(), "unbooked_h": hours,
                 "unbooked_usd": running, "since": start, "total": led.total() + running}
 
-    def _book(self, led: spend.Ledger, hours: float, *, note: str = "") -> None:
+    @staticmethod
+    def _session(start: datetime) -> str:
+        return f"session from {start.isoformat(timespec='seconds')}"
+
+    def _booked(self, led: spend.Ledger, start: datetime) -> bool:
+        """Has this instance start been booked already?
+
+        remote_state.json lives under work/reports, which rsyncs in both
+        directions, so a `pull` copies back the `up_since` that booking
+        popped and the same span would be booked again after every pull.
+        The ledger is append-only and travels the same way by union, so it
+        is the only record that cannot be resurrected: one entry per
+        instance start, and the start is named in the entry.
+        """
+        return any(self._session(start) in e.detail for e in led.entries)
+
+    def _book(self, led: spend.Ledger, hours: float, start: datetime,
+              *, note: str = "") -> None:
         led.record(f"gce:{self.profile_key}", hours * self.profile.usd_per_h,
                    detail=f"{hours:.2f} h {self.profile.machine_type} at "
-                          f"{self.profile.usd_per_h} USD/h (estimate)"
-                          + (f", {note}" if note else ""))
+                          f"{self.profile.usd_per_h} USD/h (estimate), "
+                          f"{self._session(start)}" + (f", {note}" if note else ""))
         # The box guards the API spend against this total, and it reads
         # the ledger from the bucket at its next run: push the entry now,
         # not at the next `remote push` somebody remembers to make.
@@ -154,7 +172,9 @@ class Remote:
         every box created before the watchdog existed, including the nepal-cpu
         that billed the 104 idle hours.
         """
-        script = watchdog.install_sh(repo=self.remote_repo)
+        script = watchdog.install_sh(
+            repo=self.remote_repo,
+            period_min=int(self.cfg.get("cloud.gcp.idle_check_min")))
         # A heredoc rather than a quoted argument: the script is multi-line
         # and ssh hands the whole --command string to the login shell anyway.
         cmd = f"sudo bash -s <<'NEPAL_WATCHDOG_EOF'\n{script}\nNEPAL_WATCHDOG_EOF\n"
@@ -182,9 +202,14 @@ class Remote:
         # here is a box still running, from the start GCP reports.
         acct = self.account()
         state = self._state()
-        since = state.get(self.profile_key, {}).pop("up_since", None)
-        if since and acct["unbooked_h"]:
-            self._book(acct["ledger"], acct["unbooked_h"])
+        state.setdefault(self.profile_key, {}).pop("up_since", None)
+        # Not conditional on the local stamp: account() counted these hours
+        # from GCP's own start, and a state file that lost `up_since` (or
+        # never had it, on a box started from another machine) would
+        # otherwise stop this box for free. Booking twice is what the
+        # ledger check prevents.
+        if acct["unbooked_h"] and not self._booked(acct["ledger"], acct["since"]):
+            self._book(acct["ledger"], acct["unbooked_h"], acct["since"])
         self._save(state)
         args = (gce.delete_args if delete else gce.stop_args)(
             self.profile.name, project=self.project, zone=self.zone)

@@ -7,14 +7,24 @@ of 25. The thing that failed was the session, so the fix cannot live in
 one -- it runs on the box, as a systemd timer, and outlives whatever
 started it.
 
-Two conditions, both required, because either alone is wrong. **No job
-process**: every command arrives as `bash -c ... .venv/bin/...`, so a
-command line naming the venv is work in progress (this module runs from
-that venv too, hence the exclusion). But a stage between two sub-steps has
-no venv process for a second. **No recent output**: the stamp `remote
-exec` touches around every command, and the log a long job appends to as
-it goes. But a job launched detached returns at once and leaves a stamp
-that is hours old while it works. Together they are right in both cases.
+Three bounds, because each of them alone is wrong.
+
+**No job process**: every command arrives as `bash -c ... .venv/bin/...`,
+so a command line naming the venv is work in progress (this module runs
+from that venv too, hence the exclusion). But a stage between two
+sub-steps has no venv process for a second.
+
+**No recent output**: the stamp `remote exec` touches around every
+command, and the log a long job appends to as it goes. But a job launched
+detached returns at once and leaves a stamp that is hours old while it
+works -- and a box that has just restarted carries a stamp from the
+session before it, days old, while the bootstrap is still inside the raw/
+rsync with no venv process to see. So the quiet is measured from this
+boot at the earliest.
+
+**A job that writes nothing for hours is wedged, not working**: S03.1
+takes three and a half hours and logs per recording. Without that bound a
+hung process is an unbounded bill with a reassuring cause.
 
 `shutdown -h now` inside the guest leaves the instance TERMINATED, which
 is exactly what `remote up` starts again; it stops the CPU bill and keeps
@@ -27,9 +37,10 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -60,28 +71,37 @@ def jobs(cmdlines: Iterable[str]) -> list[str]:
     return [c for c in cmdlines if JOB_MARK in c and SELF_MARK not in c]
 
 
-def decide(*, jobs_running: int, last_activity: datetime | None, now: datetime,
-           idle_stop_min: float) -> tuple[bool, str]:
-    """Stop, and why -- or stay up, and why. The whole decision, no I/O."""
+def decide(*, jobs_running: int, last_activity: datetime | None, boot: datetime,
+           now: datetime, idle_stop_min: float,
+           stuck_job_min: float) -> tuple[bool, str]:
+    """Stop, and why -- or stay up, and why. The whole decision, no I/O.
+
+    The quiet is measured from the newest of the last activity and this
+    boot: a restarted box inherits a stamp from the session before it, and
+    an activity stamp older than the machine it is on means nothing.
+    """
+    last = max(last_activity, boot) if last_activity else boot
+    quiet_min = (now - last).total_seconds() / 60
     if jobs_running:
+        if quiet_min >= float(stuck_job_min):
+            return True, (f"{jobs_running} job process(es) but nothing written for "
+                          f"{quiet_min:.0f} min (limit {float(stuck_job_min):.0f}): "
+                          f"wedged, not working")
         return False, f"{jobs_running} job process(es) running"
-    if last_activity is None:
-        # Nothing has ever run here and nothing says when the box woke: an
-        # unexplained box is not one to stop from a guess.
-        return False, "no activity stamp yet"
-    idle_min = (now - last_activity).total_seconds() / 60
-    if idle_min < float(idle_stop_min):
-        return False, f"idle {idle_min:.0f} min of {float(idle_stop_min):.0f}"
-    return True, (f"idle {idle_min:.0f} min (limit {float(idle_stop_min):.0f}), no job "
-                  f"running, last activity {last_activity.isoformat(timespec='seconds')}")
+    if quiet_min < float(idle_stop_min):
+        return False, f"idle {quiet_min:.0f} min of {float(idle_stop_min):.0f}"
+    return True, (f"idle {quiet_min:.0f} min (limit {float(idle_stop_min):.0f}), no job "
+                  f"running, last activity {last.isoformat(timespec='seconds')}")
 
 
-def install_sh(*, repo: str, period_min: int = 5) -> str:
+def install_sh(*, repo: str, period_min: int) -> str:
     """The shell that installs the timer, rendered rather than shipped as a
     file: `remote up` pipes it over ssh to a box that is already running,
-    and the bootstrap runs the same text at boot. The timeout is not in
-    here -- the watchdog reads it from the config in the checkout, so
-    changing it needs no reinstall."""
+    and the bootstrap runs the same text at boot. The timeouts are not in
+    here -- the watchdog reads them from the config in the checkout at
+    every tick, which is also why the service names a WorkingDirectory:
+    `Config.load()` finds pipeline.yaml by walking up from where it is
+    run, and a systemd unit starts in /."""
     return f"""set -eu
 cat > /etc/systemd/system/{UNIT}.service <<'UNIT_EOF'
 [Unit]
@@ -89,16 +109,16 @@ Description=nepal: stop this box when nobody is using it
 
 [Service]
 Type=oneshot
-WorkingDirectory={repo}
-ExecStart={repo}/.venv/bin/python -m nepal.cloud.watchdog
+WorkingDirectory="{repo}"
+ExecStart="{repo}/.venv/bin/python" -m nepal.cloud.watchdog
 UNIT_EOF
 cat > /etc/systemd/system/{UNIT}.timer <<'UNIT_EOF'
 [Unit]
-Description=nepal idle check, every {period_min} min
+Description=nepal idle check, every {int(period_min)} min
 
 [Timer]
-OnBootSec={period_min}min
-OnUnitActiveSec={period_min}min
+OnBootSec={int(period_min)}min
+OnUnitActiveSec={int(period_min)}min
 
 [Install]
 WantedBy=timers.target
@@ -122,6 +142,17 @@ def _cmdlines() -> list[str]:
     return out
 
 
+def boot_time(now: datetime | None = None) -> datetime:
+    """When this boot started. Unreadable uptime reads as "just now", which
+    keeps the box up: a watchdog that cannot tell how old the machine is
+    must not be the one to stop it."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        return now - timedelta(seconds=float(Path("/proc/uptime").read_text().split()[0]))
+    except (OSError, ValueError, IndexError):
+        return now
+
+
 def _activity_files(work_root: Path) -> list[Path]:
     reports = Path(work_root) / "reports"
     return [stamp_path(work_root), reports / "remote_jobs.log",
@@ -131,6 +162,13 @@ def _activity_files(work_root: Path) -> list[Path]:
 def last_activity(work_root: Path) -> datetime | None:
     times = [p.stat().st_mtime for p in _activity_files(work_root) if p.exists()]
     return datetime.fromtimestamp(max(times), timezone.utc) if times else None
+
+
+def touch(work_root: Path) -> Path:
+    p = stamp_path(work_root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.touch()
+    return p
 
 
 def _note(work_root: Path, line: str) -> None:
@@ -149,36 +187,78 @@ def _note(work_root: Path, line: str) -> None:
 
 
 def _push(cfg, work_root: Path) -> None:
-    """The bucket, before the box goes: the reason above is only useful if
-    the next `remote pull` can read it."""
+    """The bucket, before the box goes: a detached job's output and the
+    reason above are only real once they are off this disk.
+
+    The snap gcloud is on the login PATH and not on a systemd unit's, so
+    the binary is resolved rather than named -- a bare `gcloud` here was a
+    FileNotFoundError swallowed into silence, and 340 MB of a stage's
+    output would have gone with the box.
+    """
     from nepal.cloud import sync
     bucket = str(cfg.get("cloud.gcp.bucket")).rstrip("/")
     user = str(cfg.get("cloud.gcp.ssh_user", "nepal"))
-    args = ["gcloud", *sync.rsync_args(str(work_root), f"{bucket}/work")]
+    exe = shutil.which("gcloud") or "/snap/bin/gcloud"
+    args = [exe, *sync.rsync_args(str(work_root), f"{bucket}/work")]
     if os.geteuid() == 0:
         args = ["sudo", "-u", user, *args]      # the user whose gcloud is logged in
     try:
-        subprocess.run(args, capture_output=True, timeout=PUSH_TIMEOUT_S)
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=PUSH_TIMEOUT_S)
     except (OSError, subprocess.SubprocessError) as exc:
-        log.warning("watchdog: push before stop failed: %s", exc)
+        log.error("watchdog: push before stop failed: %s", exc)
+        return
+    if proc.returncode != 0:
+        log.error("watchdog: push before stop failed (rc %s): %s",
+                  proc.returncode, (proc.stderr or proc.stdout or "")[-400:].strip())
+
+
+def _shutdown() -> tuple[int, str]:
+    exe = shutil.which("shutdown") or "/sbin/shutdown"
+    try:
+        proc = subprocess.run([exe, "-h", "now"], capture_output=True, text=True)
+    except OSError as exc:
+        return 127, str(exc)
+    return proc.returncode, (proc.stderr or proc.stdout or "").strip()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     from nepal.config import Config
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    argv = list(sys.argv[1:] if argv is None else argv)
     cfg = Config.load()
     work_root = cfg.work_root
+    # The bootstrap asks for these two rather than spelling them out, so the
+    # unit it installs and the stamp it writes cannot drift from the ones
+    # this module renders and reads.
+    if argv[:1] == ["install"]:
+        print(install_sh(repo=str(cfg.get("cloud.gcp.remote_repo")),
+                         period_min=int(cfg.get("cloud.gcp.idle_check_min"))))
+        return 0
+    if argv[:1] == ["touch"]:
+        print(touch(work_root))
+        return 0
     now = datetime.now(timezone.utc)
     stop, why = decide(jobs_running=len(jobs(_cmdlines())),
-                       last_activity=last_activity(work_root), now=now,
-                       idle_stop_min=float(cfg.get("cloud.gcp.idle_stop_min")))
+                       last_activity=last_activity(work_root), boot=boot_time(now), now=now,
+                       idle_stop_min=float(cfg.get("cloud.gcp.idle_stop_min")),
+                       stuck_job_min=float(cfg.get("cloud.gcp.stuck_job_min")))
     log.info("watchdog: %s (%s)", "stopping" if stop else "staying up", why)
     if not stop:
         return 0
-    _note(work_root, f"--- idle-stopped at {now.isoformat(timespec='seconds')}: {why}")
+    # Requested, not done: the box is claimed to be stopped only once
+    # something has actually stopped it.
+    _note(work_root, f"--- idle stop requested at {now.isoformat(timespec='seconds')}: {why}")
     _push(cfg, work_root)
-    subprocess.run(["shutdown", "-h", "now"], capture_output=True)
-    return 0
+    rc, err = _shutdown()
+    if rc == 0:
+        log.info("watchdog: shutdown accepted, the box is going down")
+        return 0
+    log.error("watchdog: shutdown failed (rc %s): %s", rc, err)
+    _note(work_root, f"--- idle stop FAILED at "
+                     f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}: "
+                     f"rc {rc} {err}")
+    _push(cfg, work_root)
+    return 1
 
 
 if __name__ == "__main__":

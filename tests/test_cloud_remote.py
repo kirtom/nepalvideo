@@ -7,7 +7,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 import pytest
 
-from nepal.cloud import remote, spend
+from nepal.cloud import remote, spend, watchdog
 from nepal.config import Config
 
 FAKE = r'''#!/usr/bin/env python3
@@ -56,6 +56,7 @@ def env(tmp_path, monkeypatch):
             "remote_data_root": "/data/projects/nepal_data",
             "remote_work_root": "/data/projects/nepal_work",
             "remote_repo": "/data/projects/nepalvideo", "ready_timeout_s": 2,
+            "idle_stop_min": 30, "idle_check_min": 5, "stuck_job_min": 240,
             "profiles": {"cpu": {"name": "nepal-cpu", "machine_type": "e2-standard-8",
                                  "disk_gb": 60, "image_family": "f", "image_project": "ip",
                                  "accelerator": None, "spot": True, "usd_per_h": 0.5}}}},
@@ -167,6 +168,13 @@ def test_a_box_that_stopped_without_down_is_booked_at_the_next_command(env):
     assert "up_since" not in json.loads(r.state_path.read_text())["cpu"]
     r.account()                                        # and not a second time
     assert len(spend.ledger(cfg).entries) == 1
+    # remote_state.json rsyncs both ways, so a `pull` brings the popped
+    # `up_since` back from the bucket. The ledger is what remembers.
+    state = json.loads(r.state_path.read_text())
+    state["cpu"]["up_since"] = "2026-09-24T00:00:00+00:00"
+    r.state_path.write_text(json.dumps(state))
+    r.account()
+    assert len(spend.ledger(cfg).entries) == 1
 
 
 def test_up_installs_the_idle_watchdog_on_a_box_that_is_already_running(env):
@@ -197,6 +205,14 @@ def test_run_wraps_the_command_with_sync_and_branch_reset(env):
     touch = "touch /data/projects/nepal_work/reports/.last_activity"
     assert cmd.count(touch) == 2
     assert cmd.index(touch) < cmd.index("nepal s03") < cmd.rindex(touch)
+
+
+def test_the_wrapped_command_still_looks_like_a_job_to_the_watchdog(env):
+    """The watchdog decides a box is busy by finding the venv in a command
+    line. A `_wrap` that stopped naming it would leave every long run
+    invisible to the thing that stops the box."""
+    cfg, tmp = env
+    assert watchdog.JOB_MARK in remote.Remote(cfg, "cpu")._wrap("x")
 
 
 def test_push_and_pull_issue_one_rsync_per_plan_entry(env):

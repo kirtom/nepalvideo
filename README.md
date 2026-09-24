@@ -568,6 +568,20 @@ config names (`/data/projects/nepal_data`, `/data/projects/nepal_work`), so
 what `up` waits for. On the `gpu` profile it also installs the NVIDIA driver
 with Google's installer if `nvidia-smi` is absent.
 
+**The box stops itself.** A systemd timer on the box (`nepal-idle`, installed
+by the bootstrap and by `up`) checks every `cloud.gcp.idle_check_min` and runs
+`shutdown -h now` when nothing from the venv is running and nothing has been
+written to the activity stamp or the job logs for `cloud.gcp.idle_stop_min`
+(30) — or when a job process has written nothing for `cloud.gcp.stuck_job_min`
+(240), which is wedged rather than working. The quiet is measured from this
+boot at the earliest, so a box that has just restarted is not stopped by a
+stamp from the session before it. **An interactive `nepal remote ssh` does not
+count as activity**, deliberately: the incident this exists for was a session
+that stopped talking, and a shell held open by a laptop that went to sleep is
+the same box burning the same money. Start long work with `run` or `exec`,
+which stamp the box before and after. The hours land on the ledger at the next
+`nepal remote` command, from the instance's own `lastStopTimestamp`.
+
 **Credentials.** The operator's `gcloud` login drives everything from here;
 nothing is stored in the repo. The Anthropic key reaches the box as the
 instance metadata attribute `anthropic-api-key`, which the startup script
@@ -575,13 +589,18 @@ exports into the `nepal` user's profile; set it with
 `gcloud compute instances add-metadata nepal-cpu --metadata anthropic-api-key=…`.
 
 **The ledger.** `work/reports/spend/` holds one small JSON per entry: every
-VM hour (written by `down`, at the profile's estimated price, and pushed to
-the bucket at once) and every paid API call (written on the box by the stage
-that made it, from the response's `usage`). One file per entry because two
+VM hour (written by `down`, or by the next `nepal remote` command after a box
+stopped without one, at the profile's estimated price, and pushed to the
+bucket at once) and every paid API call (written on the box by the stage
+that made it, from the response's `usage`). A box that is up has hours no
+entry holds yet, so `remote status` counts them from the instance's
+`lastStartTimestamp` and prints them apart: `booked 36.56 + running 0.14
+(0.5 h since …) = 36.71 of 45 USD`. The ceiling is checked against that live
+total, not the booked one. One file per entry because two
 hosts write the ledger and the bucket carries it by rsync both ways; a
 single file would be clobbered by whichever host pushed its older copy
 last. `up` and every paid stage ask it first and refuse past
-`cloud.spend_ceiling_usd` (25). The GCP billing budget ("nepal", 60 USD,
+`cloud.spend_ceiling_usd` (45). The GCP billing budget ("nepal", 60 USD,
 alerts at 50% and 80%) is the warning behind the refusal.
 
 **A host that holds part of the corpus.** The box never sees the 60 GB of

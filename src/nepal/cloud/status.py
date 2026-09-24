@@ -67,9 +67,17 @@ def _spend(ledger: spend.Ledger, state_path: Path, now: datetime) -> dict[str, A
         start = (prof or {}).get("up_since")
         if not start:
             continue
-        hours = max(0.0, (now - datetime.fromisoformat(start)).total_seconds() / 3600)
+        try:
+            hours = max(0.0, (now - datetime.fromisoformat(start)).total_seconds() / 3600)
+        except (TypeError, ValueError):
+            # A stamp this cannot read is worth a word on the page, not the
+            # page: `status-page` runs at the end of every remote run and
+            # its output is discarded, so an exception here is a page that
+            # silently stops being written.
+            since = since or "unknown"
+            continue
         running += hours * float(prof.get("usd_per_h", 0.0))
-        since = min(since, start) if since else start
+        since = min(since, start) if since and since != "unknown" else start
     return {"booked_usd": round(ledger.total(), 2), "running_usd": round(running, 2),
             "running_since": since, "total_usd": round(ledger.total() + running, 2)}
 

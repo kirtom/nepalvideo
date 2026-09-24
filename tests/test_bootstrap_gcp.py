@@ -59,10 +59,12 @@ def test_every_boot_installs_the_idle_watchdog_and_stamps_the_boot():
     after the bucket rsync, or the clock would start at whatever mtime came
     back with work/."""
     s = SCRIPT.read_text()
-    assert "from nepal.cloud import watchdog; print(watchdog.install_sh(" in s
-    assert watchdog.touch_sh("/data/projects/nepal_work") in s
+    # the module renders its own unit and touches its own stamp: nothing the
+    # watchdog reads is spelled out here to drift from it
+    assert f"-m {watchdog.__name__} install | bash" in s
+    assert f"-m {watchdog.__name__} touch" in s
     assert s.index("rsync --recursive \"$BUCKET/work\" $ROOT/nepal_work") < \
-        s.index(watchdog.touch_sh("/data/projects/nepal_work"))
+        s.index(f"-m {watchdog.__name__} touch")
 
 
 def test_a_box_with_state_pushes_work_on_boot_rather_than_pulling():

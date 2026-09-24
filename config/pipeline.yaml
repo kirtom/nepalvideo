@@ -584,6 +584,16 @@ cloud:
     # render and decide what to do next, short enough that a box nobody comes
     # back to costs cents rather than a day's budget.
     idle_stop_min: 30
+    # How often the watchdog looks. A sixth of the timeout: the cost of a
+    # tick is a process list and three stat calls, and the cost of a coarse
+    # one is billed minutes.
+    idle_check_min: 5
+    # A job process that has written nothing for this long is wedged, not
+    # working, and the box stops anyway. S03.1 is the longest run here --
+    # three and a half hours -- and it logs per recording, so four hours of
+    # silence is not a stage taking its time. Without this bound a hung
+    # process is an unbounded bill with a reassuring explanation.
+    stuck_job_min: 240
 
 # -- S03.5b the hallucination filter (Film v2 section 4.1) ------------------
 # Whisper invents text where there is none to hear: subtitle credits, "thanks
