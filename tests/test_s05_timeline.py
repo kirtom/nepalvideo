@@ -494,6 +494,22 @@ def test_the_music_maps_problems_are_read_before_the_acts_are_cut_against_it(tmp
     conn.close()
 
 
+def test_a_music_track_with_no_measured_duration_is_named_by_the_cue_step(tmp_path, caplog):
+    """The stage selected `WHERE duration_s IS NOT NULL`, so the one track
+    whose cues could not be bounded was also the one track nothing said a
+    word about -- it got exactly the unbounded stretch the bound exists to
+    stop. The row comes through with its null now, and the step names it."""
+    cfg = _cfg(tmp_path)
+    conn = _seed(cfg)
+    s05_cut.build_timeline(cfg, conn)
+    conn.execute("UPDATE music_tracks SET duration_s = NULL WHERE track_id = 't1'")
+    with caplog.at_level(logging.WARNING, logger="nepal.stages.s05_cut"):
+        s05_cut.build_cues(cfg, conn)
+    assert "music track t1 has no measured duration" in caplog.text
+    assert "music track t2" not in caplog.text, "only the track that is actually missing one"
+    conn.close()
+
+
 def _phone_slot(i, shot_id, **fields):
     s = s05_cut._new_slot(kind="video", act=5, shot_id=shot_id, src_in=0.0, **fields)
     return s05_cut._set_length(s, 10.0 * i, 10.0 * i + 4.0)

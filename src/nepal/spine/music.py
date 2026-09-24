@@ -644,6 +644,11 @@ def build_music_map(tracks: Sequence[Track], assignment: Assignment,
 # tiling map may legitimately miss by.
 _SEGMENT_TOL_S = 2e-3
 
+# The fallback for ``music.loop_min_piece_s`` -- see that key for why 8 s.
+# The stages read the config; this is here so a map built in a test, or by
+# any caller that has no Config to hand, still gets a floor rather than none.
+_LOOP_MIN_PIECE_S = 8.0
+
 
 def _segment_problems(a: Mapping[str, Any], track_s: Mapping[str, float] | None = None) -> list[str]:
     """One act's segments must tile it: from 0 to the act's length, no gap
@@ -663,6 +668,13 @@ def _segment_problems(a: Mapping[str, Any], track_s: Mapping[str, float] | None 
     ``src/`` reads back; ``track_s`` (track_id -> duration_s, absent in the
     pure tests that build maps without a library) makes it a reported
     problem the run's report carries.
+
+    A track present in ``track_s`` with no duration is reported in its own
+    right. The stages used to filter those out before the check ever saw
+    them, which meant the one track nothing could check was also the one
+    track nothing said anything about -- it got the pre-fix over-claim in
+    silence. There is nothing to loop against and nothing to compare, so the
+    only honest output is to say so, once per track.
     """
     segments = a.get("segments") or []
     if not segments:
@@ -670,6 +682,7 @@ def _segment_problems(a: Mapping[str, Any], track_s: Mapping[str, float] | None 
     act_len = float(a.get("t_end", 0.0)) - float(a.get("t_start", 0.0))
     out: list[str] = []
     cursor = 0.0
+    unmeasured: set[str] = set()
     for i, seg in enumerate(segments):
         t_in, t_end = float(seg["t_in"]), float(seg["t_end"])
         if abs(t_in - cursor) > _SEGMENT_TOL_S:
@@ -679,7 +692,12 @@ def _segment_problems(a: Mapping[str, Any], track_s: Mapping[str, float] | None 
             out.append(f"act {a['act']}: segment {i} ({seg.get('track_id')}) plays for "
                        f"{t_end - t_in:.3f}s of film from {float(seg['src_out']) - float(seg['src_in']):.3f}s "
                        f"of track -- the map would over- or under-report the source")
-        duration = (track_s or {}).get(seg.get("track_id"))
+        tid = seg.get("track_id")
+        duration = (track_s or {}).get(tid)
+        if track_s is not None and tid in track_s and not duration and tid not in unmeasured:
+            unmeasured.add(tid)
+            out.append(f"track {tid} has no measured duration: its claims cannot be checked -- "
+                       f"ffmpeg stops where the file ends and nothing here knows where that is")
         if duration and float(seg["src_out"]) > float(duration) + _SEGMENT_TOL_S:
             out.append(f"act {a['act']}: segment {i} ({seg.get('track_id')}) plays to "
                        f"{float(seg['src_out']):.1f}s of a {float(duration):.1f}s track -- "
@@ -1082,22 +1100,41 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
     return SceneAssignment(by_scene, round(total_cost, 4), note)
 
 
-def _overrun_note(label: str, track: Track, src_out: float, *, looped: bool = False) -> str | None:
+def _overrun_note(label: str, track: Track, src_out: float, *,
+                  pieces: Sequence[tuple[float, float]] | None = None,
+                  src_in: float | None = None) -> str | None:
     """Name it rather than hide it: capping ``src_out`` at the track's own
     length would make ``t_end - t_in`` and ``src_out - src_in`` disagree,
     which is the same "timeline silently over-reports" trap CLAUDE.md already
     names -- just read backwards, as an under-report of source length instead
     of an over-report of footage. So a span is never shortened to fit the
-    file; it is either covered by looping the piece (``looped``) or named
-    here as a claim the file cannot answer."""
-    if track.duration_s and src_out > track.duration_s + 1e-6:
-        return (f"{label}: {track.track_id} needs {src_out - track.duration_s:.1f}s "
-                f"past its {track.duration_s:.1f}s length"
-                + ("; looped from its section" if looped else ""))
-    return None
+    file; it is either covered by looping it or named here as a claim the
+    file cannot answer -- with which origin the loop ran from and how many
+    pieces it took, because a loop from the track's top is a different edit
+    from a loop from the scene's own cue and the note is the only place that
+    difference is written down.
+
+    A track with no measured duration is the one case where nothing can be
+    decided: there is no end to compare the claim against and none to loop
+    from. That is reported rather than passed over -- it is exactly the
+    pre-fix over-claim, and silence about it is how it got shipped once."""
+    if not track.duration_s:
+        return (f"{label}: {track.track_id} claims to {src_out:.1f}s of a track with no "
+                f"measured duration -- unlooped: no duration to loop against")
+    if src_out <= track.duration_s + 1e-6:
+        return None
+    note = (f"{label}: {track.track_id} needs {src_out - track.duration_s:.1f}s "
+            f"past its {track.duration_s:.1f}s length")
+    if not pieces or len(pieces) < 2:
+        return f"{note}; unlooped"
+    origin = pieces[0][1]
+    where = ("its section" if src_in is not None and abs(origin - float(src_in)) <= 1e-6
+             else "the track's start")
+    return f"{note}; looped into {len(pieces)} pieces from {where} at {origin:.1f}s"
 
 
-def _loop_spans(src_in: float, length: float, duration: float | None) -> list[tuple[float, float]]:
+def _loop_spans(src_in: float, length: float, duration: float | None,
+                min_piece: float) -> list[tuple[float, float]]:
     """``length`` seconds of a track from ``src_in``, as (take, its src_in)
     pieces that each fit inside ``duration``.
 
@@ -1109,13 +1146,28 @@ def _loop_spans(src_in: float, length: float, duration: float | None) -> list[tu
     cue and plays on. The renderer crossfades contiguous cues by their own
     fade rows, so the seam is a crossfade rather than a click.
 
-    A track with no known duration, or a section cue already at or past its
-    end, cannot be looped and comes back as one over-claiming piece, which
-    ``_overrun_note`` and ``_segment_problems`` then report.
+    A loop origin must leave room for a piece worth hearing. Sections come
+    from librosa's agglomerative pass and have no minimum length, and the
+    cold open opens on Act 4's swell, which is late in the piece by
+    definition; a cue a third of a second from the end would tile a 20 s
+    need into sixty-odd sub-second pieces, each carrying a pair of fades
+    clamped to nothing. That is flutter on the soundtrack and sixty more
+    inputs in the mix graph. Under ``min_piece`` the loop runs from the top
+    of the track instead: the section cue is given up, but a bed that plays
+    is worth more than a cue point too short to be heard as one. The piece
+    count is then bounded by ``ceil(length / min_piece)``.
+
+    A track with no measured duration has no end to loop against and comes
+    back as one over-claiming piece, which ``_overrun_note`` and
+    ``_segment_problems`` then report rather than pass over.
     """
-    room = (float(duration) - src_in) if duration else 0.0
-    if room <= 0 or length <= room + 1e-6:
+    if not duration:
         return [(length, src_in)]
+    room = float(duration) - src_in
+    if room > 0 and length <= room + 1e-6:
+        return [(length, src_in)]
+    if room < min_piece:
+        src_in, room = 0.0, float(duration)
     pieces = []
     remaining = length
     while remaining > 1e-6:
@@ -1127,7 +1179,8 @@ def _loop_spans(src_in: float, length: float, duration: float | None) -> list[tu
 
 def _segments_for_act(act_scenes: Sequence[Scene], assignment: SceneAssignment,
                       by_id: dict[str, Track], section_of: dict[tuple[str, str], dict],
-                      t_start: float, t_end: float) -> tuple[list[dict[str, Any]], list[str]]:
+                      t_start: float, t_end: float,
+                      min_piece: float) -> tuple[list[dict[str, Any]], list[str]]:
     """The act's music bed, in the act's own local time -- the same
     convention ``fill_act``/``build_music_map`` use (a cursor from 0 per act;
     ``_act_entry`` adds ``t_start`` back only where film time is actually
@@ -1179,9 +1232,9 @@ def _segments_for_act(act_scenes: Sequence[Scene], assignment: SceneAssignment,
             continue
         track = by_id[r["state"][0]]
         src_in = float(section_of[r["state"]]["start_s"])
-        pieces = _loop_spans(src_in, length, track.duration_s)
+        pieces = _loop_spans(src_in, length, track.duration_s, min_piece)
         note = _overrun_note(f"scene {r['last_scene_id']}", track, src_in + length,
-                             looped=len(pieces) > 1)
+                             pieces=pieces, src_in=src_in)
         if note:
             overruns.append(note)
         cursor = t0
@@ -1268,7 +1321,7 @@ def _last_swell_in_act(act: Mapping[str, Any], by_id: dict[str, Track]
 
 
 def _act0_entry(act0_span: tuple[float, float], act4: Mapping[str, Any],
-               by_id: dict[str, Track]) -> tuple[dict[str, Any], str | None]:
+               by_id: dict[str, Track], min_piece: float) -> tuple[dict[str, Any], str | None]:
     """Act 0 plays the piece Act 4 opens with, starting from Act 4's own
     swell, so the summit music is heard first and recognised when it
     returns (spec section 5.6)."""
@@ -1290,7 +1343,7 @@ def _act0_entry(act0_span: tuple[float, float], act4: Mapping[str, Any],
     # it starts at the swell, which is by definition late in the piece. Same
     # treatment as a scene's run -- loop from the swell rather than claim
     # source the file does not hold (``_loop_spans``).
-    pieces = _loop_spans(swell_src, length, track.duration_s)
+    pieces = _loop_spans(swell_src, length, track.duration_s, min_piece)
     segments, cursor = [], 0.0
     for take, piece_in in pieces:
         segments.append({
@@ -1300,7 +1353,7 @@ def _act0_entry(act0_span: tuple[float, float], act4: Mapping[str, Any],
         })
         cursor += take
     return (_act_entry(0, None, segments, t_start, t_end, by_id),
-            _overrun_note("act 0", track, swell_src + length, looped=len(pieces) > 1))
+            _overrun_note("act 0", track, swell_src + length, pieces=pieces, src_in=swell_src))
 
 
 def _callback_bonus_applied(scenes: Sequence[Scene], assignment: SceneAssignment,
@@ -1331,7 +1384,8 @@ def music_map_from_scenes(scenes: Sequence[Scene], assignment: SceneAssignment,
                           tracks: Sequence[Track], *,
                           act_spans: Mapping[int, tuple[float, float]],
                           silence_s: float,
-                          act0_span: tuple[float, float] | None = None) -> dict[str, Any]:
+                          act0_span: tuple[float, float] | None = None,
+                          loop_min_piece_s: float = _LOOP_MIN_PIECE_S) -> dict[str, Any]:
     """``music_map.json`` in the same shape ``build_music_map`` emits, filled
     from a per-scene assignment instead of a per-act one: every field
     ``check_music_map`` and the audio graph (S06) read is still here, so
@@ -1345,13 +1399,13 @@ def music_map_from_scenes(scenes: Sequence[Scene], assignment: SceneAssignment,
         t_start, t_end = act_spans[act]
         act_scenes = [sc for sc in scenes if sc.act == act]
         segments, seg_overruns = _segments_for_act(act_scenes, assignment, by_id, section_of,
-                                                   t_start, t_end)
+                                                   t_start, t_end, loop_min_piece_s)
         overruns.extend(seg_overruns)
         acts_out.append(_act_entry(act, None, segments, t_start, t_end, by_id))
 
     act4 = next((a for a in acts_out if a["act"] == SUMMIT_ACT), None)
     if act0_span is not None and act4 is not None:
-        act0_entry, act0_overrun = _act0_entry(act0_span, act4, by_id)
+        act0_entry, act0_overrun = _act0_entry(act0_span, act4, by_id, loop_min_piece_s)
         if act0_overrun:
             overruns.append(act0_overrun)
         acts_out.insert(0, act0_entry)

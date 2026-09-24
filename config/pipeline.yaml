@@ -486,6 +486,17 @@ music:
   # went unused. An act shorter than this stays in one piece, so Act 4 keeps the
   # unbroken swell into the silence that the brief asks for.
   max_segment_s: 150
+  # The shortest piece a loop may be cut into. A run longer than what is left
+  # of its track restarts the track rather than ask ffmpeg for audio the file
+  # does not have, and the restart point is the cue the scene was assigned --
+  # but sections have no minimum length and the cold open opens on Act 4's
+  # swell, which is late in the piece by definition. A cue a third of a second
+  # from the end would tile a 20 s need into sixty-odd sub-second pieces, each
+  # with its own pair of fades clamped to nothing: flutter, and sixty more
+  # inputs in the mix. Two crossfades of render.music_xfade_s (2 s) must fit
+  # with music still audible between them. Under this, the loop runs from the
+  # top of the track and the section cue is given up.
+  loop_min_piece_s: 8
   license_mode: personal       # personal | cleared
   # Source of track features: audio files in music/, or a playlist export.
   # Audio is strictly better: it yields real beat grids and swells (which S06

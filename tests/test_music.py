@@ -12,7 +12,7 @@ from nepal.spine.music import (Track, parse_artist_title, estimate_key, mark_swe
                                detect_licence, ACT_WEIGHTS, PITCH_CLASSES,
                                MAJOR_PROFILE, MINOR_PROFILE,
                                assign_scenes, pair_cost, music_map_from_scenes,
-                               SceneAssignment, _segment_problems)
+                               SceneAssignment, _segment_problems, _loop_spans)
 from nepal.spine.scenes import Scene, scene_target
 
 ACT_SPECS = [
@@ -939,6 +939,47 @@ def test_a_looped_run_restarts_at_its_own_section_cue_not_at_the_file():
     assert [(s["t_in"], s["t_end"], s["src_in"], s["src_out"]) for s in segs] == [
         (0.0, 50.0, 50.0, 100.0), (50.0, 100.0, 50.0, 100.0), (100.0, 130.0, 50.0, 80.0)]
     assert _segment_problems(m["acts"][0], {short.track_id: short.duration_s}) == []
+
+
+def test_a_loop_origin_too_close_to_the_end_falls_back_to_the_top_of_the_track():
+    """A section cue is not guaranteed to leave anything behind it: librosa's
+    sections have no minimum length, and the cold open opens on Act 4's
+    swell, which is late in the piece by definition. Looping from a cue 0.3s
+    from the end would cut a 20s need into 67 sub-second pieces, each its own
+    segment carrying two fades clamped to nothing -- flutter on the
+    soundtrack and 67 more inputs in the mix graph."""
+    assert _loop_spans(99.7, 20.0, 100.0, 8.0) == [(20.0, 0.0)], "one piece from the top, not 67"
+    # and where the track is short enough that the top still will not hold it,
+    # the count is ceil(need / room), not ceil(need / whatever the cue left)
+    assert _loop_spans(11.7, 20.0, 12.0, 8.0) == [(12.0, 0.0), (8.0, 0.0)]
+    # 10s behind the cue is a piece worth hearing, so the cue is kept
+    assert _loop_spans(90.0, 20.0, 100.0, 8.0) == [(10.0, 90.0), (10.0, 90.0)]
+
+
+def test_a_track_whose_duration_was_never_measured_says_so_instead_of_claiming_in_silence():
+    """The stages used to drop such a track before the check saw it, so the
+    one track nothing could bound was the one track nothing reported -- it
+    got the pre-fix over-claim with not a word about it. There is nothing to
+    loop against and nothing to compare, so the only honest output is to say
+    so."""
+    t = scene_track("nodur", "Z", 100, [0.5], duration=100.0)
+    t.duration_s = None                       # analysed, but librosa never got a length
+    scenes = [trek_scene(1, 2, 0.0, 200.0, "climbing", hr=140)]
+    a = _cue_assignment(scenes, [(t.track_id, t.sections[0]["section_id"])])
+    m = music_map_from_scenes(scenes, a, [t], act_spans={2: (0.0, 200.0)}, silence_s=3.0)
+    segs = m["acts"][0]["segments"]
+    assert [(s["t_in"], s["t_end"], s["src_out"]) for s in segs] == [(0.0, 200.0, 200.0)]
+    assert "unlooped: no duration" in m["assignment_note"]
+
+    said = _segment_problems(m["acts"][0], {"nodur": None})
+    assert said == ["track nodur has no measured duration: its claims cannot be checked -- "
+                    "ffmpeg stops where the file ends and nothing here knows where that is"]
+    # once per track, not once per segment, and nothing at all with no library
+    two = {"act": 3, "t_start": 0.0, "t_end": 60.0,
+           "segments": [{"track_id": "nodur", "t_in": 0.0, "t_end": 30.0, "src_in": 0.0, "src_out": 30.0},
+                        {"track_id": "nodur", "t_in": 30.0, "t_end": 60.0, "src_in": 0.0, "src_out": 30.0}]}
+    assert _segment_problems(two, {"nodur": None}) == said
+    assert _segment_problems(two) == []
 
 
 def test_check_music_map_flags_a_segment_that_plays_past_its_tracks_end():

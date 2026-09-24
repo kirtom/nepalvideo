@@ -36,6 +36,12 @@ OVERLAY_KEYS = ("overlay_id", "kind", "t_in", "t_out", "payload", "asset_path")
 # meant to coincide can still differ by a float ulp.
 _EDGE_TOL_S = 1e-3
 
+# The fallback for ``music.loop_min_piece_s`` -- see that key for why 8 s, and
+# ``spine.music._loop_spans`` for what a floorless loop does to the soundtrack.
+# ``build_cues`` passes the configured value; this keeps a caller that has no
+# Config to hand from getting no floor at all.
+_LOOP_MIN_PIECE_S = 8.0
+
 
 def _cue(**fields: Any) -> dict[str, Any]:
     row: dict[str, Any] = dict.fromkeys(CUE_KEYS)
@@ -213,21 +219,33 @@ def map_on_film_time(mmap: Mapping[str, Any],
     return out
 
 
-def _loop_cuts(t0: float, t1: float, src_in: float, duration: float | None
-               ) -> list[tuple[float, float, float]]:
+def _loop_cuts(t0: float, t1: float, src_in: float, duration: float | None,
+               min_piece: float) -> list[tuple[float, float, float]]:
     """``t0``..``t1`` played from ``src_in``, as (t_in, t_out, src_in) pieces
     that each fit inside ``duration``.
 
-    The same arithmetic as ``spine.music._loop_spans`` and deliberately not
-    an import of it: this module is pure rows-in/rows-out and does not reach
+    The same arithmetic as ``spine.music._loop_spans``, kept mirrored rather
+    than imported: this module is pure rows-in/rows-out and does not reach
     into the spine package, the same line rhythm.py draws. ffmpeg delivers
     what the file holds and stops, so a cue asking past the end is silence
     under the picture; an editor restarts the bed instead, and the renderer's
     own crossfade between contiguous cues makes the seam.
+
+    ``min_piece`` is the floor the loop origin must clear, for the reason
+    ``_loop_spans`` gives at length: a cue a fraction of a second from the
+    end of its file would cut the need into dozens of sub-second cues, each
+    carrying a pair of fades clamped to nothing. Under it the loop runs from
+    the top of the track, which bounds the count at ``ceil(need /
+    min_piece)``. A track with no measured duration has nothing to loop
+    against and keeps its one cue, which ``build_cues`` reports.
     """
-    room = (float(duration) - src_in) if duration else 0.0
-    if room <= 0 or (t1 - t0) <= room + _EDGE_TOL_S:
+    if not duration:
         return [(t0, t1, src_in)]
+    room = float(duration) - src_in
+    if room > 0 and (t1 - t0) <= room + _EDGE_TOL_S:
+        return [(t0, t1, src_in)]
+    if room < min_piece:
+        src_in, room = 0.0, float(duration)
     cuts, cursor = [], t0
     while t1 - cursor > _EDGE_TOL_S:
         take = min(t1 - cursor, room)
@@ -238,7 +256,8 @@ def _loop_cuts(t0: float, t1: float, src_in: float, duration: float | None
 
 def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
                window_fade_s: float,
-               track_s: Mapping[str, float] | None = None) -> list[dict[str, Any]]:
+               track_s: Mapping[str, float | None] | None = None,
+               loop_min_piece_s: float = _LOOP_MIN_PIECE_S) -> list[dict[str, Any]]:
     """One cue per segment of every act in the map, on film time. Adjacent
     cues carry the crossfade on both ends; the renderer overlaps them. The
     silence window gets no music: a segment inside it is dropped, one that
@@ -274,7 +293,8 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
             src_in = float(seg["src_in"])
             if i == kept[-1]:
                 t1 = t_end
-            cuts = _loop_cuts(t0, t1, src_in, (track_s or {}).get(seg["track_id"]))
+            cuts = _loop_cuts(t0, t1, src_in, (track_s or {}).get(seg["track_id"]),
+                              loop_min_piece_s)
             for k, (t0, t1, src_in) in enumerate(cuts):
                 src_out = src_in + (t1 - t0)
                 if t0 < q1 and t1 > q0:

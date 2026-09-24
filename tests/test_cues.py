@@ -257,6 +257,32 @@ def test_the_last_cue_loops_rather_than_ask_for_a_track_that_has_run_out():
     assert [(r["t_in"], r["t_out"], r["src_out"]) for r in plain] == [(0.0, 100.0, 120.0)]
 
 
+def test_a_cue_will_not_loop_from_an_origin_with_no_room_to_play():
+    """The mirror of ``spine.music._loop_spans``'s floor, and it has to be:
+    the map builder and the cue builder both stretch, and a floor in only one
+    of them leaves the other fragmenting. A segment cue 0.3s from the end of
+    its file would lay 67 sub-second cues, each with its own pair of fades."""
+    assert cues._loop_cuts(0.0, 20.0, 99.7, 100.0, 8.0) == [(0.0, 20.0, 0.0)]
+    assert cues._loop_cuts(0.0, 20.0, 11.7, 12.0, 8.0) == [(0.0, 12.0, 0.0), (12.0, 20.0, 0.0)]
+    # 10s behind the cue is a piece worth hearing, so the cue is kept
+    assert cues._loop_cuts(0.0, 20.0, 90.0, 100.0, 8.0) == [(0.0, 10.0, 90.0), (10.0, 20.0, 90.0)]
+
+
+def test_a_track_with_no_measured_duration_keeps_its_one_unbounded_cue():
+    """Nothing to loop against: the cue is laid as it would have been before
+    any of this, because shortening it would make t_out - t_in disagree with
+    src_out - src_in. ``build_cues`` is where that gets said out loud."""
+    mmap = {"acts": [{"act": 3, "t_start": 0.0, "t_end": 60.0,
+                      "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 60.0,
+                                    "src_in": 20.0, "src_out": 80.0}]}],
+            "silence_window": {}}
+    on_film = cues.map_on_film_time(mmap, {3: (0.0, 100.0)})
+    rows = cues.music_cues(on_film, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0,
+                           track_s={"t1": None})
+    assert [(r["cue_id"], r["t_in"], r["t_out"], r["src_in"], r["src_out"]) for r in rows] == [
+        ("mu_3_0", 0.0, 100.0, 20.0, 120.0)]
+
+
 def test_a_segment_wholly_inside_the_silence_is_dropped():
     mmap = {"acts": [{"act": 5, "t_start": 150.0, "t_end": 160.0,
                       "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 10.0, "src_in": 0.0, "src_out": 10.0}]}],

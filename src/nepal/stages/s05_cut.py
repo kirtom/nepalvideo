@@ -795,10 +795,14 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
             exclude=[credits] if credits else [])
     mmap = music_mod.music_map_from_scenes(
         scenes, assignment, tracks, act_spans=act_spans,
-        silence_s=float(cfg.get("assemble.silence_window_s")), act0_span=act0_span)
+        silence_s=float(cfg.get("assemble.silence_window_s")), act0_span=act0_span,
+        loop_min_piece_s=float(cfg.get("music.loop_min_piece_s")))
+    # Every track, including one whose duration never got measured. Filtering
+    # those out here handed the check a map it could not fault and left the
+    # one track nothing could bound as the one track nothing reported.
     problems = music_mod.check_music_map(
         mmap, target_s=total_s, tolerance_s=float(cfg.get("film.duration_tolerance_s")),
-        track_s={t.track_id: t.duration_s for t in tracks if t.duration_s})
+        track_s={t.track_id: t.duration_s for t in tracks})
     return scenes, mmap, mode, problems
 
 
@@ -1284,8 +1288,14 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
     # The act the table has can be up to music.min_scene_s longer than the one
     # the map was planned on, and that difference all lands on the act's last
     # cue -- which the track may not have. The durations say when to loop.
-    track_s = {r["track_id"]: float(r["duration_s"]) for r in conn.execute(
-        "SELECT track_id, duration_s FROM music_tracks WHERE duration_s IS NOT NULL")}
+    # Every row, nulls included: a track with no measured duration cannot be
+    # looped and cannot be checked, and dropping it here would give it the
+    # unbounded stretch this bound exists to stop, with nothing said about it.
+    track_s = {r["track_id"]: (float(r["duration_s"]) if r["duration_s"] else None)
+               for r in conn.execute("SELECT track_id, duration_s FROM music_tracks")}
+    for tid in sorted(t for t, d in track_s.items() if not d):
+        log.warning("S06 music track %s has no measured duration: its cues cannot be bounded and "
+                    "ffmpeg will stop where the file ends", tid)
     natural = _reported_windows(cfg)
     if natural is None:
         natural, _ = _natural_windows(cfg, effort.profile(place_mod.load_track(conn)), slots, shots_by_id)
@@ -1301,7 +1311,8 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
             + cues_mod.music_cues(mmap, lufs=float(cfg.get("render.music_lufs")),
                                   xfade_s=float(cfg.get("render.music_xfade_s")),
                                   window_fade_s=float(cfg.get("render.window_fade_s")),
-                                  track_s=track_s))
+                                  track_s=track_s,
+                                  loop_min_piece_s=float(cfg.get("music.loop_min_piece_s"))))
     # The same lettering the beat sheet's prompt gave the authors, from the
     # same rows in the same order, so "A" on a card is the "A" Claude quoted.
     cast = beats_input.Cast.build(
