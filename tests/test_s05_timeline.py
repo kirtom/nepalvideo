@@ -478,6 +478,22 @@ def test_a_starved_phone_gets_its_share_of_the_act_not_of_each_gap(tmp_path):
     conn.close()
 
 
+def test_the_music_maps_problems_are_read_before_the_acts_are_cut_against_it(tmp_path, caplog):
+    """Every act is timed on the map's grid, so a problem logged at the end
+    of the run is a problem read after the map has already shaped the film.
+    The seeded library is six minutes of music for a fifteen-minute film, so
+    there is always something for it to say."""
+    cfg = _cfg(tmp_path)
+    conn = _seed(cfg)
+    with caplog.at_level(logging.INFO, logger="nepal.stages.s05_cut"):
+        s05_cut.build_timeline(cfg, conn)
+    lines = [r.getMessage() for r in caplog.records]
+    problem = next(i for i, m in enumerate(lines) if m.startswith("S06 music map:"))
+    first_act = next(i for i, m in enumerate(lines) if m.startswith("S06 act 1 rhythm"))
+    assert problem < first_act, lines[:8]
+    conn.close()
+
+
 def _phone_slot(i, shot_id, **fields):
     s = s05_cut._new_slot(kind="video", act=5, shot_id=shot_id, src_in=0.0, **fields)
     return s05_cut._set_length(s, 10.0 * i, 10.0 * i + 4.0)
