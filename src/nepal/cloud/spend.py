@@ -81,9 +81,18 @@ class Ledger:
         tmp.replace(self.path / name)
         return e
 
-    def guard(self, estimate_usd: float, *, ceiling_usd: float) -> None:
-        if self.total() + float(estimate_usd) > float(ceiling_usd):
-            raise SpendCeiling(self.total(), float(estimate_usd), float(ceiling_usd))
+    def guard(self, estimate_usd: float, *, ceiling_usd: float,
+              unbooked_usd: float = 0.0) -> None:
+        """``unbooked_usd`` is money already spent that no entry holds yet --
+        the hours a running box has put on the meter. VM hours are recorded
+        at `remote down`, so a session that ends without one leaves the
+        ledger frozen while the bill grows: nepal-cpu billed 104 idle hours
+        (~31 USD) in 2026-09 while this total read 5.21 for four days. The
+        ceiling is only a ceiling if it is checked against what is true now.
+        """
+        total = self.total() + float(unbooked_usd)
+        if total + float(estimate_usd) > float(ceiling_usd):
+            raise SpendCeiling(total, float(estimate_usd), float(ceiling_usd))
 
 
 def ledger(cfg) -> Ledger:

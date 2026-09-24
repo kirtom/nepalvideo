@@ -2,6 +2,8 @@
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
+from datetime import datetime, timezone
+
 from nepal.cloud import gce
 
 CPU = gce.Profile("nepal-cpu", "e2-standard-8", 60, "ubuntu-2204-lts",
@@ -79,3 +81,18 @@ def test_parse_describe_reads_state_and_ip():
     assert st.state == "RUNNING" and st.ip == "34.1.2.3" and st.name == "nepal-cpu"
     assert gce.parse_describe({"name": "n", "status": "TERMINATED"}).ip is None
     assert gce.parse_describe({}).state == "ABSENT"
+
+
+def test_parse_describe_reads_the_stamps_the_bill_is_made_of():
+    """`remote status` counts the running box from lastStartTimestamp, and
+    books a box that stopped without a `down` from lastStopTimestamp. GCP
+    writes them in the zone's offset; the box runs Python 3.10."""
+    st = gce.parse_describe({"name": "nepal-cpu", "status": "RUNNING",
+                             "lastStartTimestamp": "2026-09-20T09:12:33.123-07:00",
+                             "lastStopTimestamp": "2026-09-19T21:00:00.000-07:00"})
+    assert st.last_start == datetime(2026, 9, 20, 16, 12, 33, 123000, tzinfo=timezone.utc)
+    assert st.last_stop == datetime(2026, 9, 20, 4, 0, tzinfo=timezone.utc)
+    assert gce.parse_describe({"status": "TERMINATED"}).last_start is None
+    assert gce.stamp("2026-09-20T16:12:33Z") == \
+        datetime(2026, 9, 20, 16, 12, 33, tzinfo=timezone.utc)
+    assert gce.stamp("not a time") is None and gce.stamp(None) is None

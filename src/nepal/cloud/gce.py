@@ -17,6 +17,7 @@ every chart stayed empty.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -45,6 +46,12 @@ class Status:
     name: str
     state: str          # RUNNING | TERMINATED | STOPPING | STAGING | PROVISIONING | ABSENT
     ip: str | None
+    # What GCP bills from: when this instance last started and last stopped.
+    # The local stamp `remote up` writes says only that a session meant to
+    # start a box; these say what the meter did, including the starts and
+    # stops no session of ours saw.
+    last_start: datetime | None = None
+    last_stop: datetime | None = None
 
 
 def _base(name: str, verb: str, *, project: str, zone: str) -> list[str]:
@@ -109,6 +116,23 @@ def ssh_args(name: str, *, project: str, zone: str,
     return args
 
 
+def stamp(value: Any) -> datetime | None:
+    """A GCE RFC3339 stamp as UTC, or None.
+
+    GCP writes them in the zone's own offset ("2026-09-20T09:12:33.123-07:00")
+    and the box runs Python 3.10, whose `fromisoformat` takes an offset but
+    not a trailing Z. Anything unparseable is None rather than an exception:
+    a missing hour in a display must not stop a box from being described.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")) \
+            .astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
 def parse_describe(doc: Mapping[str, Any]) -> Status:
     if not doc:
         return Status("", "ABSENT", None)
@@ -117,4 +141,5 @@ def parse_describe(doc: Mapping[str, Any]) -> Status:
         for ac in nic.get("accessConfigs") or []:
             if ac.get("natIP"):
                 ip = str(ac["natIP"])
-    return Status(str(doc.get("name", "")), str(doc.get("status", "ABSENT")), ip)
+    return Status(str(doc.get("name", "")), str(doc.get("status", "ABSENT")), ip,
+                  stamp(doc.get("lastStartTimestamp")), stamp(doc.get("lastStopTimestamp")))

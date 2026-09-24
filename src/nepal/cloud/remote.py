@@ -56,14 +56,65 @@ class Remote:
                                                  zone=self.zone))
         return gce.parse_describe(doc or {})
 
+    # -- money ------------------------------------------------------------
+    def account(self, st: gce.Status | None = None) -> dict:
+        """What the box has cost: what the ledger holds, plus the meter.
+
+        The ledger books VM hours at `down`. A session that ends without one
+        -- a rate limit, a crash, a closed laptop -- leaves the box running
+        and the total unchanged: that is how nepal-cpu billed 104 idle hours
+        while `remote status` read 5.21 USD for four days. So a running box's
+        time is counted here from GCP's own `lastStartTimestamp`, which is
+        what the bill is made of; the stamp `up` wrote locally is the
+        fallback for a session that cannot describe the instance. And a box
+        that has stopped since the last command -- the idle watchdog, a
+        preemption -- is booked now, from `lastStopTimestamp`, or its hours
+        are lost to the ledger entirely.
+        """
+        st = st or self.status()
+        state = self._state()
+        prof = state.setdefault(self.profile_key, {})
+        local_since = gce.stamp(prof.get("up_since"))
+        start = st.last_start or local_since
+        led = spend.ledger(self.cfg)
+        hours = 0.0
+        if start and st.state in ("RUNNING", "STAGING", "PROVISIONING"):
+            hours = max(0.0, (datetime.now(timezone.utc) - start).total_seconds() / 3600)
+        elif start and local_since and st.last_stop and st.last_stop > start:
+            self._book(led, (st.last_stop - start).total_seconds() / 3600,
+                       note=f"stopped at {st.last_stop.isoformat(timespec='seconds')} "
+                            f"without `down`")
+            prof.pop("up_since", None)
+            self._save(state)
+        running = hours * self.profile.usd_per_h
+        return {"status": st, "ledger": led, "booked": led.total(), "unbooked_h": hours,
+                "unbooked_usd": running, "since": start, "total": led.total() + running}
+
+    def _book(self, led: spend.Ledger, hours: float, *, note: str = "") -> None:
+        led.record(f"gce:{self.profile_key}", hours * self.profile.usd_per_h,
+                   detail=f"{hours:.2f} h {self.profile.machine_type} at "
+                          f"{self.profile.usd_per_h} USD/h (estimate)"
+                          + (f", {note}" if note else ""))
+        # The box guards the API spend against this total, and it reads
+        # the ledger from the bucket at its next run: push the entry now,
+        # not at the next `remote push` somebody remembers to make.
+        self.gcloud.run(sync.rsync_args(str(led.path), f"{self.bucket}/work/reports/spend"),
+                        check=False)
+
+    def _guard(self, estimate_usd: float) -> dict:
+        """Refuse against the live total, not the booked one: a box that has
+        already eaten the ceiling must be refused now, not at the `down`
+        that may never come."""
+        acct = self.account()
+        acct["ledger"].guard(estimate_usd, unbooked_usd=acct["unbooked_usd"],
+                             ceiling_usd=float(self.cfg.get("cloud.spend_ceiling_usd")))
+        return acct
+
     # -- lifecycle --------------------------------------------------------
     def up(self, *, wait: bool = True) -> gce.Status:
-        led = spend.ledger(self.cfg)
         # A box that runs for an hour costs one hour; refuse if even that
         # would cross the line.
-        led.guard(self.profile.usd_per_h,
-                  ceiling_usd=float(self.cfg.get("cloud.spend_ceiling_usd")))
-        st = self.status()
+        st = self._guard(self.profile.usd_per_h)["status"]
         if st.state == "ABSENT":
             meta = {"nepal-profile": self.profile_key, "nepal-branch": self.branch,
                     "nepal-bucket": self.bucket}
@@ -81,8 +132,12 @@ class Remote:
             self.gcloud.run(gce.start_args(self.profile.name, project=self.project,
                                            zone=self.zone))
         state = self._state()
-        state.setdefault(self.profile_key, {})["up_since"] = \
-            datetime.now(timezone.utc).isoformat(timespec="seconds")
+        # The price alongside the stamp: the status page prices the unbooked
+        # hours from this file, and it runs on the box, which has no config
+        # of its own to look the profile up in.
+        state.setdefault(self.profile_key, {}).update(
+            up_since=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            usd_per_h=self.profile.usd_per_h)
         self._save(state)
         if wait:
             self._wait_ready()
@@ -102,21 +157,13 @@ class Remote:
                            f"{self.ready_timeout:.0f}s; read /var/log/nepal-bootstrap.log")
 
     def down(self, *, delete: bool = False) -> None:
+        # account() books a box that stopped without us; what is left to book
+        # here is a box still running, from the start GCP reports.
+        acct = self.account()
         state = self._state()
         since = state.get(self.profile_key, {}).pop("up_since", None)
-        if since:
-            hours = (datetime.now(timezone.utc)
-                     - datetime.fromisoformat(since)).total_seconds() / 3600
-            led = spend.ledger(self.cfg)
-            led.record(
-                f"gce:{self.profile_key}", hours * self.profile.usd_per_h,
-                detail=f"{hours:.2f} h {self.profile.machine_type} at "
-                       f"{self.profile.usd_per_h} USD/h (estimate)")
-            # The box guards the API spend against this total, and it reads
-            # the ledger from the bucket at its next run: push the entry now,
-            # not at the next `remote push` somebody remembers to make.
-            self.gcloud.run(sync.rsync_args(str(led.path), f"{self.bucket}/work/reports/spend"),
-                            check=False)
+        if since and acct["unbooked_h"]:
+            self._book(acct["ledger"], acct["unbooked_h"])
         self._save(state)
         args = (gce.delete_args if delete else gce.stop_args)(
             self.profile.name, project=self.project, zone=self.zone)
@@ -153,6 +200,10 @@ class Remote:
                 f".venv/bin/nepal status-page >/dev/null 2>&1; {push}; exit $rc")
 
     def exec_cmd(self, command: str) -> int:
+        # Same estimate as `up`: a command costs at least the hour of box
+        # time it runs in, and the refusal has to arrive before the command,
+        # not at a `down` that may never happen.
+        self._guard(self.profile.usd_per_h)
         return self.gcloud.stream(gce.ssh_args(self.profile.name, project=self.project, user=self.ssh_user,
                                                zone=self.zone, command=self._wrap(command)))
 

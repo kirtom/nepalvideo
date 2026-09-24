@@ -267,14 +267,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "remote":
-        from nepal.cloud import remote as remote_mod, spend
+        from nepal.cloud import remote as remote_mod
         r = remote_mod.Remote(cfg, "gpu" if args.gpu else "cpu")
         rest = [a for a in args.rest if a != "--"]
         if args.action == "status":
-            st = r.status()
-            led = spend.ledger(cfg)
-            print(f"{r.profile.name}: {st.state}{' at ' + st.ip if st.ip else ''}; "
-                  f"ledger {led.total():.2f} of {cfg.get('cloud.spend_ceiling_usd')} USD")
+            acct = r.account()
+            st = acct["status"]
+            line = f"{r.profile.name}: {st.state}{' at ' + st.ip if st.ip else ''}; "
+            if acct["unbooked_usd"]:
+                # Booked and running apart, because the difference is the
+                # whole point: the ledger only books at `down`.
+                line += (f"booked {acct['booked']:.2f} + running {acct['unbooked_usd']:.2f} "
+                         f"({acct['unbooked_h']:.1f} h since "
+                         f"{acct['since'].isoformat(timespec='seconds')}) = ")
+            else:
+                line += "ledger "
+            print(line + f"{acct['total']:.2f} of {cfg.get('cloud.spend_ceiling_usd')} USD")
             return 0
         if args.action == "up":
             st = r.up(wait=not args.no_wait)

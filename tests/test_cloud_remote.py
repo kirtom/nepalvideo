@@ -1,6 +1,7 @@
 """nepal remote against a fake gcloud that records what it was asked."""
 import json
 import stat
+from datetime import datetime, timedelta, timezone
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
@@ -10,21 +11,24 @@ from nepal.cloud import remote, spend
 from nepal.config import Config
 
 FAKE = r'''#!/usr/bin/env python3
-import json, os, sys
+import datetime, json, os, sys
 log = os.environ["FAKE_LOG"]; state = os.environ["FAKE_STATE"]
+def now(): return datetime.datetime.now(datetime.timezone.utc).isoformat()
 args = sys.argv[1:]
 with open(log, "a") as fh: fh.write(json.dumps(args) + "\n")
 st = json.load(open(state)) if os.path.exists(state) else {}
 if args[:3] == ["compute", "instances", "describe"]:
     if not st.get("exists"): sys.exit(1)
     print(json.dumps({"name": args[3], "status": st.get("status", "RUNNING"),
+                      "lastStartTimestamp": st.get("started"),
+                      "lastStopTimestamp": st.get("stopped"),
                       "networkInterfaces": [{"accessConfigs": [{"natIP": "34.0.0.1"}]}]}))
 elif args[:3] == ["compute", "instances", "create"]:
-    st.update(exists=True, status="RUNNING")
+    st.update(exists=True, status="RUNNING", started=now())
 elif args[:3] == ["compute", "instances", "start"]:
-    st["status"] = "RUNNING"
+    st.update(status="RUNNING", started=now())
 elif args[:3] == ["compute", "instances", "stop"]:
-    st["status"] = "TERMINATED"
+    st.update(status="TERMINATED", stopped=now())
 elif args[:3] == ["compute", "instances", "delete"]:
     st.clear()
 elif args[:2] == ["compute", "ssh"]:
@@ -62,6 +66,22 @@ def env(tmp_path, monkeypatch):
 
 def calls(tmp_path):
     return [json.loads(l) for l in (tmp_path / "log").read_text().splitlines()]
+
+
+def commands(tmp_path):
+    return [a for c in calls(tmp_path) if c[:2] == ["compute", "ssh"]
+            for a in c if a.startswith("--command=")]
+
+
+def _instance(tmp_path, **fields):
+    """Rewrite what the fake gcloud reports for the instance."""
+    st = json.loads((tmp_path / "state").read_text())
+    st.update(fields)
+    (tmp_path / "state").write_text(json.dumps(st))
+
+
+def _ago(hours: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
 
 def test_up_creates_when_absent_then_starts_when_stopped(env):
@@ -102,6 +122,51 @@ def test_up_refuses_when_the_ledger_is_at_the_ceiling(env):
     spend.ledger(cfg).record("api:x", 15.0)
     with pytest.raises(spend.SpendCeiling):
         remote.Remote(cfg, "cpu").up(wait=False)
+
+
+def test_the_running_box_is_counted_before_anybody_books_it(env):
+    """`down` books the hours; a session that never reaches one leaves the
+    meter running and the ledger frozen -- 104 idle hours in 2026-09."""
+    cfg, tmp = env
+    r = remote.Remote(cfg, "cpu")
+    r.up(wait=True)
+    _instance(tmp, started=_ago(4))
+    acct = r.account()
+    assert acct["booked"] == 0.0                       # nothing recorded yet
+    assert acct["unbooked_h"] == pytest.approx(4.0, abs=0.01)
+    assert acct["unbooked_usd"] == pytest.approx(2.0, abs=0.01)   # 4 h at 0.5
+    assert acct["total"] == pytest.approx(2.0, abs=0.01)
+    assert acct["since"].tzinfo is not None
+
+
+def test_exec_refuses_when_the_running_box_has_eaten_the_ceiling(env):
+    """The refusal has to arrive before the command, not at the `down`
+    that the abandoned box never got."""
+    cfg, tmp = env
+    r = remote.Remote(cfg, "cpu")
+    r.up(wait=True)
+    spend.ledger(cfg).record("api:x", 10.0)
+    _instance(tmp, started=_ago(10))                   # 5.00 USD unbooked, ceiling 15
+    with pytest.raises(spend.SpendCeiling) as exc:
+        r.exec_cmd("true")
+    assert exc.value.total == pytest.approx(15.0, abs=0.01)
+
+
+def test_a_box_that_stopped_without_down_is_booked_at_the_next_command(env):
+    """The idle watchdog stops the box from inside the guest; nothing local
+    ran `down`, so the hours come from GCP's own stamps -- once."""
+    cfg, tmp = env
+    r = remote.Remote(cfg, "cpu")
+    r.up(wait=True)
+    _instance(tmp, status="TERMINATED", started=_ago(3), stopped=_ago(1))
+    r.account()
+    led = spend.ledger(cfg)
+    assert [e.what for e in led.entries] == ["gce:cpu"]
+    assert led.entries[0].usd == pytest.approx(1.0, abs=0.01)     # 2 h at 0.5
+    assert "without `down`" in led.entries[0].detail
+    assert "up_since" not in json.loads(r.state_path.read_text())["cpu"]
+    r.account()                                        # and not a second time
+    assert len(spend.ledger(cfg).entries) == 1
 
 
 def test_run_wraps_the_command_with_sync_and_branch_reset(env):

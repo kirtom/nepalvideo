@@ -51,6 +51,7 @@ def test_build_status_reads_everything_from_the_database_and_the_reports(tmp_pat
     assert {s["unit"] for s in st["stages"]} == {"faces", "place"}
     assert st["latest_stage"]["unit"] in ("faces", "place")
     assert st["spend"]["total_usd"] == 0.42 and st["spend"]["entries"][-1]["what"] == "gce:cpu"
+    assert st["spend"]["booked_usd"] == 0.42 and st["spend"]["running_usd"] == 0.0
     assert st["last_report"] == {"name": "s03_process.json",
                                  "finished_utc": "2026-09-18T05:00:00+00:00"}
     assert st["draft"] is None
@@ -66,6 +67,20 @@ def test_render_html_is_self_contained_and_names_the_stage(tmp_path):
     assert "<h2>sources per act</h2>" in page
     assert "<td>3</td><td>camera</td><td>1</td><td>2</td><td>100%</td>" in page
     assert "<td>3</td><td>phone_keller</td><td>0</td><td>1</td><td>0%</td>" in page
+
+
+def test_the_page_counts_a_box_that_is_up_and_not_booked(tmp_path):
+    """The ledger books VM hours at `down`; `up` leaves its stamp and its
+    price in remote_state.json, and until `down` clears them the meter is
+    running. Showing only the booked total is how 104 idle hours hid."""
+    conn, led, reports = _seed(tmp_path)
+    (reports / "remote_state.json").write_text(json.dumps(
+        {"cpu": {"up_since": "2026-09-18T04:00:00+00:00", "usd_per_h": 0.3}}))
+    st = status.build_status(conn, led, reports,
+                             now=datetime(2026, 9, 18, 6, tzinfo=timezone.utc))
+    assert st["spend"] == {**st["spend"], "booked_usd": 0.42, "running_usd": 0.6,
+                           "running_since": "2026-09-18T04:00:00+00:00", "total_usd": 1.02}
+    assert "booked 0.42 + running 0.60" in status.render_html(st)
 
 
 def test_write_status_writes_both_files(tmp_path):

@@ -65,6 +65,19 @@ def test_guard_refuses_when_the_estimate_would_cross_the_ceiling(tmp_path):
     assert exc.value.total == 13.0 and exc.value.ceiling == 15.0
 
 
+def test_guard_counts_the_hours_nothing_has_booked_yet(tmp_path):
+    """VM hours are recorded at `remote down`. A box that is up has spent
+    money no entry holds, and that is what crossed the ceiling in 2026-09:
+    the ledger read 5.21 for four days while the box billed 104 hours."""
+    led = spend.Ledger(tmp_path / "spend")
+    led.record("api:beats", 13.0)
+    led.guard(1.0, ceiling_usd=15.0, unbooked_usd=0.5)          # 14.5: fine
+    with pytest.raises(spend.SpendCeiling) as exc:
+        led.guard(1.0, ceiling_usd=15.0, unbooked_usd=1.5)      # 15.5: not fine
+    assert exc.value.total == pytest.approx(14.5)               # the live total, not 13.0
+    assert "14.50 USD spent" in str(exc.value)
+
+
 def test_a_corrupt_entry_is_an_error_not_a_zero(tmp_path):
     (tmp_path / "spend").mkdir()
     (tmp_path / "spend" / "x.json").write_text("{not json")

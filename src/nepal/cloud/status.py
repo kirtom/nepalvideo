@@ -22,6 +22,32 @@ from nepal.cloud import spend
 per_act_sources = db.per_act_sources
 
 
+def _spend(ledger: spend.Ledger, state_path: Path, now: datetime) -> dict[str, Any]:
+    """Booked, running, and the sum -- the number the ceiling is about.
+
+    VM hours are booked at `remote down`; a box that is up has hours no
+    entry holds. `remote up` stamps its start and its price into
+    remote_state.json and `down` clears them, so an `up_since` still in
+    that file is a meter running. Overstating while the file is stale is
+    the safe direction for a ceiling: nepal-cpu's 104 idle hours were
+    invisible here for four days.
+    """
+    running, since = 0.0, None
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        state = {}
+    for prof in (state or {}).values():
+        start = (prof or {}).get("up_since")
+        if not start:
+            continue
+        hours = max(0.0, (now - datetime.fromisoformat(start)).total_seconds() / 3600)
+        running += hours * float(prof.get("usd_per_h", 0.0))
+        since = min(since, start) if since else start
+    return {"booked_usd": round(ledger.total(), 2), "running_usd": round(running, 2),
+            "running_since": since, "total_usd": round(ledger.total() + running, 2)}
+
+
 def build_status(conn, ledger: spend.Ledger, reports_dir: Path, *,
                  now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
@@ -66,7 +92,7 @@ def build_status(conn, ledger: spend.Ledger, reports_dir: Path, *,
         "generated_utc": now.isoformat(timespec="seconds"),
         "stages": stages, "latest_stage": latest, "counts": counts,
         "per_act_sources": per_act_sources(conn),
-        "spend": {"total_usd": round(ledger.total(), 2),
+        "spend": {**_spend(ledger, Path(reports_dir) / "remote_state.json", now),
                   "entries": [e.__dict__ for e in ledger.entries[-5:]]},
         "last_report": last_report, "draft": draft_info, "remote_jobs_tail": tail,
     }
@@ -96,6 +122,12 @@ def render_html(st: dict[str, Any]) -> str:
     draft = st.get("draft")
     draft_txt = f"{draft['bytes'] / 1e6:.0f} MB, {draft['mtime']}" if draft else "none yet"
     rep = st.get("last_report") or {}
+    rep_txt = f"{rep.get('name')} {rep.get('finished_utc')}"
+    sp = st["spend"]
+    spend_txt = f"total {sp['total_usd']:.2f} USD"
+    if sp.get("running_usd"):
+        spend_txt = (f"booked {sp['booked_usd']:.2f} + running {sp['running_usd']:.2f} "
+                     f"since {sp['running_since']} = {sp['total_usd']:.2f} USD")
     return (
         "<!doctype html>\n"
         '<html lang="en"><head><meta charset="utf-8"><title>nepal pipeline</title>\n'
@@ -109,9 +141,9 @@ def render_html(st: dict[str, Any]) -> str:
         f'{e(str(latest.get("unit", "-")))}</b> {e(str(latest.get("status", "")))} '
         f'at {e(str(latest.get("updated_at", "")))}</p>\n'
         f"<p>generated {e(st['generated_utc'])} · draft: {e(draft_txt)} · last report: "
-        f"{e(str(rep.get('name')))} {e(str(rep.get('finished_utc')))}</p>\n"
+        f"{e(rep_txt)}</p>\n"
         f"<h2>the funnel</h2><table>{rows(st['counts'].items())}</table>\n"
-        f"<h2>spend</h2><p>total {st['spend']['total_usd']:.2f} USD</p><table>{spend_rows}</table>\n"
+        f"<h2>spend</h2><p>{e(spend_txt)}</p><table>{spend_rows}</table>\n"
         f"<h2>sources per act</h2><table><tr><th>act</th><th>source</th><th>slots</th>"
         f"<th>available</th><th>share</th></tr>{''.join(source_rows)}</table>\n"
         f"<h2>stages</h2><table><tr><th>stage</th><th>unit</th><th>status</th><th>updated</th></tr>"
