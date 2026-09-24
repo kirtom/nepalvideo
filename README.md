@@ -181,6 +181,16 @@ S01 and S02 take `--redo` too (`manifest,chapters,fov,clock` and
 re-reading the Strava export no longer means `--force` and an hour of clock
 correlation.
 
+`nepal cut` has four sub-steps, `score,timeline,cues,draft`, and the default
+runs all four. `timeline` assembles the film around the beat sheet (anchors,
+pairs, the long take, the fill, scenes → music map, rhythm); `cues` writes the
+`audio_cues` (speech, location, music) and `overlays` rows from the timeline
+on disk; `draft` measures the mix in an audio-only pass, renders the draft
+with the three tracks, and writes the Gate 3 page. `nepal cut --redo
+cues,draft` re-lays the sound over an existing cut in minutes; `--redo
+timeline,cues,draft` is a new cut. The S05 report is checkpointed after every
+sub-step, so `nepal status` shows a running cut as running.
+
 **`db.upsert` never removes**, so `nepal prune` exists: it re-derives the
 recording grouping from the assets already in the database and deletes the
 recordings, shots, timeline rows and work files that the current rules no
@@ -499,7 +509,15 @@ what is needed to decide, and stops.
    retime or re-rank by editing `work/beats/beats.json` (or the
    `story_beats` rows). Then review the shortlist, veto shots, confirm the
    face cluster labels.
-3. **Gate 3 — Draft cut.** Approve the rough cut before conform.
+3. **Gate 3 — Draft cut.** `work/gates/gate3/index.html` is the shot list
+   keyed by wall clock and slot (source, kind, beat, scene, seconds), the
+   per-act source ratio (slots / available / share per phone and camera),
+   the cues per track and the overlays (tags only, never a name); the draft
+   beside it, `draft.mp4`, carries speech, location and music mixed to
+   `render.final_lufs`. Watch it for pace, act lengths and the phones'
+   share; listen for the ducking under speech, the natural-sound window and
+   the silence after Act 4's swell. Levers are config: `assemble.rhythm`,
+   `film.photo_share_by_act`, `acts[].max_s`, `assemble.source_share_min`.
 
 Milestone 6 wires these into Step Functions with `waitForTaskToken`. Until
 then they are manual checkpoints.

@@ -141,6 +141,30 @@ Each of these cost a wrong diagnosis or a wasted multi-hour run.
   1.11 USD, no answer, and nothing on the ledger because the wrapper raised
   before the stage recorded. The cap is 64,000, and every failed paid call
   records its cost and keeps its partial text before it raises.
+- **Two green branches are not a green merge.** Task 14's draft and Task 13's
+  render were each green on the box; together, the first film-wide mix asked
+  `loudnorm` for `LRA=21` and ffmpeg refused the whole graph after the
+  measuring pass was spent. When a contract moves under its caller, re-run
+  the caller's tests before believing either.
+- **`loudnorm`'s linear mode is a gain and a ceiling, and it quietly is not
+  one past 20 LU.** `linear=true` holds only while the measured range fits
+  the `LRA` option, whose range stops at 20; a film with a designed silence
+  is wider, and loudnorm reverts to dynamic and re-levels the envelope it
+  was asked to preserve. The measured branch asks for `volume` and
+  `alimiter` instead -- what linear mode is made of, with no precondition.
+- **A box's hours exist only when something books them.** The ledger booked
+  VM time at `remote down`; a session that died on a rate limit left the
+  box RUNNING for 104 hours (~31 USD) while `remote status` read the old
+  total. Now `remote status` prices the running span from GCP's
+  `lastStartTimestamp`, every command books a box that stopped without
+  `down`, and the box stops itself after `cloud.gcp.idle_stop_min` idle.
+- **In a shared worktree, `git add` names files.** A blanket add during a
+  rebase swept another agent's staged files into a commit with the wrong
+  message (09fd7fa on `worktree-film-v2-design`). History on a branch the
+  box resets to is not rewritten, so the mislabel stands.
+- **`pkill -f` matches the shell that runs it.** Over `gcloud compute ssh
+  --command`, `pkill -f "nepal.cli"` killed its own `bash -c` and ssh exited
+  255, which read as a key problem. Write the pattern as `"[n]epal.cli"`.
 
 ## Decisions that are not yours
 
