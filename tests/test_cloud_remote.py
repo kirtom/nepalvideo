@@ -215,6 +215,35 @@ def test_the_wrapped_command_still_looks_like_a_job_to_the_watchdog(env):
     assert watchdog.JOB_MARK in remote.Remote(cfg, "cpu")._wrap("x")
 
 
+def test_a_running_job_holds_off_the_work_pull_and_the_gates_push(env):
+    """A pull while a job runs replaces the file that job is writing: rsync
+    renames a temp over the target, so one `exec` from another session left
+    a 40-minute ffmpeg writing into `draft.mp4 (deleted)`. The wrapper asks
+    the box first, and says in the log why work/ was not refreshed."""
+    cfg, tmp = env
+    sh = remote.Remote(cfg, "cpu")._wrap(".venv/bin/nepal cut")
+    assert remote.JOB_PROBE in sh
+    assert 'echo "skipping work/ pull: job running ($job)"' in sh
+    # raw/ is read-only media and is pulled either way
+    assert "rsync --recursive gs://b/raw /data/projects/nepal_data && " in sh
+    # and the push does not publish a half-written draft over the good one
+    assert f"--exclude='{remote.JOB_PUSH_EXCLUDE}' /data/projects/nepal_work gs://b/work" in sh
+    assert 'echo "pushing work/ without gates/: job running ($job)"' in sh
+
+
+def test_the_probe_sees_a_job_but_not_the_shell_it_runs_from(env):
+    """The decision behind the guard, both ways. The wrapper's own `bash -c`
+    carries this whole script -- venv paths and all -- so a probe that read
+    command lines naively would find a job on every idle box and never pull
+    again. jobs() drops any line naming the watchdog module, and the probe
+    names it."""
+    cfg, tmp = env
+    wrapper = "bash -c " + remote.Remote(cfg, "cpu")._wrap(".venv/bin/nepal cut")
+    assert watchdog.jobs([wrapper, "/usr/bin/sshd -D"]) == []
+    job = "/data/projects/nepalvideo/.venv/bin/nepal cut --redo draft"
+    assert watchdog.jobs([wrapper, job]) == [job]
+
+
 def test_push_and_pull_issue_one_rsync_per_plan_entry(env):
     cfg, tmp = env
     for kind, sub in (("data", "media_from_phones"), ("work", "db")):

@@ -11,8 +11,10 @@ Three bounds, because each of them alone is wrong.
 
 **No job process**: every command arrives as `bash -c ... .venv/bin/...`,
 so a command line naming the venv is work in progress (this module runs
-from that venv too, hence the exclusion). But a stage between two
-sub-steps has no venv process for a second.
+from that venv too, hence the exclusion -- which `remote exec` leans on
+as well: the `bash -c` carrying its wrapper script names the venv a dozen
+times, and names this module once, so the probe does not see itself).
+But a stage between two sub-steps has no venv process for a second.
 
 **No recent output**: the stamp `remote exec` touches around every
 command, and the log a long job appends to as it goes. But a job launched
@@ -242,6 +244,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if argv[:1] == ["touch"]:
         print(touch(work_root))
+        return 0
+    if argv[:1] == ["jobs"]:
+        # What `remote exec` asks the box before it rsyncs work/ over what a
+        # job is writing. Printed rather than counted: the caller logs which
+        # job held the pull off, and "nothing" is an empty line.
+        print("\n".join(jobs(_cmdlines())))
         return 0
     now = datetime.now(timezone.utc)
     stop, why = decide(jobs_running=len(jobs(_cmdlines())),

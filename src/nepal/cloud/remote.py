@@ -23,6 +23,19 @@ log = logging.getLogger(__name__)
 
 EXTRAS = "vision,music,asr,faces,semantic,api,dev"
 
+# What the box is asked before a command touches work/. It asks the
+# watchdog's own module, so "what a job looks like" has one definition --
+# and jobs() drops any command line naming that module, which is what keeps
+# the `bash -c` carrying this whole wrapper (it names the venv a dozen
+# times) from reading as the job it is looking for. Empty output means the
+# box is idle; the first line names the job that is not.
+JOB_PROBE = "job=$(.venv/bin/python -m nepal.cloud.watchdog jobs 2>/dev/null | head -1)"
+# Held back from the push while a job runs: the draft is the one output
+# written over minutes, so a push mid-render would publish a truncated
+# file over the good one in the bucket. Everything else under work/ is a
+# checkpoint, and pushing those mid-run is the point.
+JOB_PUSH_EXCLUDE = "gates/.*"
+
 
 class Remote:
     def __init__(self, cfg, profile: str = "cpu", gcloud: Gcloud | None = None):
@@ -229,12 +242,32 @@ class Remote:
 
     # -- commands ---------------------------------------------------------
     def _wrap(self, command: str) -> str:
-        # raw/ is refreshed too: material lands in the bucket after the box
-        # was first booted (the upload outlives the bootstrap), and an rsync
-        # of an unchanged tree costs a listing.
+        # raw/ is refreshed unconditionally: material lands in the bucket
+        # after the box was first booted (the upload outlives the
+        # bootstrap), it is read-only media, and an rsync of an unchanged
+        # tree costs a listing.
+        #
+        # work/ is not. rsync writes a temp and renames it over the target,
+        # so pulling the bucket's older copy of a file a running job holds
+        # open leaves that job writing into `draft.mp4 (deleted)`: one
+        # `exec` from another session did exactly that to a 40-minute
+        # ffmpeg, which was rescued through /proc/<pid>/fd. A job on the box
+        # owns work/ until it finishes; a concurrent command reads what is
+        # there and is told why it got no refresh.
+        pull_work = f"gcloud storage rsync --recursive {self.bucket}/work {self.remote_work}"
         pull = (f"gcloud storage rsync --recursive {self.bucket}/raw {self.remote_data} && "
-                f"gcloud storage rsync --recursive {self.bucket}/work {self.remote_work}")
-        push = f"gcloud storage rsync --recursive {self.remote_work} {self.bucket}/work"
+                f"{{ {JOB_PROBE}; if [ -n \"$job\" ]; then "
+                f"echo \"skipping work/ pull: job running ($job)\"; else {pull_work}; fi; }}")
+        # The same hazard at the other end, in the other direction: half a
+        # file pushed over a good one in the bucket. The probe runs again
+        # rather than reusing the pull's answer -- this command may have
+        # started the job itself, detached.
+        push_all = f"gcloud storage rsync --recursive {self.remote_work} {self.bucket}/work"
+        push_safe = (f"gcloud storage rsync --recursive --exclude='{JOB_PUSH_EXCLUDE}' "
+                     f"{self.remote_work} {self.bucket}/work")
+        push = (f"{{ {JOB_PROBE}; if [ -n \"$job\" ]; then "
+                f"echo \"pushing work/ without gates/: job running ($job)\"; {push_safe}; "
+                f"else {push_all}; fi; }}")
         # Before and after: the idle watchdog reads this stamp, and a job
         # launched detached (`nohup ... &`) returns at once, so the stamp at
         # the end is when the box was last *asked* for something, not when it
