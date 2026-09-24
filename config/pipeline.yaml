@@ -451,13 +451,14 @@ assemble:
 
 render:
   draft: {width: 960, height: 540, crf: 23}
-  # How far the rendered draft may sit from the timeline's own length before
-  # the stage calls it a failed render. ffmpeg breaks out of its transcode
-  # loop on a mid-graph error, writes a valid trailer and exits 0, so its exit
-  # code cannot tell a finished film from one that stopped: 138.7 s of a
-  # 2145.9 s draft came back "successful". Every leg is resampled to one rate,
-  # so each one's length is quantised to a frame and the sum drifts slightly;
-  # a render that stopped is short by slots, not by frames.
+  # How far SHORT of the timeline the rendered draft may fall before the stage
+  # calls it a failed render. ffmpeg breaks out of its transcode loop on a
+  # mid-graph error, writes a valid trailer and exits 0, so its exit code
+  # cannot tell a finished film from one that stopped: 138.7 s of a 2145.9 s
+  # draft came back "successful". Short only -- every leg is resampled to one
+  # rate and rounds up to a whole frame, so the finished 512-slot film came
+  # out 2151.4 s against a 2145.9 s timeline, +10.7 ms a slot. A render that
+  # stopped is short by slots, which is what this catches.
   draft_tol_s: 5.0
   # One rate for every leg of the concat. The proxies are 15 fps, the phones
   # 30 or 60, and a concat of mixed rates produced a 120 fps draft.

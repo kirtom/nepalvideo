@@ -29,12 +29,12 @@ log = logging.getLogger(__name__)
 
 DRAFT_W, DRAFT_H, DRAFT_CRF, DRAFT_FPS = 960, 540, 23, 30
 
-# How far the rendered draft may sit from the length the timeline asked for
-# before ``run_render`` calls it a failed render. Every leg is resampled to
-# one rate, so each one's length is quantised to a frame and the sum drifts a
-# little; a render that stopped part-way is out by slots, not by frames. The
-# stage passes ``render.draft_tol_s``; this is the fallback for a caller with
-# no config to hand.
+# How far SHORT of the timeline the rendered draft may fall before
+# ``run_render`` calls it a failed render. Only short: every leg is resampled
+# to one rate and so rounds up to a whole frame, which on the real film put
+# the draft 5.489 s over a 2145.944 s timeline -- arithmetic, not loss. A
+# render that stopped part-way is out by slots. The stage passes
+# ``render.draft_tol_s``; this is the fallback for a caller with no config.
 DRAFT_TOL_S = 5.0
 
 # The checks below ask the same question cues.py asks of its own edges --
@@ -647,6 +647,8 @@ def run_render(cmd: Sequence[str], out_path: Path, *, expect_s: float | None = N
     cut. The length is the verdict ffmpeg will not give: ``expect_s`` is
     what the timeline says the picture is, and a file short of that by more
     than ``tol_s`` is not published and comes back as the failure it is.
+    Short only: a finished draft is always a shade longer than its timeline,
+    because every leg rounds up to a whole frame at the draft's rate.
     The short file is kept at its temporary name, because the thing to look
     at when this fires is where it stopped.
     """
@@ -655,12 +657,20 @@ def run_render(cmd: Sequence[str], out_path: Path, *, expect_s: float | None = N
     if proc.returncode != 0 or not part.exists():
         return proc
     got = media_seconds(part) if expect_s is not None else None
-    if expect_s is None or (got is not None and abs(got - expect_s) <= tol_s):
+    if got is not None and expect_s is not None and got > expect_s:
+        # Longer is arithmetic, not failure, and it only goes this way: every
+        # leg is resampled to one rate and so rounds up to a whole frame.
+        # Measured on the real film, 512 slots at 30 fps: 2151.433 s against a
+        # 2145.944 s timeline, +10.7 ms a slot. Said out loud, never fatal --
+        # only a draft that is *short* has lost something.
+        log.info("S07 the draft runs %.3f s against the timeline's %.3f s (+%.3f s): each leg "
+                 "rounds up to a whole frame at the draft's rate.", got, expect_s, got - expect_s)
+    if expect_s is None or (got is not None and expect_s - got <= tol_s):
         part.replace(out_path)
         return proc
     msg = (f"ffmpeg exited 0 but wrote {'a file whose length cannot be read' if got is None else f'{got:.3f} s'} "
-           f"where the timeline is {expect_s:.3f} s (tolerance {tol_s:g} s): the render stopped "
-           f"part-way through the film. {out_path} is left as it was; the short file is at {part}.")
+           f"where the timeline is {expect_s:.3f} s (tolerance {tol_s:g} s short): the render "
+           f"stopped part-way through the film. {out_path} is left as it was; the short file is at {part}.")
     log.error("S07 %s", msg)
     return subprocess.CompletedProcess(proc.args, 1, proc.stdout, (proc.stderr or "") + "\n" + msg)
 

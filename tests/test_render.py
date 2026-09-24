@@ -1049,6 +1049,13 @@ def test_a_render_that_stopped_part_way_is_never_published(tmp_path):
     assert render.run_render(cmd, out, expect_s=2.0, tol_s=0.5).returncode == 0
     assert out.read_bytes() != b"last good draft" and not render.part_path(out).exists()
 
+    # And a draft LONGER than its timeline publishes too: every leg rounds up
+    # to a whole frame at the draft's rate, so a finished film always runs a
+    # shade over -- 2151.433 s against a 2145.944 s timeline on the real cut.
+    # Refusing that would fail every render there is.
+    assert render.run_render(cmd, out, expect_s=1.0, tol_s=0.5).returncode == 0
+    assert out.exists() and not render.part_path(out).exists()
+
 
 def test_the_edge_tolerance_is_the_one_cues_uses(tmp_path):
     """Two modules answering "do these times coincide?" differently would
