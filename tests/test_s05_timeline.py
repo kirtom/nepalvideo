@@ -273,6 +273,13 @@ def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path)
     shots = _shots(conn)
     recs = {r["recording_id"]: dict(r) for r in conn.execute("SELECT * FROM recordings")}
     assert rep["n_slots"] == len(slots) > 10
+    # Gate 3's own numbers, on the report the operator reads at the gate
+    assert 0.0 <= rep["music_share"] <= 1.0 and rep["n_music_windows"] >= 1
+    assert rep["music_share"] < 1.0, "music no longer runs from end to end"
+    assert set(rep["music_windows_per_act"]) == {str(a["act"]) for a in
+                                                 json.loads((cfg.work_root / "music" /
+                                                             "music_map.json").read_text())["acts"]}
+    assert rep["music_windows_per_act"]["0"] == [], "the film does not open on music"
     # every locked slot the run lost -- pushed past its act's end or squeezed
     # to nothing before the write -- is counted, and a healthy seed loses none
     assert rep["n_dropped_locked"] == 0
@@ -776,9 +783,11 @@ def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
     assert math.isclose(c2["t_in"], again["t_in"], abs_tol=1e-3) and c2["t_in"] > speech["sp_b_pass"]["t_out"]
     assert (c2["src_in"], c2["src_out"]) == (speech["sp_b_pass"]["src_in"], speech["sp_b_pass"]["src_out"])
 
-    # music covers each act end to end on the table's own spans, not the
-    # map's planned ones (the map was not rebuilt, and the acts drifted from
-    # it by up to 8 s here); the silence follows act 4's real end
+    # music covers each of its WINDOWS end to end (Gate 3, 2026-09-24: "Music
+    # should be played only on those parts of the video where nothing else is
+    # spoken"), on the table's own spans rather than the map's planned ones
+    # (the map was not rebuilt, and the acts drifted from it by up to 8 s
+    # here); the silence follows act 4's real end
     mmap = json.loads((cfg.work_root / "music" / "music_map.json").read_text())
     spans = {a: (min(s["t_in"] for s in slots if s["act"] == a), max(s["t_out"] for s in slots if s["act"] == a))
              for a in {s["act"] for s in slots}}
@@ -786,17 +795,28 @@ def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
         abs(spans[a["act"]][0] - a["t_start"]) > 1.0 for a in mmap["acts"])
     q0 = spans[4][1]
     q1 = q0 + float(cfg.get("assemble.silence_window_s"))
-    for a in mmap["acts"]:
+    on_film = s05_cut.cues_mod.map_on_film_time(mmap, spans)
+    music_spans = s05_cut.cues_mod.music_spans(on_film)
+    assert music_spans, "the seeded film has somewhere music may play"
+    for a in on_film["acts"]:
         mine = [c for c in by_track["music"] if c["cue_id"].startswith(f"mu_{a['act']}_")]
         assert bool(mine) == bool(a["segments"]), a["act"]
-        if not mine:
-            continue
-        lo, hi = spans[a["act"]]
-        lo = q1 if lo < q1 <= hi else lo
-        hi = q0 if lo <= q0 < hi else hi
-        assert math.isclose(min(c["t_in"] for c in mine), lo, abs_tol=1e-3), a["act"]
-        assert math.isclose(max(c["t_out"] for c in mine), hi, abs_tol=1e-3), a["act"]
+        for w in a["music_windows"]:
+            lo, hi = float(w["t_start"]), float(w["t_end"])
+            inside = [c for c in mine if lo - 1e-3 <= c["t_in"] < hi]
+            assert inside, (a["act"], w)
+            lo = q1 if lo < q1 <= hi else lo
+            hi = q0 if lo <= q0 < hi else hi
+            assert math.isclose(min(c["t_in"] for c in inside), lo, abs_tol=1e-3), (a["act"], w)
+            assert math.isclose(max(c["t_out"] for c in inside), hi, abs_tol=1e-3), (a["act"], w)
+    # and nowhere else: not in the silence, and not outside a window
     assert not any(c["t_in"] < q1 and c["t_out"] > q0 for c in by_track["music"])
+    assert all(any(lo - 1e-3 <= c["t_in"] < hi + 1e-3 for lo, hi in music_spans)
+               for c in by_track["music"])
+    # the location track is the mix wherever no window covers it
+    assert all(c["gain_lufs"] != cfg.get("render.duck_lufs")
+               for c in loc.values()
+               if not any(lo <= (c["t_in"] + c["t_out"]) / 2 <= hi for lo, hi in music_spans))
     # and the location cue that ends on the silence fades out over the window
     # fade, which places the silence the location track heard at act 4's end
     ending = [c for c in loc.values() if math.isclose(c["t_out"], q0, abs_tol=1e-3)]

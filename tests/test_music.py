@@ -12,7 +12,8 @@ from nepal.spine.music import (Track, parse_artist_title, estimate_key, mark_swe
                                detect_licence, ACT_WEIGHTS, PITCH_CLASSES,
                                MAJOR_PROFILE, MINOR_PROFILE,
                                assign_scenes, pair_cost, music_map_from_scenes,
-                               SceneAssignment, _segment_problems, _loop_spans)
+                               SceneAssignment, _segment_problems, _loop_spans,
+                               _act0_entry)
 from nepal.spine.scenes import Scene, scene_target
 
 ACT_SPECS = [
@@ -1010,14 +1011,15 @@ def test_check_music_map_flags_a_map_whose_segments_do_not_tile_their_act():
     tail = short["acts"][0]["segments"][-1]
     tail["t_end"] = float(tail["t_end"]) - 5.0
     tail["src_out"] = float(tail["src_out"]) - 5.0
-    assert any("of the act's" in p for p in check_music_map(short, target_s=1200, min_headroom=1.0))
+    assert any("window" in p and "segments cover" in p
+               for p in check_music_map(short, target_s=1200, min_headroom=1.0))
 
 
-def test_act0_takes_the_act4_swell_segment():
-    """Two Act 4 scenes landing on different sections -- the swell only
-    lives on the second one (the one act4_swell restricts to a swell state),
-    so Act 0 must not blindly pair the *first* segment with *a* swell
-    timestamp, which is only right when Act 4 happens to have one segment."""
+def test_the_cold_open_takes_no_music_however_good_act4s_swell_is():
+    """Act 0 used to open on Act 4's swell so the summit music was heard
+    first and recognised when it returned. Gate 3 (2026-09-24) withdrew
+    that: "Definitely not from the start." Act 4 here has a swell worth
+    opening on and the cold open still gets nothing."""
     scenes = [
         trek_scene(1, 1, 0.0, 60.0, "village", hr=60, speed=0.1, alt=2000, hour=10),
         trek_scene(2, 2, 60.0, 180.0, "climbing", hr=119, speed=1.4, alt=3500, hour=8),
@@ -1040,10 +1042,12 @@ def test_act0_takes_the_act4_swell_segment():
     swell_section = next(s for s in swell_track.sections if s.get("is_swell"))
 
     act0 = next(x for x in m["acts"] if x["act"] == 0)
-    assert act0["segments"][0]["track_id"] == swell_seg["track_id"]
-    assert act0["segments"][0]["src_in"] == pytest.approx(swell_section["start_s"])
-    assert act0["swells"][0] == pytest.approx(act0["t_start"])
-    assert act0["t_start"] == 0.0 and act0["t_end"] == 20.0
+    assert act0["segments"] == [] and act0["track_id"] is None
+    assert act0["music_windows"] == [] and act0["music_s"] == 0.0
+    assert (act0["t_start"], act0["t_end"]) == (0.0, 20.0)
+    # and an act that carries no music on purpose is not a fault to report
+    assert not [p for p in check_music_map(m, target_s=240.0, min_headroom=1.0)
+                if "act 0" in p]
 
 
 def test_the_map_reports_the_callback_bonus_it_actually_applied():
@@ -1064,10 +1068,9 @@ def test_the_map_reports_the_callback_bonus_it_actually_applied():
 
 
 def test_act0_is_empty_when_act4_has_no_segments_of_its_own():
-    """Act 0 plays the piece Act 4 opens with, so an Act 4 with no scenes
-    (its slots all went elsewhere) leaves nothing to open on -- the cold open
-    comes back empty rather than reaching for a segment that is not there,
-    and check_music_map says which act has no music."""
+    """The cold open is empty either way since Gate 3; this pins that an Act
+    4 with no scenes of its own is still reported, and that the silence
+    still follows it."""
     calm, driving = two_track_library()
     scenes = [trek_scene(1, 1, 30.0, 60.0, "village", hr=60)]
     a = _cue_assignment(scenes, [(calm.track_id, calm.sections[0]["section_id"])])
@@ -1081,43 +1084,18 @@ def test_act0_is_empty_when_act4_has_no_segments_of_its_own():
     assert any("act 4 has no track assigned" in p for p in check_music_map(m, target_s=120.0))
 
 
-def test_act0_is_never_silent_when_act4_has_no_swell():
-    """Reachable with act4_swell=False, or with any library where
-    mark_swells marked nothing (it requires *rising* energy, so a
-    monotonically-decaying track earns zero swells either way) -- Act 0 must
-    still play Act 4's own music rather than come back empty."""
-    tracks = two_track_library()
-    for t in tracks:
-        for s in t.sections:
-            s["is_swell"] = 0
-    scenes, tracks, a = assign_four_scenes(tracks=tracks, act4_swell=False)
-    act_spans = {1: (30.0, 60.0), 2: (60.0, 180.0), 4: (180.0, 240.0), 5: (240.0, 300.0)}
-    m = music_map_from_scenes(scenes, a, tracks, act_spans=act_spans, silence_s=3.0,
-                              act0_span=(0.0, 20.0))
-    act0 = next(x for x in m["acts"] if x["act"] == 0)
-    assert act0["track_id"] is not None
-    assert len(act0["segments"]) == 1
-
-
-def test_the_cold_open_loops_the_swell_rather_than_run_past_the_tracks_end():
-    """Act 0 starts at Act 4's swell, which is by definition late in the
-    piece, so the cold open is the likeliest place in the whole film to ask
-    for audio the file does not hold. Here 30 s is left past the swell and
-    the cold open runs 50 s."""
-    opening = scene_track("opening", "A", 60, [0.1, 0.2])
-    echo = scene_track("echo", "B", 100, [0.1, 0.9], duration=60.0)   # swell at 30s of 60s
-    scenes = [trek_scene(1, 1, 50.0, 110.0, "village", hr=60),
-              trek_scene(2, 4, 110.0, 170.0, "summit", hr=190)]
-    a = _cue_assignment(scenes, [(opening.track_id, opening.sections[0]["section_id"]),
-                                 (echo.track_id, echo.sections[1]["section_id"])])
-    m = music_map_from_scenes(scenes, a, [opening, echo],
-                              act_spans={1: (50.0, 110.0), 4: (110.0, 170.0)}, silence_s=3.0,
-                              act0_span=(0.0, 50.0))
-    act0 = next(x for x in m["acts"] if x["act"] == 0)
-    assert [(s["t_in"], s["t_end"], s["src_in"], s["src_out"]) for s in act0["segments"]] == [
-        (0.0, 30.0, 30.0, 60.0), (30.0, 50.0, 30.0, 50.0)]
-    assert "looped" in m["assignment_note"]
-    assert _segment_problems(act0, {"echo": 60.0}) == []
+def test_act0_entry_yields_no_segment_whatever_act4_holds():
+    """Straight at the builder: whatever Act 4 has -- a swell, no swell, no
+    segments at all -- the cold open comes back with nothing to play and no
+    window to play it in."""
+    echo = scene_track("echo", "B", 100, [0.1, 0.9], duration=60.0)
+    act4 = {"act": 4, "segments": [{"track_id": "echo", "title": "Echo", "artist": "B",
+                                    "t_in": 0.0, "t_end": 60.0, "src_in": 0.0, "src_out": 60.0}]}
+    entry, overrun = _act0_entry((0.0, 50.0), act4, {"echo": echo}, 8.0)
+    assert entry["segments"] == [] and entry["track_id"] is None
+    assert entry["music_windows"] == [] and entry["music_s"] == 0.0
+    assert overrun is None, "nothing is claimed, so nothing can over-claim"
+    assert _segment_problems(entry, {"echo": 60.0}) == []
 
 
 def test_music_map_from_scenes_has_the_same_keys_as_build_music_map():
@@ -1235,3 +1213,98 @@ def test_pair_cost_ignores_a_none_valued_target_term():
     target = {"energy": None, "tempo_bpm": None, "dynamics": 0.5, "brightness": None}
     feat = {"energy_pct": 0.9, "tempo_bpm": 120.0, "dynamics": 0.5, "brightness": 0.1}
     assert pair_cost(target, feat, weights=SCENE_WEIGHTS) == pytest.approx(0.0)
+
+
+# -- music windows: the segments tile the window, not the act (Gate 3) ----
+
+def test_the_segments_tile_each_window_and_nothing_lies_between_them():
+    """The 09fd7fa invariant, moved from "the act" to "its windows": the bed
+    is continuous inside a window and absent outside one, because outside is
+    where the operator asked for no music at all."""
+    scenes = [trek_scene(1, 2, 0.0, 60.0, "walking", hr=100),
+              trek_scene(2, 2, 60.0, 120.0, "walking", hr=100),
+              trek_scene(3, 2, 180.0, 240.0, "climbing", hr=150)]
+    calm, driving = two_track_library()
+    a = _cue_assignment(scenes, [(calm.track_id, calm.sections[0]["section_id"]),
+                                 (calm.track_id, calm.sections[0]["section_id"]),
+                                 (driving.track_id, driving.sections[0]["section_id"])])
+    m = music_map_from_scenes(scenes, a, [calm, driving], act_spans={2: (0.0, 300.0)},
+                              silence_s=3.0, windows={2: [(0.0, 120.0), (180.0, 240.0)]})
+    act = m["acts"][0]
+    assert act["music_windows"] == [{"t_start": 0.0, "t_end": 120.0},
+                                    {"t_start": 180.0, "t_end": 240.0}]
+    assert act["music_s"] == 180.0
+    spans = [(s["t_in"], s["t_end"]) for s in act["segments"]]
+    assert spans[0][0] == 0.0 and spans[-1][1] == 240.0
+    covered = [(a0, b0) for a0, b0 in spans]
+    assert sum(b - a for a, b in covered) == pytest.approx(180.0), \
+        "the 120 s hole between the two windows carries no segment at all"
+    assert not any(120.0 < a < 180.0 for a, _ in covered)
+    assert _segment_problems(act, {t.track_id: t.duration_s for t in [calm, driving]}) == []
+    assert m["music_share"] == pytest.approx(0.6) and m["n_music_windows"] == 2
+
+
+def test_check_music_map_flags_a_segment_laid_outside_every_window():
+    scenes = [trek_scene(1, 2, 0.0, 60.0, "walking", hr=100)]
+    calm, driving = two_track_library()
+    a = _cue_assignment(scenes, [(calm.track_id, calm.sections[0]["section_id"])])
+    m = music_map_from_scenes(scenes, a, [calm, driving], act_spans={2: (0.0, 300.0)},
+                              silence_s=3.0, windows={2: [(0.0, 60.0)]})
+    act = m["acts"][0]
+    assert _segment_problems(act) == []
+    act["segments"].append(dict(act["segments"][0], t_in=200.0, t_end=230.0,
+                                src_in=0.0, src_out=30.0))
+    assert any("outside every music window" in p for p in _segment_problems(act))
+
+
+def test_an_act_with_no_window_is_silent_by_design_not_by_fault():
+    """No track, no swell and no beat grid is exactly right for an act the
+    placement rule left nothing of -- reporting it would report the ruling."""
+    scenes = [trek_scene(1, 2, 0.0, 60.0, "walking", hr=100)]
+    calm, driving = two_track_library()
+    a = _cue_assignment(scenes, [(calm.track_id, calm.sections[0]["section_id"])])
+    m = music_map_from_scenes(scenes, a, [calm, driving],
+                              act_spans={2: (0.0, 300.0), 4: (300.0, 360.0)},
+                              silence_s=3.0, windows={2: [(0.0, 60.0)]})
+    problems = check_music_map(m, target_s=360.0, min_headroom=1.0)
+    assert not [p for p in problems if "act 4" in p], problems
+    assert m["n_music_windows"] == 1
+
+
+def test_a_window_boundary_is_a_fresh_start_not_a_cut():
+    """No continuity across silence: the switch cost and the continuity
+    bonus are both about what the audience hears at a cut, and between two
+    windows they hear nothing. Here staying on the incumbent is worth
+    nothing extra, so the better fit for the second window wins even at a
+    switch cost that would otherwise hold it."""
+    calm, driving = two_track_library()
+    scenes = [trek_scene(1, 2, 0.0, 60.0, "resting", hr=60, speed=0.1),
+              trek_scene(2, 2, 600.0, 660.0, "climbing", hr=190, speed=1.4)]
+    targets = scene_targets_for(scenes)
+    held = assign_scenes(scenes, [calm, driving], targets=targets, weights=SCENE_WEIGHTS,
+                         switch_cost=5.0, continuity_bonus=0.0, repeat_penalty=0.0,
+                         reuse_gap_s=300, preferred=[], preferred_bonus=0.0, exclude=[],
+                         act4_swell=False)
+    assert held.by_scene[1][0] == held.by_scene[2][0], \
+        "a switch cost that large holds the incumbent across an ordinary cut"
+    fresh = assign_scenes(scenes, [calm, driving], targets=targets, weights=SCENE_WEIGHTS,
+                          switch_cost=5.0, continuity_bonus=0.0, repeat_penalty=0.0,
+                          reuse_gap_s=300, preferred=[], preferred_bonus=0.0, exclude=[],
+                          act4_swell=False, window_starts={2})
+    assert fresh.by_scene[1][0] == "calm" and fresh.by_scene[2][0] == "driving"
+
+
+def test_the_reuse_gap_still_reaches_across_a_windows_silence():
+    """``_recent_tracks`` walks wall-clock, not cuts: a track heard four
+    minutes and one silence ago is still a track heard four minutes ago."""
+    calm, driving = two_track_library()
+    scenes = [trek_scene(1, 2, 0.0, 60.0, "climbing", hr=190, speed=1.4),
+              trek_scene(2, 2, 90.0, 150.0, "climbing", hr=190, speed=1.4)]
+    targets = scene_targets_for(scenes)
+    a = assign_scenes(scenes, [calm, driving], targets=targets, weights=SCENE_WEIGHTS,
+                      switch_cost=0.0, continuity_bonus=0.0, repeat_penalty=9.0,
+                      reuse_gap_s=300, preferred=[], preferred_bonus=0.0, exclude=[],
+                      act4_swell=False, window_starts={2})
+    assert a.by_scene[1][0] == "driving"
+    assert a.by_scene[2][0] == "calm", \
+        "the piece heard 30 s ago pays the repeat penalty though a silence sat between"

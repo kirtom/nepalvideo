@@ -677,17 +677,23 @@ def _cold_open(cfg: Config, beats: Sequence[Mapping[str, Any]], rows: Sequence[M
 
 
 def _sections_for_act(entry: Mapping[str, Any], tracks_by_id: Mapping[str, music_mod.Track], *,
-                      shift: float, t0: float, t1: float) -> list[dict[str, Any]]:
+                      shift: float, t0: float, t1: float,
+                      no_music_band: str) -> list[dict[str, Any]]:
     """The act's music on the film timeline, one piece per track section so
     the rhythm pass can rank energies -- the map's segments are act-local
     and a merged run may span several sections.
 
-    The map's segments already tile their act (``check_music_map`` asserts
-    it), so the last piece reaches the act's planned end on its own and
-    nothing is stretched here -- ``retime`` drops whatever lies past the last
-    section, and the fill that follows must be able to reach the whole act.
-    An act with no music at all still needs one silent piece to stand for it,
-    or the act would have no span for the walk to run in.
+    The map's segments tile their music windows (``check_music_map`` asserts
+    it), but since Gate 3 the windows no longer tile the act: between them,
+    and before the first and after the last, the film carries itself. The
+    walk still needs a section everywhere, because ``retime`` drops whatever
+    lies past the last one and the fill that follows must be able to reach
+    the whole act -- so every hole is closed with a piece carrying
+    ``no_music_band`` outright. That generalises the silent-piece fallback
+    this function already had for an act with no music at all: same idea,
+    now applied per hole instead of only to the whole act, and naming the
+    band the config chose rather than leaving the energy at None for the
+    ranking to interpret.
     """
     out: list[dict[str, Any]] = []
     t_start = float(entry.get("t_start", 0.0)) + shift
@@ -702,9 +708,19 @@ def _sections_for_act(entry: Mapping[str, Any], tracks_by_id: Mapping[str, music
         if covered < f_out - 1e-6:
             pieces.append((covered, f_out, None))   # past the piece's end: nothing to read
         out += [{"t_in": round(a, 3), "t_out": round(b, 3), "energy": e} for a, b, e in pieces if b > a]
-    if not out:
-        out = [{"t_in": round(t0, 3), "t_out": round(t1, 3), "energy": None}]
-    return out
+    out.sort(key=lambda s: s["t_in"])
+    filled: list[dict[str, Any]] = []
+    cursor = t0
+    for piece in out:
+        if piece["t_in"] > cursor + 1e-6:
+            filled.append({"t_in": round(cursor, 3), "t_out": round(piece["t_in"], 3),
+                           "energy": None, "band": no_music_band})
+        filled.append(piece)
+        cursor = max(cursor, piece["t_out"])
+    if cursor < t1 - 1e-6:
+        filled.append({"t_in": round(cursor, 3), "t_out": round(t1, 3),
+                       "energy": None, "band": no_music_band})
+    return filled
 
 
 def _check_material(slot: Mapping[str, Any], shots_by_id: Mapping[str, Mapping[str, Any]],
@@ -754,12 +770,44 @@ def _scene_id_by_time(slot: Mapping[str, Any], scenes: Sequence[scenes_mod.Scene
     return nearest.scene_id if nearest else None
 
 
+def _info_spans(cfg: Config, slots: Sequence[Mapping[str, Any]], beats: Sequence[Mapping[str, Any]],
+                prof: Sequence[effort.Effort], shots_by_id: Mapping[str, Mapping[str, Any]], *,
+                cold_open_end_s: float) -> list[tuple[float, float]]:
+    """Where something other than music already carries the information
+    (Gate 3), read off the same slots the cues step will read: the speech
+    beats' runs, the chat and closing cards, the natural-sound windows, and
+    the film's opening.
+
+    Built from ``cues``'s own functions rather than from a second reading of
+    the timeline -- a card the placement rule thought was somewhere else is
+    a bed playing over a card, which is precisely what the operator watched
+    and objected to. ``cast_tags`` is empty because only the spans are
+    wanted here; the tag is a property of the payload, which nothing in this
+    path reads.
+    """
+    natural, _ = _natural_windows(cfg, prof, slots, shots_by_id)
+    overlays = cues_mod.overlay_rows(beats, slots,
+                                     chat_card_s=float(cfg.get("assemble.chat_card_s")),
+                                     closing_card_s=float(cfg.get("assemble.closing_card_s")),
+                                     cast_tags={})
+    return scenes_mod.blocking_spans(
+        speech_spans=cues_mod.speech_spans(slots),
+        overlay_spans=[(float(o["t_in"]), float(o["t_out"])) for o in overlays],
+        natural_spans=[(float(w["t_in"]), float(w["t_out"])) for w in natural],
+        cold_open_end_s=cold_open_end_s,
+        no_music_before_s=float(cfg.get("music.placement.no_music_before_s")),
+        speech_margin_s=float(cfg.get("music.placement.speech_margin_s")))
+
+
 def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, tracks, *,
                     act_spans: Mapping[int, tuple[float, float]], act0_span: tuple[float, float],
-                    total_s: float) -> tuple[list[scenes_mod.Scene], dict[str, Any], str, list[str]]:
-    """Scenes from the picture track, a section of a track per scene, and
-    the map S06's audio graph reads. Act 0 slots are grouped too so every
-    slot has a scene; the map takes Act 0's music from Act 4's swell."""
+                    total_s: float, info_spans: Sequence[tuple[float, float]]
+                    ) -> tuple[list[scenes_mod.Scene], dict[str, Any], str, list[str]]:
+    """Scenes from the picture track, a section of a track per *eligible*
+    scene, and the map S06's audio graph reads. Act 0 slots are grouped too
+    so every slot has a scene, but the cold open takes no music (Gate 3) and
+    neither does any scene that ``info_spans`` touches: the assignment only
+    ever sees what is left."""
     beats_spans: dict[str, list[float]] = {}
     for s in slots:
         if s.get("beat_id"):
@@ -770,21 +818,34 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
         max_scene_s=float(cfg.get("music.max_segment_s")),
         beats_spans=[tuple(v) for v in beats_spans.values()],
         cities=list(cfg.get("assemble.cities")))
+    windows = scenes_mod.music_windows(
+        scenes, blocked=info_spans,
+        min_window_s=float(cfg.get("music.placement.min_window_s")))
+    in_window = {sid for w in windows for sid in w.scene_ids}
+    eligible = [sc for sc in scenes if sc.scene_id in in_window]
+    window_starts = {w.scene_ids[0] for w in windows}
+    by_act: dict[int, list[tuple[float, float]]] = {}
+    for w in windows:
+        by_act.setdefault(w.act, []).append((w.t_in, w.t_out))
+    log.info("S06 music placement: %d window(s) over %d of %d scene(s), %.1fs of film",
+             len(windows), len(eligible), len(scenes),
+             sum(w.t_out - w.t_in for w in windows))
     mode = str(cfg.get("music.assignment"))
     if mode == "act":
         # S02.7's per-act choice, laid through the same machinery: every
         # scene of an act on the act's track from its first section.
-        by_act = {t.assigned_act: t for t in tracks if t.assigned_act is not None and t.sections}
+        track_of_act = {t.assigned_act: t for t in tracks if t.assigned_act is not None and t.sections}
         assignment = music_mod.SceneAssignment(
-            {sc.scene_id: (by_act[sc.act].track_id, by_act[sc.act].sections[0]["section_id"])
-             for sc in scenes if sc.act in by_act}, 0.0, "per-act tracks from S02.7")
+            {sc.scene_id: (track_of_act[sc.act].track_id,
+                           track_of_act[sc.act].sections[0]["section_id"])
+             for sc in eligible if sc.act in track_of_act}, 0.0, "per-act tracks from S02.7")
     else:
         hr_rest, hr_max = float(cfg.get("effort.hr_rest_bpm")), float(cfg.get("effort.hr_max_bpm"))
         credits = cfg.get("music.credits_track", None)
         assignment = music_mod.assign_scenes(
-            scenes, tracks,
+            eligible, tracks,
             targets={sc.scene_id: scenes_mod.scene_target(sc, hr_rest=hr_rest, hr_max=hr_max)
-                     for sc in scenes},
+                     for sc in eligible},
             weights=cfg.get("music.scene_targets"),
             switch_cost=float(cfg.get("music.switch_cost")),
             continuity_bonus=float(cfg.get("music.continuity_bonus")),
@@ -792,11 +853,15 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
             reuse_gap_s=float(cfg.get("music.reuse_gap_s")),
             preferred=list(cfg.get("music.preferred_tracks", []) or []),
             preferred_bonus=float(cfg.get("music.preferred_bonus")),
-            exclude=[credits] if credits else [])
+            exclude=[credits] if credits else [],
+            window_starts=window_starts)
+    # The eligible scenes, not all of them: the callback bonus the map
+    # reports is the one the assignment actually paid, and the assignment
+    # never saw the rest.
     mmap = music_mod.music_map_from_scenes(
-        scenes, assignment, tracks, act_spans=act_spans,
+        eligible, assignment, tracks, act_spans=act_spans,
         silence_s=float(cfg.get("assemble.silence_window_s")), act0_span=act0_span,
-        loop_min_piece_s=float(cfg.get("music.loop_min_piece_s")))
+        loop_min_piece_s=float(cfg.get("music.loop_min_piece_s")), windows=by_act)
     # Every track, including one whose duration never got measured. Filtering
     # those out here handed the check a map it could not fault and left the
     # one track nothing could bound as the one track nothing reported.
@@ -1069,8 +1134,10 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     # -- scenes, then music ---------------------------------------------------
     attrs = _attrs_for(prof, rows, beats=beats)
     all_slots = list(act0) + [s for a in acts for s in planned[a]]
+    info_spans = _info_spans(cfg, all_slots, beats, prof, shots_by_id, cold_open_end_s=t0)
     scenes, mmap, mode, problems = _scenes_and_map(
-        cfg, all_slots, attrs, tracks, act_spans=planned_spans, act0_span=(0.0, t0), total_s=total_s)
+        cfg, all_slots, attrs, tracks, act_spans=planned_spans, act0_span=(0.0, t0),
+        total_s=total_s, info_spans=info_spans)
     # Before the acts are cut against it, not after: every act below is timed
     # on this map's grid, so a problem read at the end of the run is a
     # problem read after it has already shaped the film.
@@ -1092,7 +1159,8 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         shift = t - planned_spans[act][0]
         shifts[act] = shift
         act_t0, act_t1 = t, t + act_len[act]
-        sections = _sections_for_act(entry, tracks_by_id, shift=shift, t0=act_t0, t1=act_t1)
+        sections = _sections_for_act(entry, tracks_by_id, shift=shift, t0=act_t0, t1=act_t1,
+                                     no_music_band=str(cfg.get("music.placement.no_music_band")))
         # Rounded to the three decimals every slot edge is rounded to. The
         # map's beats are, but adding the shift in float put the grid's
         # last beat at the walk's own t_in plus 1e-11: retime took it as
@@ -1193,7 +1261,9 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     n_dropped_locked += n_squeezed
     if moved:
         scenes, mmap, mode, problems = _scenes_and_map(
-            cfg, ordered, attrs, tracks, act_spans=final_spans, act0_span=(0.0, t0), total_s=total_s)
+            cfg, ordered, attrs, tracks, act_spans=final_spans, act0_span=(0.0, t0),
+            total_s=total_s,
+            info_spans=_info_spans(cfg, ordered, beats, prof, shots_by_id, cold_open_end_s=t0))
         for sc in scenes:
             for i in sc.slot_indices:
                 ordered[i]["scene_id"] = sc.scene_id
@@ -1232,6 +1302,13 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
             "n_anchors": n_anchors, "n_pairs": len(pairs), "n_dropped_locked": n_dropped_locked,
             "long_take": shots_by_id[long_take_id]["recording_id"] if long_take_id else None,
             "n_scenes": len(scenes), "music_assignment": mode,
+            # Gate 3's own numbers: how much of the film is under music, in
+            # how many windows, and where -- the operator reads this to say
+            # whether "only where nothing else is spoken" landed.
+            "music_share": mmap.get("music_share"),
+            "n_music_windows": mmap.get("n_music_windows"),
+            "music_windows_per_act": {str(a["act"]): a.get("music_windows", [])
+                                      for a in mmap.get("acts", [])},
             "music_map_recomputed": sorted(moved), "music_map_problems": problems,
             "cold_open_beat": act0[0].get("beat_id") if act0 and act0[0]["kind"] == "video" else None,
             "natural_windows": natural, "n_natural_windows_unplaced": n_unplaced,
@@ -1306,7 +1383,9 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
                 lufs_full=float(cfg.get("render.location_full_lufs")),
                 lufs_under_speech=float(cfg.get("render.location_under_speech_lufs")),
                 speech_spans=cues_mod.speech_spans(slots), windows=natural,
-                silence=mmap.get("silence_window"), fade_s=float(cfg.get("render.cue_fade_s")),
+                silence=mmap.get("silence_window"),
+                music_spans=cues_mod.music_spans(mmap),
+                fade_s=float(cfg.get("render.cue_fade_s")),
                 window_fade_s=float(cfg.get("render.window_fade_s")))
             + cues_mod.music_cues(mmap, lufs=float(cfg.get("render.music_lufs")),
                                   xfade_s=float(cfg.get("render.music_xfade_s")),
@@ -1328,8 +1407,12 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
     db.upsert(conn, "overlays", ["overlay_id"], overlays)
     conn.commit()
     n_cues = {t: sum(1 for c in cues if c["track"] == t) for t in ("speech", "location", "music")}
-    log.info("S05.cues %s; %d overlay(s); %d natural-sound window(s)", n_cues, len(overlays), len(natural))
-    return {"n_cues": n_cues, "n_overlays": len(overlays), "natural_windows": natural}
+    music_s = sum(b - a for a, b in cues_mod.music_spans(mmap))
+    log.info("S05.cues %s; %d overlay(s); %d natural-sound window(s); music over %.0fs in %d "
+             "window(s)", n_cues, len(overlays), len(natural), music_s,
+             len(cues_mod.music_spans(mmap)))
+    return {"n_cues": n_cues, "n_overlays": len(overlays), "natural_windows": natural,
+            "music_s": round(music_s, 1), "n_music_windows": len(cues_mod.music_spans(mmap))}
 
 
 def photo_source(cfg: Config, row: Mapping[str, Any]) -> Path | None:

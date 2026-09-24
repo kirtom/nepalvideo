@@ -140,6 +140,7 @@ def speech_spans(slots: Sequence[Mapping[str, Any]]) -> list[tuple[float, float]
 def location_cues(slots: Sequence[Mapping[str, Any]], *, lufs_under_music: float, lufs_full: float,
                   lufs_under_speech: float, speech_spans: Sequence[tuple[float, float]],
                   windows: Sequence[Mapping[str, Any]], silence: Mapping[str, Any] | None,
+                  music_spans: Sequence[tuple[float, float]],
                   fade_s: float, window_fade_s: float) -> list[dict[str, Any]]:
     """One cue per slot, in ``slot_index`` order, each slot carrying its
     shot's ``recording_id``. A video slot plays its own recording at its
@@ -148,6 +149,17 @@ def location_cues(slots: Sequence[Mapping[str, Any]], *, lufs_under_music: float
     not drop out under a still. ``windows`` are the report's natural-sound
     windows (``t_in``/``t_out``), ``silence`` the map's window
     (``t_start``/``t_end``); inside either the location sound is the mix.
+
+    ``music_spans`` are the map's music windows (Gate 3). Outside every one
+    of them there is no bed to duck under, so the location sound IS the
+    mix -- full level, the same as inside a natural-sound window. It has no
+    default: a caller that forgets it would silently duck the film's own
+    sound under music that is not playing, which is exactly the fault the
+    ruling is about, and the only honest failure is a loud one.
+
+    The order of the four cases is the order of what is being protected:
+    a natural window or the silence was placed to be heard, then a voice,
+    then a bed to sit under, and what is left has nothing above it.
 
     A slot's level is read at its centre, so a window that cuts a slot
     claims it by the larger part rather than by a frame at the edge; each
@@ -179,8 +191,10 @@ def location_cues(slots: Sequence[Mapping[str, Any]], *, lufs_under_music: float
             gain = lufs_full
         elif _inside(mid, speech_spans):
             gain = lufs_under_speech
-        else:
+        elif _inside(mid, music_spans):
             gain = lufs_under_music
+        else:
+            gain = lufs_full
         out.append(_cue(cue_id=f"lo_{s['slot_index']}", track="location", t_in=t0, t_out=t1,
                         source=held[0], src_in=src_in, src_out=src_out, gain_lufs=gain,
                         fade_in_s=window_fade_s if _inside(t0, full) else fade_s,
@@ -203,10 +217,17 @@ def map_on_film_time(mmap: Mapping[str, Any],
     are the table's own first ``t_in`` and last ``t_out`` per act. The
     silence keeps its length and stays after the act it followed in the map,
     at that act's real end.
+
+    An act's music windows are on film time too, so they move with it by the
+    same delta. A window is clamped to the act's real end and dropped if it
+    now starts past it: an act the picture made shorter has less room for
+    music, and a bed running past the act would play under the next one's
+    first shots. An act the picture made *longer* keeps its windows where
+    they are -- the extra seconds are outside every window, which is
+    silence, which is the placement rule's own answer.
     """
     out = dict(mmap)
-    out["acts"] = [dict(e, t_start=round(act_spans[int(e["act"])][0], 3),
-                        t_end=round(act_spans[int(e["act"])][1], 3))
+    out["acts"] = [_rebase_act(e, *act_spans[int(e["act"])])
                    if int(e["act"]) in act_spans else dict(e) for e in mmap.get("acts", [])]
     q = mmap.get("silence_window") or {}
     if q:
@@ -217,6 +238,35 @@ def map_on_film_time(mmap: Mapping[str, Any],
             end = act_spans[before][1]
             out["silence_window"] = {"t_start": round(end, 3), "t_end": round(end + (q1 - q0), 3)}
     return out
+
+
+def _rebase_act(entry: Mapping[str, Any], t_start: float, t_end: float) -> dict[str, Any]:
+    delta = t_start - float(entry["t_start"])
+    out = dict(entry, t_start=round(t_start, 3), t_end=round(t_end, 3))
+    if entry.get("music_windows") is not None:
+        moved = [(float(w["t_start"]) + delta, min(float(w["t_end"]) + delta, t_end))
+                 for w in entry["music_windows"]]
+        out["music_windows"] = [{"t_start": round(w0, 3), "t_end": round(w1, 3)}
+                                for w0, w1 in moved if w1 - w0 > _EDGE_TOL_S]
+    return out
+
+
+def _entry_windows(entry: Mapping[str, Any]) -> list[tuple[float, float]]:
+    """One act's music windows on film time. No ``music_windows`` key at all
+    is a map from before Gate 3: the act is one window, which is what it
+    meant then and still means for the per-act assignment mode."""
+    wins = entry.get("music_windows")
+    if wins is None:
+        return [(float(entry["t_start"]), float(entry["t_end"]))]
+    return [(float(w["t_start"]), float(w["t_end"])) for w in wins]
+
+
+def music_spans(mmap: Mapping[str, Any]) -> list[tuple[float, float]]:
+    """Every span of the film that carries music, on film time -- what the
+    location track reads to know where it is the bed and where it is under
+    one. A map from before Gate 3 named no windows and meant the whole of
+    every act, which is what it gets."""
+    return [w for entry in mmap.get("acts", []) for w in _entry_windows(entry)]
 
 
 def _loop_cuts(t0: float, t1: float, src_in: float, duration: float | None,
@@ -258,58 +308,87 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
                window_fade_s: float,
                track_s: Mapping[str, float | None] | None = None,
                loop_min_piece_s: float = _LOOP_MIN_PIECE_S) -> list[dict[str, Any]]:
-    """One cue per segment of every act in the map, on film time. Adjacent
-    cues carry the crossfade on both ends; the renderer overlaps them. The
-    silence window gets no music: a segment inside it is dropped, one that
-    runs into it stops at its edge and fades over the window fade, one that
-    starts inside it resumes where the silence ends, the track advanced by
-    the same amount so the map's beat grid still lines up.
+    """One cue per segment of every music window in the map, on film time.
+    Adjacent cues inside a window carry the crossfade on both ends; the
+    renderer overlaps them. The silence window gets no music: a segment
+    inside it is dropped, one that runs into it stops at its edge and fades
+    over the window fade, one that starts inside it resumes where the
+    silence ends, the track advanced by the same amount so the map's beat
+    grid still lines up.
 
-    An act's last cue ends where the act ends. The map's segments tile the
-    act the map was *planned* on, but the acts here are the ones the picture
-    actually has: ``map_on_film_time`` rebases each act onto the table's own
-    span, and the map is only rebuilt when an act moved by more than a scene,
-    so the difference (8.4 s in act 4 on the seeded corpus) lands on the last
-    cue either way. Short would be a hole in the bed right before the cut,
-    over would be two beds under the next act's first shot. A segment that
-    only begins past the end is dropped.
+    Since Gate 3 an act is several windows with silence between them, and
+    where the bed arrives and leaves it fades over ``window_fade_s`` -- the
+    same fade the natural-sound windows already use, because the same thing
+    is happening: the music is getting out of the way of something else. The
+    cut fade (``xfade_s``) stays for the seams, which are one piece handing
+    over to the next rather than the bed starting or stopping -- including
+    the seam at an act boundary where one act's window ends exactly where
+    the next act's begins, which is one continuous bed and not two.
+
+    A window's last cue ends where the window ends. The map's segments tile
+    the window the map was *planned* on, but the acts here are the ones the
+    picture actually has: ``map_on_film_time`` rebases each act, and its
+    windows with it, onto the table's own span, and the map is only rebuilt
+    when an act moved by more than a scene, so the difference (8.4 s in act 4
+    on the seeded corpus) lands on the last cue either way. Short would be a
+    hole in the bed, over would be a bed playing into the silence the
+    operator asked for. A segment that only begins past the window's end is
+    dropped.
 
     That stretch is unbounded -- up to `music.min_scene_s` (45 s) can be
     added -- so with ``track_s`` (track_id -> duration_s; absent, the stretch
     is taken as before) a last cue that would run past its file's end is
     laid as several cues instead, the track restarting at the segment's own
     section cue. ffmpeg would otherwise deliver what exists and stop, which
-    is dead bed under the act's closing shots."""
+    is dead bed under the window's closing shots."""
     q = mmap.get("silence_window") or {}
     q0, q1 = (float(q["t_start"]), float(q["t_end"])) if q else (math.inf, math.inf)
+    by_act = {int(e["act"]): _entry_windows(e) for e in mmap.get("acts", [])}
+    # Where the music actually starts and stops, as opposed to where a window
+    # merely begins or ends: two windows meeting edge to edge (every act
+    # boundary in act mode, and any act whose window runs to its end followed
+    # by one that opens on its start) are one continuous bed handing over
+    # from one piece to the next, which is a crossfade. The window fade is
+    # for the edges with silence on the other side.
+    all_starts = [w0 for wins in by_act.values() for w0, _ in wins]
+    all_ends = [w1 for wins in by_act.values() for _, w1 in wins]
     out: list[dict[str, Any]] = []
     for entry in mmap.get("acts", []):
         t_start, t_end = float(entry["t_start"]), float(entry["t_end"])
         segments = entry.get("segments") or []
-        kept = [i for i, seg in enumerate(segments) if t_start + float(seg["t_in"]) < t_end - _EDGE_TOL_S]
-        for i in kept:
-            seg = segments[i]
-            t0, t1 = t_start + float(seg["t_in"]), t_start + float(seg["t_end"])
-            src_in = float(seg["src_in"])
-            if i == kept[-1]:
-                t1 = t_end
-            cuts = _loop_cuts(t0, t1, src_in, (track_s or {}).get(seg["track_id"]),
-                              loop_min_piece_s)
-            for k, (t0, t1, src_in) in enumerate(cuts):
-                src_out = src_in + (t1 - t0)
-                if t0 < q1 and t1 > q0:
-                    if t0 >= q0 and t1 <= q1:
-                        continue
-                    if t0 < q0:
-                        src_out, t1 = src_out - (t1 - q0), q0
-                    else:
-                        src_in, t0 = src_in + (q1 - t0), q1
-                fade_out = window_fade_s if math.isclose(t1, q0, abs_tol=_EDGE_TOL_S) else xfade_s
-                cue_id = f"mu_{entry['act']}_{i}" if k == 0 else f"mu_{entry['act']}_{i}c{k}"
-                out.append(_cue(cue_id=cue_id, track="music", t_in=round(t0, 3),
-                                t_out=round(t1, 3), source=seg["track_id"], src_in=round(src_in, 3),
-                                src_out=round(src_out, 3), gain_lufs=lufs, fade_in_s=xfade_s,
-                                fade_out_s=fade_out))
+        for w0, w1 in by_act[int(entry["act"])]:
+            starts_music = not any(math.isclose(w0, e, abs_tol=_EDGE_TOL_S) for e in all_ends)
+            ends_music = not any(math.isclose(w1, a, abs_tol=_EDGE_TOL_S) for a in all_starts)
+            kept = [i for i, seg in enumerate(segments)
+                    if w0 - _EDGE_TOL_S <= t_start + float(seg["t_in"]) < w1 - _EDGE_TOL_S]
+            for i in kept:
+                seg = segments[i]
+                t0, t1 = t_start + float(seg["t_in"]), t_start + float(seg["t_end"])
+                src_in = float(seg["src_in"])
+                if i == kept[-1]:
+                    t1 = w1
+                cuts = _loop_cuts(t0, min(t1, w1), src_in, (track_s or {}).get(seg["track_id"]),
+                                  loop_min_piece_s)
+                for k, (t0, t1, src_in) in enumerate(cuts):
+                    src_out = src_in + (t1 - t0)
+                    if t0 < q1 and t1 > q0:
+                        if t0 >= q0 and t1 <= q1:
+                            continue
+                        if t0 < q0:
+                            src_out, t1 = src_out - (t1 - q0), q0
+                        else:
+                            src_in, t0 = src_in + (q1 - t0), q1
+                    opens = starts_music and i == kept[0] and k == 0
+                    closes = ends_music and i == kept[-1] and k == len(cuts) - 1
+                    fade_out = (window_fade_s if closes or
+                                math.isclose(t1, q0, abs_tol=_EDGE_TOL_S) else xfade_s)
+                    cue_id = f"mu_{entry['act']}_{i}" if k == 0 else f"mu_{entry['act']}_{i}c{k}"
+                    out.append(_cue(cue_id=cue_id, track="music", t_in=round(t0, 3),
+                                    t_out=round(t1, 3), source=seg["track_id"],
+                                    src_in=round(src_in, 3), src_out=round(src_out, 3),
+                                    gain_lufs=lufs,
+                                    fade_in_s=window_fade_s if opens else xfade_s,
+                                    fade_out_s=fade_out))
     return out
 
 

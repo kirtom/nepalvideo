@@ -398,3 +398,94 @@ def scene_target(scene: Scene, *, hr_rest: float, hr_max: float) -> dict[str, fl
         brightness = BRIGHTNESS_NEUTRAL
 
     return {"energy": energy, "tempo_bpm": tempo_bpm, "dynamics": dynamics, "brightness": brightness}
+
+
+# -- music windows (Gate 3, 2026-09-24) --------------------------------
+
+# The operator, having watched the first draft with sound: "Constant music is
+# a little bit too much for this video, it doesn't match the vibe. Music
+# should be played only on those parts of the video where nothing else is
+# spoken -- when it's appropriate, when it's not messing up with some kind of
+# other information. Definitely not from the start."
+#
+# So music is placed rather than laid. Everything else that carries
+# information blocks it; a scene none of it touches is eligible; runs of
+# eligible scenes are the windows the map fills. The unit is the scene and
+# not the second because a cue has to establish itself -- that is the whole
+# reason scenes exist (see this module's docstring) -- and a bed that starts
+# and stops inside one scene is the flutter the ruling is complaining about.
+
+
+@dataclass(frozen=True)
+class MusicWindow:
+    """A stretch of one act that may carry music, and the scenes in it."""
+    act: int
+    t_in: float
+    t_out: float
+    scene_ids: tuple[int, ...]
+
+
+def _overlaps(a0: float, a1: float, b0: float, b1: float) -> bool:
+    return a0 < b1 and b0 < a1
+
+
+def blocking_spans(*, speech_spans: Sequence[tuple[float, float]],
+                   overlay_spans: Sequence[tuple[float, float]],
+                   natural_spans: Sequence[tuple[float, float]],
+                   cold_open_end_s: float, no_music_before_s: float,
+                   speech_margin_s: float) -> list[tuple[float, float]]:
+    """Every span of film where something other than music already carries
+    the information -- the one place that answers "what counts as
+    information", so the eligibility rule below has nothing to decide.
+
+    Only the speech spans get the margin: the ruling is that music must not
+    mess with what is being said, and a bed that stops on the syllable reads
+    as a fault rather than as a choice. A card is on screen for a fixed few
+    seconds and needs no run-up, and a natural-sound window is already the
+    quiet it asks for.
+
+    The opening is the union of the cold open and ``no_music_before_s``
+    rather than either alone: "definitely not from the start" is about the
+    film's opening, and the cold open is only the first part of it.
+    """
+    out = [(float(a) - speech_margin_s, float(b) + speech_margin_s) for a, b in speech_spans]
+    out += [(float(a), float(b)) for a, b in overlay_spans]
+    out += [(float(a), float(b)) for a, b in natural_spans]
+    opening = max(float(cold_open_end_s), float(no_music_before_s))
+    if opening > 0:
+        out.append((0.0, opening))
+    return sorted(s for s in out if s[1] > s[0])
+
+
+def music_windows(scenes: Sequence[Scene], *, blocked: Sequence[tuple[float, float]],
+                  min_window_s: float) -> list[MusicWindow]:
+    """The stretches that may carry music: runs of consecutive scenes that no
+    blocking span touches, each at least ``min_window_s`` long.
+
+    A run breaks at an act boundary as well as at a blocked scene, because
+    the map records its windows per act and the segments tile them there --
+    and because an act is the film's own unit of musical intent, so a cue
+    running over the seam would be saying something the structure does not.
+
+    Act 0 is never eligible: the cold open takes no music at all ("definitely
+    not from the start"), whatever ``no_music_before_s`` is set to.
+
+    A window under ``min_window_s`` is dropped rather than shortened: a sting
+    too brief to establish itself is noise, and the scenes in it simply go
+    unassigned -- which is silence, which is the point.
+    """
+    spans = [(float(a), float(b)) for a, b in blocked if b > a]
+    runs: list[list[Scene]] = []
+    broken = True
+    for sc in scenes:
+        if sc.act < 1 or any(_overlaps(sc.t_in, sc.t_out, a, b) for a, b in spans):
+            broken = True
+            continue
+        if broken or not runs or runs[-1][-1].act != sc.act:
+            runs.append([sc])
+        else:
+            runs[-1].append(sc)
+        broken = False
+    return [MusicWindow(act=run[0].act, t_in=run[0].t_in, t_out=run[-1].t_out,
+                        scene_ids=tuple(sc.scene_id for sc in run))
+            for run in runs if run[-1].t_out - run[0].t_in >= min_window_s]

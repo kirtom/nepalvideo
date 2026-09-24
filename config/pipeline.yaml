@@ -523,21 +523,53 @@ music:
   # against a cue that will never play there. Matched on file name, stem or
   # title; a name that matches nothing is a warning, never a silent no-op.
   credits_track: "Marusha.Somewhere over the Rainbow.mp3"
-  # The operator's own picks (2026-09-18: "just my opinion, if logic chooses
-  # something different it's ok"). A bonus in the per-scene assignment (Film
-  # v2 section 5.6), never a rule: it tilts a close call and cannot override
-  # a bad fit. Matched on file name or stem like credits_track.
-  preferred_tracks:
-    - "José González.Heartbeats.mp3"
-    - "Alexandre Desplat.The Imitation Game.mp3"
-    - "M83.Outro.mp3"
-    - 'Murray Gold.The Long Song - From "Doctor Who" Series 7.mp3'
-    - "Hans Zimmer.Time.mp3"
-    - "Rusted Root.Send Me on My Way.mp3"
-  # A tilt must be smaller than the spread it tilts: the median best-vs-third
-  # gap on the real corpus is 0.056, and 0.15 outweighed the whole available
-  # gain in 24 of 31 scenes (same measurement as switch_cost above).
-  preferred_bonus: 0.05
+  # The operator's own picks, WITHDRAWN at Gate 3 (2026-09-24, after watching
+  # the first draft with sound): "Remove my previous requirement of using
+  # four or five specific songs with high priority." The mechanism stays --
+  # a bonus in the per-scene assignment (Film v2 section 5.6), never a rule:
+  # it tilts a close call and cannot override a bad fit, matched on file name
+  # or stem like credits_track -- it simply has nothing to prefer, so a later
+  # operator can name tracks here without any code coming back.
+  preferred_tracks: []
+  # Zero while the list is empty, so nothing is silently tilted by a bonus
+  # nobody asked for. Was 0.05, sized against the real corpus: the median
+  # best-vs-third gap is 0.056, and 0.15 outweighed the whole available gain
+  # in 24 of 31 scenes (same measurement as switch_cost above). That is the
+  # number to restore if the list is ever filled again.
+  preferred_bonus: 0.0
+  # -- Gate 3 (2026-09-24): music is placed, not laid ---------------------
+  # The operator, on the first draft with sound: "Constant music is a little
+  # bit too much for this video, it doesn't match the vibe. Music should be
+  # played only on those parts of the video where nothing else is spoken --
+  # when it's appropriate, when it's not messing up with some kind of other
+  # information. Definitely not from the start."
+  # So a scene carries music only where nothing else carries information: no
+  # speech beat, no chat or closing card, no natural-sound window, not the
+  # cold open and not the film's first minute and a half. What is left over
+  # groups into windows, and the map's segments tile those windows instead of
+  # the acts.
+  placement:
+    # Both sides of a speech beat's span: the bed ends before the line and
+    # comes back after it, rather than ducking under it. One breath is enough
+    # for the fade to read as deliberate and short enough that a pause
+    # between two lines of the same exchange is not mistaken for a window.
+    speech_margin_s: 2.0
+    # A window shorter than this is dropped rather than filled: a ten-second
+    # sting under nothing arrives, states nothing and leaves -- which is the
+    # "messing up with some kind of other information" the ruling is about,
+    # not the music the film wants.
+    min_window_s: 30
+    # "Definitely not from the start." The cold open, the opening card and
+    # Act 1's first chat cards play on location sound alone; 90 s is what
+    # those take at assemble.card_s + assemble.chat_card_s apiece.
+    no_music_before_s: 90
+    # Outside a window the rhythm pass still needs a section to time its cuts
+    # against, and a section is nothing but an energy band. "low" is the
+    # band whose holds are longest (see assemble.rhythm): with no bed under
+    # it the cut breathes instead of inheriting the pace of music that is not
+    # playing. A key, not a literal, because it is a judgement about the
+    # film's pace and the next draft may want "mid".
+    no_music_band: low
 
 # Remote execution (Film v2 section 2.2). The local machine computes nothing;
 # everything runs on one GCP Spot VM with the bucket as the hub.

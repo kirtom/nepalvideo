@@ -6,6 +6,8 @@ import json
 import math
 import sys, pathlib
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from nepal.process import cues
@@ -13,6 +15,10 @@ from nepal.story.anchors import Anchor
 
 LEVELS = dict(lufs_under_music=-28.0, lufs_full=-18.0, lufs_under_speech=-24.0)
 FADES = dict(fade_s=0.15, window_fade_s=1.0)
+# Longer than any fixture here: "a bed plays over all of this", which is what
+# every location test below assumed before Gate 3 gave music windows. The
+# tests that are about the placement rule itself pass their own spans.
+UNDER_MUSIC = [(0.0, 100_000.0)]
 
 
 def _slot(i, act, t_in, t_out, *, kind="video", rec=None, src_in=0.0, beat=None, secondary=None):
@@ -104,7 +110,8 @@ def test_a_photo_holds_the_previous_video_ambience_from_where_it_stopped():
              _slot(1, 2, 5.0, 8.0, kind="photo"),
              _slot(2, 2, 8.0, 11.0, kind="card"),
              _slot(3, 2, 11.0, 15.0, rec="r2", src_in=3.0)]
-    rows = cues.location_cues(slots, speech_spans=[], windows=[], silence={}, **LEVELS, **FADES)
+    rows = cues.location_cues(slots, speech_spans=[], windows=[], silence={},
+                              music_spans=UNDER_MUSIC, **LEVELS, **FADES)
     by_id = {r["cue_id"]: r for r in rows}
     assert list(by_id) == ["lo_0", "lo_1", "lo_2", "lo_3"]
     assert all(r["track"] == "location" and r["beat_id"] is None for r in rows)
@@ -120,13 +127,15 @@ def test_a_photo_that_opens_an_act_has_nothing_to_hold_and_gets_no_cue():
     slots = [_slot(0, 1, 0.0, 5.0, rec="r1"),
              _slot(1, 2, 5.0, 8.0, kind="photo"),          # act 2 opens on a still
              _slot(2, 2, 8.0, 12.0, rec="r2")]
-    rows = cues.location_cues(slots, speech_spans=[], windows=[], silence={}, **LEVELS, **FADES)
+    rows = cues.location_cues(slots, speech_spans=[], windows=[], silence={},
+                              music_spans=UNDER_MUSIC, **LEVELS, **FADES)
     assert [r["cue_id"] for r in rows] == ["lo_0", "lo_2"]
 
 
 def test_a_split_slot_takes_its_primary_recording():
     slots = [_slot(0, 2, 0.0, 4.0, rec="keller", src_in=2.0, secondary="kulikov#9")]
-    rows = cues.location_cues(slots, speech_spans=[], windows=[], silence={}, **LEVELS, **FADES)
+    rows = cues.location_cues(slots, speech_spans=[], windows=[], silence={},
+                              music_spans=UNDER_MUSIC, **LEVELS, **FADES)
     assert rows[0]["source"] == "keller" and rows[0]["src_in"] == 2.0
 
 
@@ -134,7 +143,7 @@ def test_levels_full_in_a_window_under_speech_in_a_span_else_under_music():
     slots = [_slot(i, 3, 5.0 * i, 5.0 * (i + 1), rec=f"r{i}") for i in range(6)]
     windows = [{"t_in": 9.0, "t_out": 23.0, "slot_index": 3}]     # slots 2, 3, 4 by centre
     rows = cues.location_cues(slots, speech_spans=[(0.0, 14.0)], windows=windows, silence={},
-                              **LEVELS, **FADES)
+                              music_spans=UNDER_MUSIC, **LEVELS, **FADES)
     gains = [r["gain_lufs"] for r in rows]
     # slot 1 is under the voice; slot 2 is both under the voice and in the
     # window, and the window wins; slot 5 is under nothing but the music
@@ -148,7 +157,8 @@ def test_levels_full_in_a_window_under_speech_in_a_span_else_under_music():
 def test_the_silence_window_is_full_location_sound():
     slots = [_slot(i, 5, 100.0 + 5.0 * i, 105.0 + 5.0 * i, rec=f"r{i}") for i in range(3)]
     rows = cues.location_cues(slots, speech_spans=[], windows=[],
-                              silence={"t_start": 100.0, "t_end": 110.0}, **LEVELS, **FADES)
+                              silence={"t_start": 100.0, "t_end": 110.0},
+                              music_spans=UNDER_MUSIC, **LEVELS, **FADES)
     assert [r["gain_lufs"] for r in rows] == [-18.0, -18.0, -28.0]
     # slot 2 opens on the silence's last edge and ends outside it
     assert [r["fade_in_s"] for r in rows] == [1.0, 1.0, 1.0]
@@ -334,3 +344,80 @@ def test_a_beat_without_a_message_carries_no_author_tag():
     rows = cues.overlay_rows([_beat("q_x", "quote", rank=1)], slots, chat_card_s=4.0,
                              closing_card_s=6.0, cast_tags={"Keller": "A"})
     assert json.loads(rows[0]["payload"])["author_tag"] is None
+
+
+# -- music placement (Gate 3, 2026-09-24) ---------------------------------
+
+def _windowed_map():
+    """One act, two windows with 40 s of silence between them, each window
+    holding two segments -- the shape the map has since music is placed
+    rather than laid."""
+    return {"acts": [{"act": 3, "t_start": 0.0, "t_end": 200.0,
+                      "music_windows": [{"t_start": 20.0, "t_end": 80.0},
+                                        {"t_start": 120.0, "t_end": 180.0}],
+                      "segments": [
+                          {"track_id": "t1", "t_in": 20.0, "t_end": 50.0, "src_in": 0.0, "src_out": 30.0},
+                          {"track_id": "t1", "t_in": 50.0, "t_end": 78.0, "src_in": 30.0, "src_out": 58.0},
+                          {"track_id": "t2", "t_in": 120.0, "t_end": 150.0, "src_in": 0.0, "src_out": 30.0},
+                          {"track_id": "t2", "t_in": 150.0, "t_end": 180.0, "src_in": 30.0, "src_out": 60.0}]}],
+            "silence_window": {}}
+
+
+def test_music_plays_inside_its_windows_and_nowhere_else():
+    rows = cues.music_cues(_windowed_map(), lufs=-14.0, xfade_s=2.0, window_fade_s=1.0)
+    spans = [(r["t_in"], r["t_out"]) for r in rows]
+    assert spans == [(20.0, 50.0), (50.0, 80.0), (120.0, 150.0), (150.0, 180.0)]
+    # the stretch is to the WINDOW's end (78 -> 80), never to the act's
+    assert not any(r["t_out"] > 80.0 and r["t_in"] < 120.0 for r in rows)
+    assert all(r["src_out"] - r["src_in"] == pytest.approx(r["t_out"] - r["t_in"]) for r in rows)
+
+
+def test_the_bed_fades_in_and_out_at_a_windows_edges_and_crossfades_inside_it():
+    rows = cues.music_cues(_windowed_map(), lufs=-14.0, xfade_s=2.0, window_fade_s=1.0)
+    assert [r["fade_in_s"] for r in rows] == [1.0, 2.0, 1.0, 2.0]
+    assert [r["fade_out_s"] for r in rows] == [2.0, 1.0, 2.0, 1.0]
+
+
+def test_two_windows_meeting_edge_to_edge_are_one_bed_and_crossfade():
+    """An act boundary the music runs straight through is a handover, not a
+    stop -- otherwise the bed would dip to nothing at every act."""
+    mmap = {"acts": [
+        {"act": 1, "t_start": 0.0, "t_end": 60.0,
+         "music_windows": [{"t_start": 0.0, "t_end": 60.0}],
+         "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 60.0, "src_in": 0.0, "src_out": 60.0}]},
+        {"act": 2, "t_start": 60.0, "t_end": 120.0,
+         "music_windows": [{"t_start": 60.0, "t_end": 120.0}],
+         "segments": [{"track_id": "t2", "t_in": 60.0, "t_end": 120.0, "src_in": 0.0, "src_out": 60.0}]}],
+        "silence_window": {}}
+    rows = cues.music_cues(mmap, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0)
+    assert [r["fade_out_s"] for r in rows] == [2.0, 1.0], "only the film's last edge stops"
+    assert [r["fade_in_s"] for r in rows] == [1.0, 2.0], "only the film's first edge starts"
+
+
+def test_an_act_with_no_window_gets_no_music_at_all():
+    mmap = {"acts": [{"act": 0, "t_start": 0.0, "t_end": 25.0, "music_windows": [],
+                      "segments": []}], "silence_window": {}}
+    assert cues.music_cues(mmap, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0) == []
+    assert cues.music_spans(mmap) == []
+
+
+def test_a_windows_position_moves_with_its_act():
+    """``map_on_film_time`` rebases the act onto the span the table really
+    has; a window that did not move with it would put the bed over the cards
+    it was placed to keep clear of."""
+    moved = cues.map_on_film_time(_windowed_map(), {3: (10.0, 210.0)})
+    assert moved["acts"][0]["music_windows"] == [{"t_start": 30.0, "t_end": 90.0},
+                                                 {"t_start": 130.0, "t_end": 190.0}]
+    shrunk = cues.map_on_film_time(_windowed_map(), {3: (0.0, 140.0)})
+    assert shrunk["acts"][0]["music_windows"] == [{"t_start": 20.0, "t_end": 80.0},
+                                                  {"t_start": 120.0, "t_end": 140.0}], \
+        "a window is clamped to the act's real end rather than played into the next act"
+
+
+def test_the_location_sound_is_the_mix_wherever_there_is_no_music():
+    """Gate 3: with no bed to sit under, the picture's own sound is what
+    carries -- but a voice still takes the level that keeps it clear."""
+    slots = [_slot(i, 3, 10.0 * i, 10.0 * (i + 1), rec=f"r{i}") for i in range(5)]
+    rows = cues.location_cues(slots, speech_spans=[(30.0, 40.0)], windows=[], silence={},
+                              music_spans=[(0.0, 20.0)], **LEVELS, **FADES)
+    assert [r["gain_lufs"] for r in rows] == [-28.0, -28.0, -18.0, -24.0, -18.0]

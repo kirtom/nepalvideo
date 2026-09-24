@@ -6,7 +6,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 import pytest
 
-from nepal.spine.scenes import Scene, activity_class, group_scenes, scene_target
+from nepal.spine.scenes import (Scene, activity_class, blocking_spans, group_scenes,
+                                music_windows, scene_target)
 
 
 def _attrs(*, speed_ms=None, hr_bpm=None, gain_m_per_h=None, alt_m=None,
@@ -326,3 +327,107 @@ def test_tempo_rises_with_speed_and_stays_bounded():
 def test_missing_speed_takes_the_walking_norm_not_standing_still():
     no_gps = _scene(speed_ms=None)
     assert scene_target(no_gps, hr_rest=60.0, hr_max=170.0)["tempo_bpm"] == pytest.approx(120.0)
+
+
+# -- music windows (Gate 3) --------------------------------------------
+#
+# The operator, 2026-09-24: "Music should be played only on those parts of
+# the video where nothing else is spoken -- when it's appropriate, when it's
+# not messing up with some kind of other information. Definitely not from
+# the start."
+
+def _run(n=4, *, act=2, start=200.0, length=60.0):
+    """``n`` consecutive scenes of one act, back to back from ``start``."""
+    return [_scene(scene_id=i + 1, act=act, t_in=start + i * length,
+                  t_out=start + (i + 1) * length) for i in range(n)]
+
+
+def _spans(**kw):
+    base = dict(speech_spans=(), overlay_spans=(), natural_spans=(),
+               cold_open_end_s=0.0, no_music_before_s=0.0, speech_margin_s=2.0)
+    base.update(kw)
+    return blocking_spans(**base)
+
+
+def test_nothing_in_the_way_is_one_window_over_every_scene():
+    w = music_windows(_run(), blocked=_spans(), min_window_s=30)
+    assert len(w) == 1
+    assert (w[0].t_in, w[0].t_out) == (200.0, 440.0)
+    assert w[0].scene_ids == (1, 2, 3, 4) and w[0].act == 2
+
+
+@pytest.mark.parametrize("kind", ["speech_spans", "overlay_spans", "natural_spans"])
+def test_every_kind_of_information_takes_its_scene_out(kind):
+    """A speech beat, a chat or closing card and a natural-sound window are
+    all "some kind of other information" -- one rule, three sources."""
+    blocked = _spans(**{kind: [(265.0, 275.0)]})      # inside the second scene
+    w = music_windows(_run(), blocked=blocked, min_window_s=30)
+    assert [x.scene_ids for x in w] == [(1,), (3, 4)], "the blocked scene splits the window"
+
+
+def test_a_line_just_before_a_scene_still_takes_it_by_the_margin():
+    """The bed ends before the line and returns after it, so the margin is
+    part of what blocks -- without it music would stop on the syllable."""
+    just_outside = [(258.5, 259.5)]                   # ends 0.5s before scene 2 opens
+    assert [x.scene_ids for x in music_windows(
+        _run(), blocked=_spans(speech_spans=just_outside, speech_margin_s=0.0),
+        min_window_s=30)] == [(1, 2, 3, 4)]
+    assert [x.scene_ids for x in music_windows(
+        _run(), blocked=_spans(speech_spans=just_outside, speech_margin_s=2.0),
+        min_window_s=30)] == [(1,), (3, 4)]
+
+
+def test_a_card_gets_no_margin_of_its_own():
+    """Only speech carries the margin: a card is on screen for a fixed few
+    seconds and the bed has no line to keep clear of."""
+    assert [x.scene_ids for x in music_windows(
+        _run(), blocked=_spans(overlay_spans=[(258.5, 259.5)], speech_margin_s=2.0),
+        min_window_s=30)] == [(1, 2, 3, 4)]
+
+
+def test_a_window_too_short_to_state_anything_is_dropped():
+    scenes = _run(3, length=40.0)                      # 40 s a scene
+    blocked = _spans(speech_spans=[(245.0, 246.0)])    # takes the middle scene
+    w = music_windows(scenes, blocked=blocked, min_window_s=30)
+    assert [x.scene_ids for x in w] == [(1,), (3,)], "40 s clears a 30 s floor"
+    assert music_windows(scenes, blocked=blocked, min_window_s=45) == [], \
+        "a 40 s sting under nothing is noise, not a cue"
+
+
+def test_the_film_does_not_open_on_music():
+    """"Definitely not from the start": the opening is blocked outright, and
+    the cold open (act 0) is never eligible whatever that number is."""
+    scenes = [_scene(scene_id=1, act=0, t_in=0.0, t_out=40.0),
+              _scene(scene_id=2, act=1, t_in=40.0, t_out=140.0),
+              _scene(scene_id=3, act=1, t_in=140.0, t_out=240.0)]
+    w = music_windows(scenes, blocked=_spans(no_music_before_s=90.0), min_window_s=30)
+    assert [x.scene_ids for x in w] == [(3,)]
+    # and with the opening set to nothing, act 0 still takes no music
+    w = music_windows(scenes, blocked=_spans(no_music_before_s=0.0), min_window_s=30)
+    assert [x.scene_ids for x in w] == [(2, 3)]
+
+
+def test_the_cold_open_extends_the_opening_when_it_is_the_longer_of_the_two():
+    """The opening is the union of the two, not whichever was configured:
+    a cold open running past no_music_before_s still opens in silence."""
+    scenes = [_scene(scene_id=1, act=1, t_in=100.0, t_out=200.0),
+              _scene(scene_id=2, act=1, t_in=200.0, t_out=300.0)]
+    assert [x.scene_ids for x in music_windows(
+        scenes, blocked=_spans(no_music_before_s=90.0, cold_open_end_s=210.0),
+        min_window_s=30)] == [(2,)]
+
+
+def test_a_window_never_runs_over_an_act_boundary():
+    """The map records windows per act and its segments tile them there, and
+    an act is the film's own unit of musical intent."""
+    scenes = _run(2, act=2, start=200.0) + [
+        _scene(scene_id=3, act=3, t_in=320.0, t_out=380.0),
+        _scene(scene_id=4, act=3, t_in=380.0, t_out=440.0)]
+    w = music_windows(scenes, blocked=_spans(), min_window_s=30)
+    assert [(x.act, x.scene_ids) for x in w] == [(2, (1, 2)), (3, (3, 4))]
+
+
+def test_blocking_spans_drops_an_empty_span_and_sorts():
+    out = _spans(speech_spans=[(300.0, 310.0)], natural_spans=[(50.0, 50.0)],
+                 no_music_before_s=90.0, speech_margin_s=2.0)
+    assert out == [(0.0, 90.0), (298.0, 312.0)]

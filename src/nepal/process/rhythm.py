@@ -48,21 +48,39 @@ def energy_percentiles(sections: Sequence[Mapping[str, Any]]) -> list[float]:
     """Each section's energy percentile within the act's own cue. A section
     with no ``energy`` reads as 0.0 -- silence, not "unknown" -- so it always
     ranks at or below every measured section rather than skewing the rest
-    of the act's ranking by dropping out of it."""
-    energies = [float(s.get("energy") or 0.0) for s in sections]
-    return [_percentile_rank_pct(e, energies) for e in energies]
+    of the act's ranking by dropping out of it.
+
+    A section carrying an explicit ``band`` is not ranked and does not rank
+    anything else: it stands for a stretch with no music at all (Gate 3),
+    and since the ranking is relative, letting several of those into the
+    pool at energy 0.0 would push every piece of real music in the act up a
+    band and shorten every cut under it. Its own returned percentile is
+    unused -- ``target_length`` takes the band instead."""
+    ranked = [float(s.get("energy") or 0.0) for s in sections if not s.get("band")]
+    return [0.0 if s.get("band") else _percentile_rank_pct(float(s.get("energy") or 0.0), ranked)
+            for s in sections]
 
 
-def target_length(pct: float, table: Mapping[str, Sequence[float]]) -> tuple[float, float]:
-    """The low/mid/high length range for a section at percentile ``pct``,
-    by the config's own bands."""
+def band_for(pct: float, band: str | None = None) -> str:
+    """The config's band for a section: its own if it carries one, else the
+    one its energy percentile falls in. A section with no music under it has
+    no energy to rank, so the caller names the band outright
+    (``music.placement.no_music_band``) rather than have one inferred from a
+    number that means nothing."""
+    if band:
+        return band
     if pct < LOW_MID_BOUNDARY_PCT:
-        band = "low"
-    elif pct > MID_HIGH_BOUNDARY_PCT:
-        band = "high"
-    else:
-        band = "mid"
-    lo, hi = table[band]
+        return "low"
+    if pct > MID_HIGH_BOUNDARY_PCT:
+        return "high"
+    return "mid"
+
+
+def target_length(pct: float, table: Mapping[str, Sequence[float]],
+                  band: str | None = None) -> tuple[float, float]:
+    """The low/mid/high length range for a section at percentile ``pct``, or
+    at its own ``band`` where it has one, by the config's own bands."""
+    lo, hi = table[band_for(pct, band)]
     return float(lo), float(hi)
 
 
@@ -79,7 +97,8 @@ def _section_pct_at(t: float, section_pcts: Sequence[tuple[Mapping[str, Any], fl
 
 
 def _normal_end(t_in: float, pct: float, table: Mapping[str, Sequence[float]],
-                avail: float, beats: Sequence[float], downbeats: Sequence[float]) -> float:
+                avail: float, beats: Sequence[float], downbeats: Sequence[float],
+                band: str | None = None) -> float:
     """An unlocked slot's end when it isn't part of the burst: the band's
     midpoint, clamped to what the shot actually has, then snapped to the
     nearest qualifying beat (downbeat above the 66th percentile). A beat
@@ -93,10 +112,12 @@ def _normal_end(t_in: float, pct: float, table: Mapping[str, Sequence[float]],
     ceiling at all, and ``snap_within``'s own fallback is the ceiling itself,
     which would stretch every clamped-but-unsnapped slot out to the full
     available footage instead of to its own band's nominal length."""
-    lo, hi = target_length(pct, table)
+    lo, hi = target_length(pct, table, band)
     length = min((lo + hi) / 2.0, avail)
     want_end = t_in + length
-    grid = downbeats if pct > MID_HIGH_BOUNDARY_PCT else beats
+    # The config asks for downbeats in the high band, whether the band came
+    # from the energy ranking or was named outright.
+    grid = downbeats if band_for(pct, band) == "high" else beats
     ceiling = t_in + avail
     candidates = [b for b in grid if b <= ceiling]
     if candidates:
@@ -228,7 +249,10 @@ def retime(slots: Sequence[Mapping[str, Any]], *, sections: Sequence[Mapping[str
     slot more footage than its shot has.
     """
     section_pcts = [(s, pct) for s, pct in zip(sections, energy_percentiles(sections))]
-    swell = max(sections, key=lambda s: float(s.get("energy") or 0.0), default=None)
+    # Only sections that have music: the burst is the act's loudest swell,
+    # and a stretch with no bed under it has no swell to be.
+    swell = max((s for s in sections if not s.get("band")),
+                key=lambda s: float(s.get("energy") or 0.0), default=None)
     act_end = float(sections[-1]["t_out"]) if sections else math.inf
     burst_count = round((float(burst_slots[0]) + float(burst_slots[1])) / 2.0)
 
@@ -292,7 +316,8 @@ def retime(slots: Sequence[Mapping[str, Any]], *, sections: Sequence[Mapping[str
                 t_out = t_in + min(float(table["high"][0]), avail)
             burst_remaining -= 1
         else:
-            t_out = _normal_end(t_in, pct, table, avail, beats, downbeats)
+            t_out = _normal_end(t_in, pct, table, avail, beats, downbeats,
+                                section.get("band") if section else None)
 
         if t_out <= t_in:
             continue                        # the clamp (or a starved grid) left no length at all; drop it rather than stall the walk

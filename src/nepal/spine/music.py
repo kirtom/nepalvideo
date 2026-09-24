@@ -22,7 +22,7 @@ import collections
 import statistics
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Collection, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -614,6 +614,12 @@ def build_music_map(tracks: Sequence[Track], assignment: Assignment,
             "segments": segments,
             "t_start": round(t_start, 3),
             "t_end": round(t_end, 3),
+            # Act mode lays one bed under the whole act, so it says so in the
+            # same words scene mode uses for its windows (Gate 3) -- one
+            # shape, one checker, and "the act" is not a special case
+            # anywhere downstream.
+            "music_windows": [{"t_start": round(t_start, 3), "t_end": round(t_end, 3)}],
+            "music_s": round(dur, 3),
             "music_covered_s": round(covered, 3),
             "beat_grid_covers_s": round(grid_end, 3),
             "n_distinct_tracks": len(plays),
@@ -629,6 +635,8 @@ def build_music_map(tracks: Sequence[Track], assignment: Assignment,
     return {
         "total_duration_s": round(t_cursor, 3),
         "acts": acts_out,
+        "music_share": 1.0,
+        "n_music_windows": len(acts_out),
         "silence_window": silence or {},
         "assignment_cost": assignment.cost if assignment.cost != math.inf else None,
         "callback_bonus": assignment.callback_bonus,
@@ -650,16 +658,34 @@ _SEGMENT_TOL_S = 2e-3
 _LOOP_MIN_PIECE_S = 8.0
 
 
+def _act_windows(a: Mapping[str, Any]) -> list[tuple[float, float]]:
+    """The act's music windows, act-local. A map with no ``music_windows`` at
+    all is one written before Gate 3 put music in windows, and it means what
+    it always meant: the act is one window from end to end."""
+    t0 = float(a.get("t_start", 0.0))
+    wins = a.get("music_windows")
+    if wins is None:
+        return [(0.0, float(a.get("t_end", 0.0)) - t0)]
+    return [(float(w["t_start"]) - t0, float(w["t_end"]) - t0) for w in wins]
+
+
 def _segment_problems(a: Mapping[str, Any], track_s: Mapping[str, float] | None = None) -> list[str]:
-    """One act's segments must tile it: from 0 to the act's length, no gap
-    and no overlap, each segment claiming exactly as much source as film and
-    no more source than its track holds.
+    """One act's segments must tile its music windows: each window covered
+    from edge to edge with no gap and no overlap, nothing laid outside one,
+    each segment claiming exactly as much source as film and no more source
+    than its track holds.
 
     Both builders promise this -- ``fill_act`` by construction, and
     ``_segments_for_act`` by holding each cue until the next -- and the audio
     graph, the cue list and the rhythm pass all read it as given. A hole is
     silence under the picture and an overlap is two beds at once, so the map
     is checked where it is written rather than at whichever consumer notices.
+
+    Until Gate 3 the window was always the whole act; now it is whatever
+    ``spine.scenes.music_windows`` left between the speech, the cards and the
+    natural sound, and a segment outside one is a bed playing where the
+    operator asked for none -- the same class of fault as a hole, read from
+    the other side.
 
     ``src_out <= duration`` is the one of the four that is not true by
     construction, and it is the expensive one: ffmpeg delivers what the file
@@ -679,15 +705,22 @@ def _segment_problems(a: Mapping[str, Any], track_s: Mapping[str, float] | None 
     segments = a.get("segments") or []
     if not segments:
         return []                       # an act with no music is already reported as having no track
-    act_len = float(a.get("t_end", 0.0)) - float(a.get("t_start", 0.0))
+    windows = _act_windows(a)
     out: list[str] = []
-    cursor = 0.0
     unmeasured: set[str] = set()
+    in_window: dict[int, list[Mapping[str, Any]]] = {k: [] for k in range(len(windows))}
     for i, seg in enumerate(segments):
         t_in, t_end = float(seg["t_in"]), float(seg["t_end"])
-        if abs(t_in - cursor) > _SEGMENT_TOL_S:
-            out.append(f"act {a['act']}: segment {i} ({seg.get('track_id')}) starts at {t_in:.3f}s "
-                       f"but the one before it ends at {cursor:.3f}s -- the bed is not continuous")
+        # By where it starts, not where it ends: a segment is placed by its
+        # cue, and one that runs past its window's end is a tiling fault the
+        # window's own walk below reports, not a segment belonging elsewhere.
+        k = next((k for k, (w0, w1) in enumerate(windows)
+                  if w0 - _SEGMENT_TOL_S <= t_in < w1 - _SEGMENT_TOL_S), None)
+        if k is None:
+            out.append(f"act {a['act']}: segment {i} ({seg.get('track_id')}) starts at {t_in:.3f}s, "
+                       f"outside every music window -- the film is meant to carry itself there")
+        else:
+            in_window[k].append(seg)
         if abs((t_end - t_in) - (float(seg["src_out"]) - float(seg["src_in"]))) > _SEGMENT_TOL_S:
             out.append(f"act {a['act']}: segment {i} ({seg.get('track_id')}) plays for "
                        f"{t_end - t_in:.3f}s of film from {float(seg['src_out']) - float(seg['src_in']):.3f}s "
@@ -702,9 +735,17 @@ def _segment_problems(a: Mapping[str, Any], track_s: Mapping[str, float] | None 
             out.append(f"act {a['act']}: segment {i} ({seg.get('track_id')}) plays to "
                        f"{float(seg['src_out']):.1f}s of a {float(duration):.1f}s track -- "
                        f"ffmpeg stops at the file's end, so that is dead bed under the picture")
-        cursor = t_end
-    if act_len > 0 and abs(cursor - act_len) > _SEGMENT_TOL_S:
-        out.append(f"act {a['act']}: segments cover {cursor:.3f}s of the act's {act_len:.3f}s")
+    for k, (w0, w1) in enumerate(windows):
+        cursor = w0
+        for seg in in_window[k]:
+            if abs(float(seg["t_in"]) - cursor) > _SEGMENT_TOL_S:
+                out.append(f"act {a['act']}: segment ({seg.get('track_id')}) starts at "
+                           f"{float(seg['t_in']):.3f}s but the one before it ends at {cursor:.3f}s "
+                           f"-- the bed is not continuous")
+            cursor = float(seg["t_end"])
+        if w1 - w0 > _SEGMENT_TOL_S and abs(cursor - w1) > _SEGMENT_TOL_S:
+            out.append(f"act {a['act']}: segments cover {cursor - w0:.3f}s of the "
+                       f"{w1 - w0:.3f}s window at {w0:.3f}s")
     return out
 
 
@@ -746,19 +787,31 @@ def check_music_map(mmap: dict[str, Any], *, target_s: float,
                 f"assignment has little to choose from, so acts get whatever is "
                 f"nearest rather than what fits.")
     for a in mmap.get("acts", []):
+        windows = _act_windows(a)
+        act_len = float(a.get("t_end", 0)) - float(a.get("t_start", 0))
+        # An act with no window carries no music on purpose (Gate 3): the
+        # cold open, or an act every speech beat and card between them left
+        # nothing of. Asking it for a track, a swell or a beat grid would be
+        # reporting the design as a fault. Its segments are still checked --
+        # there must be none.
+        if not windows:
+            problems += _segment_problems(a, track_s)
+            continue
         if not a.get("swells"):
             problems.append(f"act {a['act']} has no swell timestamp")
         if not a.get("track_id"):
             problems.append(f"act {a['act']} has no track assigned")
-        # S06 snaps every cut to the beat grid, so an act whose grid stops early
-        # cannot be cut on the beat past that point. With track reuse this
-        # rarely fires, which is why repetition is checked as well.
-        act_len = float(a.get("t_end", 0)) - float(a.get("t_start", 0))
+        # S06 snaps every cut to the beat grid, so an act whose grid stops
+        # early cannot be cut on the beat past that point. The grid only has
+        # to reach the end of the last window -- past that there is no music
+        # to snap to and none wanted. With track reuse this rarely fires,
+        # which is why repetition is checked as well.
+        wanted = max(w1 for _, w1 in windows)
         grid = float(a.get("beat_grid_covers_s", 0))
-        if act_len > 0 and grid < act_len * 0.9:
+        if wanted > 0 and grid < wanted * 0.9:
             problems.append(
-                f"act {a['act']}: beat grid covers {grid:.0f}s of {act_len:.0f}s "
-                f"({grid/act_len*100:.0f}%) -- cuts past that cannot be beat-snapped")
+                f"act {a['act']}: beat grid covers {grid:.0f}s of {wanted:.0f}s "
+                f"({grid/wanted*100:.0f}%) -- cuts past that cannot be beat-snapped")
         problems += _segment_problems(a, track_s)
         # A track laid down several times within one act is a loop the audience
         # will hear, whatever the library's total length.
@@ -974,7 +1027,8 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
                   continuity_bonus: float, repeat_penalty: float,
                   reuse_gap_s: float, preferred: Sequence[str],
                   preferred_bonus: float, exclude: Sequence[str],
-                  act4_swell: bool = True) -> SceneAssignment:
+                  act4_swell: bool = True,
+                  window_starts: Collection[int] = ()) -> SceneAssignment:
     """A Viterbi pass over ``scenes`` with (track, section) pairs as states.
 
     ``scenes`` must already be in chronological order (as ``group_scenes``
@@ -982,6 +1036,16 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
     callback) all read "the previous scene" positionally, not by timestamp.
     ``targets`` is ``scene_target(...)`` per scene, precomputed by the caller;
     this function never calls it.
+
+    Since Gate 3 the caller hands in only the scenes that may carry music,
+    and names in ``window_starts`` the scene_ids that open a music window.
+    Silence lies between one window and the next, so nothing carries across
+    it: no switch cost for a change of track nobody hears as a change, and
+    no continuity bonus for a section join nobody hears as a join. The
+    repeat penalty does carry -- ``reuse_gap_s`` is wall-clock, and a track
+    heard four minutes and one silence ago is still a track heard four
+    minutes ago -- so at a window start every candidate recently heard pays
+    it, including the one that was playing when the music stopped.
     """
     excluded_ids, excluded_unmatched = _named_track_ids(tracks, exclude)
     preferred_ids, preferred_unmatched = _named_track_ids(tracks, preferred)
@@ -1059,6 +1123,7 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
         act1_by_prev = ({prev: _act1_track_along_path(prev, i - 1, back, act1_idx) for prev in dp}
                         if wants_callback else {})
 
+        fresh = scene.scene_id in window_starts
         for cand in candidates:
             emission = pair_cost(target, feat_of[cand], weights=weights)
             if cand[0] in preferred_ids:
@@ -1067,7 +1132,10 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
             best_cost, best_prev = math.inf, None
             for prev, prev_cost in dp.items():
                 cost = prev_cost + emission
-                if cand[0] != prev[0]:
+                if fresh:
+                    if cand[0] in recent_by_prev[prev]:
+                        cost += repeat_penalty
+                elif cand[0] != prev[0]:
                     cost += switch_cost
                     if cand[0] in recent_by_prev[prev]:
                         cost += repeat_penalty
@@ -1180,8 +1248,8 @@ def _loop_spans(src_in: float, length: float, duration: float | None,
 def _segments_for_act(act_scenes: Sequence[Scene], assignment: SceneAssignment,
                       by_id: dict[str, Track], section_of: dict[tuple[str, str], dict],
                       t_start: float, t_end: float,
-                      min_piece: float) -> tuple[list[dict[str, Any]], list[str]]:
-    """The act's music bed, in the act's own local time -- the same
+                      min_piece: float, origin: float | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    """One music window's bed, in the act's own local time -- the same
     convention ``fill_act``/``build_music_map`` use (a cursor from 0 per act;
     ``_act_entry`` adds ``t_start`` back only where film time is actually
     needed, for the beat/swell grid). Consecutive scenes assigned the same
@@ -1189,15 +1257,20 @@ def _segments_for_act(act_scenes: Sequence[Scene], assignment: SceneAssignment,
     changed at that cut.
 
     A scene is a *cue*, not a segment: it says when the music changes, not
-    how long it plays. So the segments tile the act -- 0 to the act's length,
-    no gap and no overlap -- rather than copying each run's own span. Scenes
-    are grouped on the slots they cover and a slot may start after the
-    previous one ended or after the act already began, which left the map
-    holding holes in the bed; whatever lies between two cues belongs to the
-    earlier one, whether the state changed there or not, and the last cue
-    holds to the act's end. Two consumers were each patching their own end
-    of that (``cues.music_cues`` and s05's ``_sections_for_act``), which is
-    two chances to disagree about what the map says; the map says it once.
+    how long it plays. So the segments tile ``t_start``..``t_end`` -- no gap
+    and no overlap -- rather than copying each run's own span. Scenes are
+    grouped on the slots they cover and a slot may start after the previous
+    one ended or after the window already began, which left the map holding
+    holes in the bed; whatever lies between two cues belongs to the earlier
+    one, whether the state changed there or not, and the last cue holds to
+    the window's end. Two consumers were each patching their own end of that
+    (``cues.music_cues`` and s05's ``_sections_for_act``), which is two
+    chances to disagree about what the map says; the map says it once.
+
+    Until Gate 3 the window was the act and the two were the same call. Now
+    an act has several, so ``t_start``/``t_end`` bound the window while
+    ``origin`` (the act's own start) keeps the emitted offsets act-local,
+    which is the convention every consumer already adds back.
 
     ``src_out`` is never capped at the track's own duration -- see
     ``_overrun_note``. A run that outlasts what is left of its track is
@@ -1215,10 +1288,11 @@ def _segments_for_act(act_scenes: Sequence[Scene], assignment: SceneAssignment,
         else:
             runs.append({"state": state, "t_in": sc.t_in, "last_scene_id": sc.scene_id})
 
-    # Each run holds from the act's start (the first) or its own cue until
-    # the next cue, clamped into the act: a cue outside the act's span is a
-    # scene the act's slots no longer reach, and collapses to nothing rather
+    # Each run holds from the window's start (the first) or its own cue
+    # until the next cue, clamped into the window: a cue outside the span is
+    # a scene the window no longer reaches, and collapses to nothing rather
     # than laying a segment backwards.
+    origin = t_start if origin is None else origin
     bounds = [t_start]
     for r in runs[1:]:
         bounds.append(min(max(float(r["t_in"]), bounds[-1]), t_end))
@@ -1241,7 +1315,7 @@ def _segments_for_act(act_scenes: Sequence[Scene], assignment: SceneAssignment,
         for take, piece_in in pieces:
             segments.append({
                 "track_id": track.track_id, "title": track.title, "artist": track.artist,
-                "t_in": round(cursor - t_start, 3), "t_end": round(cursor + take - t_start, 3),
+                "t_in": round(cursor - origin, 3), "t_end": round(cursor + take - origin, 3),
                 "src_in": round(piece_in, 3), "src_out": round(piece_in + take, 3),
             })
             cursor += take
@@ -1249,7 +1323,8 @@ def _segments_for_act(act_scenes: Sequence[Scene], assignment: SceneAssignment,
 
 
 def _act_entry(act: int, name: str | None, segments: list[dict[str, Any]],
-              t_start: float, t_end: float, by_id: dict[str, Track]) -> dict[str, Any]:
+              t_start: float, t_end: float, by_id: dict[str, Track],
+              windows: Sequence[tuple[float, float]] = ()) -> dict[str, Any]:
     """Same act-dict shape ``build_music_map`` emits. ``segments`` carry
     act-local ``t_in``/``t_end`` (matching ``build_music_map``'s own cursor
     convention -- see ``_segments_for_act``); ``base`` below is exactly
@@ -1283,7 +1358,10 @@ def _act_entry(act: int, name: str | None, segments: list[dict[str, Any]],
             base = t_start + seg["t_in"] - seg["src_in"]
             swells = [round(base + float(peak["start_s"]), 3)]
 
-    covered = segments[-1]["t_end"] if segments else 0.0
+    # The sum of what the segments play, not the last one's end: with the
+    # act in several windows (Gate 3) the last end is a position in the act,
+    # which says nothing about how much of it is actually under music.
+    covered = sum(seg["t_end"] - seg["t_in"] for seg in segments)
     grid_end = max(beat_grid) - t_start if beat_grid else 0.0
     plays = collections.Counter(seg["track_id"] for seg in segments)
     return {
@@ -1291,6 +1369,10 @@ def _act_entry(act: int, name: str | None, segments: list[dict[str, Any]],
         "track_id": segments[0]["track_id"] if segments else None,
         "segments": segments,
         "t_start": round(t_start, 3), "t_end": round(t_end, 3),
+        # Film time, like t_start/t_end, so a reader never has to know which
+        # of the map's numbers are act-local and which are not.
+        "music_windows": [{"t_start": round(w0, 3), "t_end": round(w1, 3)} for w0, w1 in windows],
+        "music_s": round(sum(w1 - w0 for w0, w1 in windows), 3),
         "music_covered_s": round(covered, 3),
         "beat_grid_covers_s": round(grid_end, 3),
         "n_distinct_tracks": len(plays),
@@ -1301,59 +1383,25 @@ def _act_entry(act: int, name: str | None, segments: list[dict[str, Any]],
     }
 
 
-def _last_swell_in_act(act: Mapping[str, Any], by_id: dict[str, Track]
-                       ) -> tuple[dict[str, Any] | None, float | None]:
-    """The segment that actually carries the act's swell, and that swell's
-    own source position (its section's ``start_s``) -- preferring the LAST
-    segment that has one, since under the default ``act4_swell=True`` that is
-    the segment the act is cut to before the silence, not necessarily the
-    act's first segment (which pairing Act 0 to ``segments[0]`` assumed, and
-    which is wrong the moment Act 4 has more than one segment)."""
-    for seg in reversed(act["segments"]):
-        track = by_id.get(seg["track_id"])
-        if not track:
-            continue
-        hits = [x for x in track.sections if x.get("is_swell")
-               and seg["src_in"] <= float(x["start_s"]) < seg["src_out"]]
-        if hits:
-            return seg, float(hits[0]["start_s"])
-    return None, None
-
-
 def _act0_entry(act0_span: tuple[float, float], act4: Mapping[str, Any],
                by_id: dict[str, Track], min_piece: float) -> tuple[dict[str, Any], str | None]:
-    """Act 0 plays the piece Act 4 opens with, starting from Act 4's own
-    swell, so the summit music is heard first and recognised when it
-    returns (spec section 5.6)."""
+    """The cold open, and it carries no music.
+
+    It used to play the piece Act 4 opens with, from Act 4's own swell, so
+    the summit music was heard first and recognised when it returned (spec
+    section 5.6). Gate 3 withdrew that -- "Definitely not from the start" --
+    so the film opens on its own location sound and the chat cards, and the
+    summit's music is first heard at the summit.
+
+    The function stays because the cold open's span is still an act of the
+    map and still needs an entry: one with an empty window list, which is
+    what every consumer reads as "deliberately silent here". ``act4`` and
+    ``min_piece`` stay in the signature for the same reason -- this is one
+    ruling away from coming back, and the caller's wiring should not have to
+    be rebuilt when it does.
+    """
     t_start, t_end = act0_span
-    length = t_end - t_start
-    if not act4["segments"]:
-        return _act_entry(0, None, [], t_start, t_end, by_id), None
-    seg, swell_src = _last_swell_in_act(act4, by_id)
-    if seg is None:
-        # No section anywhere in Act 4 is marked is_swell -- act4_swell may
-        # be off, or mark_swells needs *rising* energy and a
-        # monotonically-decaying track earns none either way. The cold open
-        # must never go silent, so it takes Act 4's own last segment as it
-        # already plays, rather than a swell that does not exist.
-        seg = act4["segments"][-1]
-        swell_src = seg["src_in"]
-    track = by_id[seg["track_id"]]
-    # The cold open is the likeliest place in the film to run out of track:
-    # it starts at the swell, which is by definition late in the piece. Same
-    # treatment as a scene's run -- loop from the swell rather than claim
-    # source the file does not hold (``_loop_spans``).
-    pieces = _loop_spans(swell_src, length, track.duration_s, min_piece)
-    segments, cursor = [], 0.0
-    for take, piece_in in pieces:
-        segments.append({
-            "track_id": track.track_id, "title": track.title, "artist": track.artist,
-            "t_in": round(cursor, 3), "t_end": round(cursor + take, 3),
-            "src_in": round(piece_in, 3), "src_out": round(piece_in + take, 3),
-        })
-        cursor += take
-    return (_act_entry(0, None, segments, t_start, t_end, by_id),
-            _overrun_note("act 0", track, swell_src + length, pieces=pieces, src_in=swell_src))
+    return _act_entry(0, None, [], t_start, t_end, by_id, windows=()), None
 
 
 def _callback_bonus_applied(scenes: Sequence[Scene], assignment: SceneAssignment,
@@ -1385,11 +1433,21 @@ def music_map_from_scenes(scenes: Sequence[Scene], assignment: SceneAssignment,
                           act_spans: Mapping[int, tuple[float, float]],
                           silence_s: float,
                           act0_span: tuple[float, float] | None = None,
-                          loop_min_piece_s: float = _LOOP_MIN_PIECE_S) -> dict[str, Any]:
+                          loop_min_piece_s: float = _LOOP_MIN_PIECE_S,
+                          windows: Mapping[int, Sequence[tuple[float, float]]] | None = None
+                          ) -> dict[str, Any]:
     """``music_map.json`` in the same shape ``build_music_map`` emits, filled
     from a per-scene assignment instead of a per-act one: every field
     ``check_music_map`` and the audio graph (S06) read is still here, so
-    either assignment mode can be dropped into the same consumer."""
+    either assignment mode can be dropped into the same consumer.
+
+    ``windows`` is act -> the spans of that act that may carry music, from
+    ``spine.scenes.music_windows`` (Gate 3). The segments tile each window
+    and nothing is laid between them -- that silence is the point. An act
+    absent from ``windows``, or ``windows=None`` altogether, means the whole
+    act is one window, which is what every map meant before the ruling and
+    what act mode still means.
+    """
     by_id = {t.track_id: t for t in tracks}
     section_of = {(t.track_id, s["section_id"]): s for t in tracks for s in t.sections}
 
@@ -1398,10 +1456,20 @@ def music_map_from_scenes(scenes: Sequence[Scene], assignment: SceneAssignment,
     for act in sorted(act_spans):
         t_start, t_end = act_spans[act]
         act_scenes = [sc for sc in scenes if sc.act == act]
-        segments, seg_overruns = _segments_for_act(act_scenes, assignment, by_id, section_of,
-                                                   t_start, t_end, loop_min_piece_s)
-        overruns.extend(seg_overruns)
-        acts_out.append(_act_entry(act, None, segments, t_start, t_end, by_id))
+        act_windows = [(t_start, t_end)] if windows is None else \
+            [(float(w0), float(w1)) for w0, w1 in windows.get(act, ())]
+        segments: list[dict[str, Any]] = []
+        for w0, w1 in act_windows:
+            # Only the scenes this window reaches: the rest are the ones the
+            # placement rule left unassigned, and a cue from one of them
+            # would lay a bed where the ruling asked for none.
+            in_window = [sc for sc in act_scenes if sc.t_out > w0 and sc.t_in < w1]
+            segs, seg_overruns = _segments_for_act(in_window, assignment, by_id, section_of,
+                                                   w0, w1, loop_min_piece_s, origin=t_start)
+            segments += segs
+            overruns.extend(seg_overruns)
+        acts_out.append(_act_entry(act, None, segments, t_start, t_end, by_id,
+                                   windows=act_windows))
 
     act4 = next((a for a in acts_out if a["act"] == SUMMIT_ACT), None)
     if act0_span is not None and act4 is not None:
@@ -1412,6 +1480,7 @@ def music_map_from_scenes(scenes: Sequence[Scene], assignment: SceneAssignment,
     acts_out.sort(key=lambda a: a["t_start"])
 
     total = max((a["t_end"] for a in acts_out), default=0.0)
+    music_s = sum(a["music_s"] for a in acts_out)
     silence = ({"t_start": round(act4["t_end"], 3), "t_end": round(act4["t_end"] + silence_s, 3)}
               if act4 else {})
     used = {seg["track_id"] for a in acts_out for seg in a["segments"]}
@@ -1423,6 +1492,10 @@ def music_map_from_scenes(scenes: Sequence[Scene], assignment: SceneAssignment,
     return {
         "total_duration_s": round(total, 3),
         "acts": acts_out,
+        # What the ruling is actually about, in one number the operator can
+        # read off the report: how much of the film is under music.
+        "music_share": round(music_s / total, 4) if total else 0.0,
+        "n_music_windows": sum(len(a["music_windows"]) for a in acts_out),
         "silence_window": silence,
         "assignment_cost": assignment.cost if assignment.cost != math.inf else None,
         "callback_bonus": round(_callback_bonus_applied(scenes, assignment, by_id), 4),

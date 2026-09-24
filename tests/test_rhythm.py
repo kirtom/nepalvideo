@@ -403,3 +403,54 @@ def test_act4_held_shot_never_taken_when_a_locked_slot_sits_before_the_silence()
     assert out[1]["t_in"] == 10.0 and out[1]["t_out"] == 45.0
     assert out[0]["t_out"] == 4.0                            # mid band's own midpoint, un-held
     assert out[0]["t_out"] <= out[1]["t_in"]                 # no overlap
+
+
+# -- sections with no music under them (Gate 3, 2026-09-24) ------------
+
+def test_a_section_with_a_band_takes_it_instead_of_its_energy_rank():
+    """Outside a music window there is no energy to rank, so the section
+    names its band outright (music.placement.no_music_band). Its own
+    percentile is whatever it is; the band is the answer."""
+    assert target_length(99.0, TABLE) == (1.5, 2.5)
+    assert target_length(99.0, TABLE, "low") == (5.0, 8.0)
+
+
+def test_a_bandless_stretch_does_not_re_rank_the_music_around_it():
+    """The ranking is relative: letting several no-music sections in at
+    energy 0.0 would push every real cue up a band and shorten every cut
+    under music that is actually playing."""
+    music = [{"energy": 1.0}, {"energy": 2.0}, {"energy": 3.0}]
+    assert energy_percentiles(music) == [pytest.approx(16.67, abs=0.01),
+                                         pytest.approx(50.0), pytest.approx(83.33, abs=0.01)]
+    with_silence = [{"energy": None, "band": "low"}] * 6 + music
+    assert energy_percentiles(with_silence)[-3:] == energy_percentiles(music)
+
+
+def test_slots_outside_a_window_are_cut_to_the_configured_band():
+    """The film's design keeps running without music: the low band's long
+    holds, not whatever the act's loudest cue would have asked for."""
+    sections = [{"t_in": 0.0, "t_out": 20.0, "energy": 9.0},              # loud music
+                {"t_in": 20.0, "t_out": 60.0, "energy": None, "band": "low"}]
+    slots = [_slot(f"s{i}", None) for i in range(8)]
+    slots[0]["t_in"] = 0.0
+    out = retime(slots, sections=sections, beats=[], downbeats=[], table=TABLE,
+                 burst_slots=(0, 0), is_act4=False, held_shot_s=[6.0, 10.0], silence_t=None,
+                 shots={f"s{i}": _shot() for i in range(8)})
+    lengths = [round(s["t_out"] - s["t_in"], 3) for s in out]
+    under_music = [l for s, l in zip(out, lengths) if s["t_in"] < 20.0]
+    under_none = [l for s, l in zip(out, lengths) if s["t_in"] >= 20.0]
+    assert under_music and all(l == 2.0 for l in under_music), "the high band's midpoint"
+    assert under_none and all(l == 6.5 for l in under_none), "the low band's midpoint"
+
+
+def test_the_burst_never_fires_on_a_stretch_with_no_music():
+    """The burst is the act's loudest swell; silence has no swell to be."""
+    sections = [{"t_in": 0.0, "t_out": 60.0, "energy": None, "band": "low"}]
+    slots = [_slot(f"s{i}", None) for i in range(5)]
+    slots[0]["t_in"] = 0.0
+    out = retime(slots, sections=sections, beats=[i * 0.5 for i in range(200)],
+                 downbeats=[i * 2.0 for i in range(50)], table=TABLE,
+                 burst_slots=(8, 12), is_act4=False, held_shot_s=[6.0, 10.0], silence_t=None,
+                 shots={f"s{i}": _shot() for i in range(5)})
+    assert all(round(s["t_out"] - s["t_in"], 3) >= 5.0 for s in out), \
+        "a one-beat run here would be the fast cutting of music that is not playing"
