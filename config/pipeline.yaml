@@ -472,8 +472,15 @@ music:
   assignment: scene              # scene | act
   min_scene_s: 45                # a scene shorter than this is folded into a neighbour
   reuse_gap_s: 300                # a track cannot repeat within this many seconds of itself
-  switch_cost: 0.6                # penalty for changing track between adjacent scenes
-  continuity_bonus: 0.3           # reward for keeping the same track across a cut
+  # Measured on the real corpus (2026-09-24, 31 scenes, 23 tracks): the most
+  # any scene could gain by leaving the incumbent track was 0.36 and the
+  # median 0.016, so a switch cost of 0.6 (plus 0.3 continuity) was never paid
+  # and ONE track covered all 1814 s, looped eight times. Both must sit under
+  # that margin; at 0.05 / 0.01 the same corpus uses 7 tracks with a longest
+  # run of 743 s. Re-measure (music-assignment-diagnosis.md) if the targets
+  # or the library change.
+  switch_cost: 0.05               # penalty for changing track between adjacent scenes
+  continuity_bonus: 0.01          # reward for keeping the same track across a cut
   repeat_penalty: 0.5             # extra cost for a track already used elsewhere in the film
   scene_targets:                  # weights of the distance terms
     energy: 1.0
@@ -527,7 +534,10 @@ music:
     - 'Murray Gold.The Long Song - From "Doctor Who" Series 7.mp3'
     - "Hans Zimmer.Time.mp3"
     - "Rusted Root.Send Me on My Way.mp3"
-  preferred_bonus: 0.15
+  # A tilt must be smaller than the spread it tilts: the median best-vs-third
+  # gap on the real corpus is 0.056, and 0.15 outweighed the whole available
+  # gain in 24 of 31 scenes (same measurement as switch_cost above).
+  preferred_bonus: 0.05
 
 # Remote execution (Film v2 section 2.2). The local machine computes nothing;
 # everything runs on one GCP Spot VM with the bucket as the hub.
