@@ -169,6 +169,14 @@ def test_a_box_that_stopped_without_down_is_booked_at_the_next_command(env):
     assert len(spend.ledger(cfg).entries) == 1
 
 
+def test_up_installs_the_idle_watchdog_on_a_box_that_is_already_running(env):
+    """The bootstrap installs it at boot, which never reaches the box that
+    is up already -- and that is the box the incident was about."""
+    cfg, tmp = env
+    remote.Remote(cfg, "cpu").up(wait=True)
+    assert any("systemctl enable --now nepal-idle.timer" in c for c in commands(tmp))
+
+
 def test_run_wraps_the_command_with_sync_and_branch_reset(env):
     cfg, tmp = env
     r = remote.Remote(cfg, "cpu")
@@ -183,6 +191,12 @@ def test_run_wraps_the_command_with_sync_and_branch_reset(env):
     assert ".venv/bin/nepal s03 --redo place" in cmd
     assert "gcloud storage rsync --recursive /data/projects/nepal_work gs://b/work" in cmd
     assert cmd.index("nepal s03") < cmd.index("/data/projects/nepal_work gs://b/work")
+    # the watchdog's stamp, before the command and after it: a detached job
+    # leaves the second one hours behind, which is why the watchdog reads
+    # the job logs too
+    touch = "touch /data/projects/nepal_work/reports/.last_activity"
+    assert cmd.count(touch) == 2
+    assert cmd.index(touch) < cmd.index("nepal s03") < cmd.rindex(touch)
 
 
 def test_push_and_pull_issue_one_rsync_per_plan_entry(env):

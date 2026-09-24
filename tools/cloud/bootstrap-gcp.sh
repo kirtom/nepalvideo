@@ -103,6 +103,19 @@ if [ -n "$BUCKET" ]; then
   fi
 fi
 
+# -- the idle watchdog, every boot ---------------------------------------
+# A session that dies leaves the box running and the meter on: 104 idle
+# hours in 2026-09. The timer lives here because the session is what failed.
+# Rendered by the module that also reads it, so the unit and the reader
+# cannot drift; a failure to install must not stop the box from booting.
+if ! sudo -u $USER_NAME .venv/bin/python -c \
+     "from nepal.cloud import watchdog; print(watchdog.install_sh(repo='$ROOT/nepalvideo'))" | bash; then
+  echo "idle watchdog install failed; continuing"
+fi
+# Booting is activity: the watchdog's clock starts now, not at the mtime
+# that came back from the bucket with work/.
+sudo -u $USER_NAME bash -c 'mkdir -p /data/projects/nepal_work/reports && touch /data/projects/nepal_work/reports/.last_activity'
+
 sudo -u $USER_NAME .venv/bin/nepal doctor > $ROOT/doctor.txt 2>&1 || true
 nvidia-smi -L >> $ROOT/doctor.txt 2>&1 || echo "no GPU visible" >> $ROOT/doctor.txt
 date -u +%FT%TZ > $ROOT/READY

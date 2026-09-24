@@ -576,6 +576,14 @@ cloud:
     ssh_user: nepal
     # How long `up` waits for the startup script to write its READY marker.
     ready_timeout_s: 1500
+    # The box stops itself after this many minutes with no job running and
+    # nothing written to a job log. On 2026-09-20 a session died on a rate
+    # limit with the box up and nothing stopped it for four days: 104 idle
+    # hours, ~31 USD, through a ceiling of 25. The session is what failed, so
+    # the timer runs on the box. Thirty minutes is long enough to read a
+    # render and decide what to do next, short enough that a box nobody comes
+    # back to costs cents rather than a day's budget.
+    idle_stop_min: 30
 
 # -- S03.5b the hallucination filter (Film v2 section 4.1) ------------------
 # Whisper invents text where there is none to hear: subtitle credits, "thanks

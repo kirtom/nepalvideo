@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timezone
 from typing import Sequence
 
-from nepal.cloud import gce, spend, sync
+from nepal.cloud import gce, spend, sync, watchdog
 from nepal.cloud.gcloud import Gcloud
 
 log = logging.getLogger(__name__)
@@ -141,7 +141,28 @@ class Remote:
         self._save(state)
         if wait:
             self._wait_ready()
-        return self.status()
+        st = self.status()
+        if st.state == "RUNNING":
+            self.install_watchdog()
+        return st
+
+    def install_watchdog(self) -> None:
+        """Put the idle watchdog on the box, or refresh it.
+
+        The startup script installs it at every boot, which covers a box that
+        `up` creates or starts. This covers the one that is already running --
+        every box created before the watchdog existed, including the nepal-cpu
+        that billed the 104 idle hours.
+        """
+        script = watchdog.install_sh(repo=self.remote_repo)
+        # A heredoc rather than a quoted argument: the script is multi-line
+        # and ssh hands the whole --command string to the login shell anyway.
+        cmd = f"sudo bash -s <<'NEPAL_WATCHDOG_EOF'\n{script}\nNEPAL_WATCHDOG_EOF\n"
+        proc = self.gcloud.run(gce.ssh_args(self.profile.name, project=self.project,
+                                            user=self.ssh_user, zone=self.zone, command=cmd),
+                               check=False)
+        log.info("remote: idle watchdog %s",
+                 "installed" if proc.returncode == 0 else "install failed (see the boot log)")
 
     def _wait_ready(self) -> None:
         deadline = time.monotonic() + self.ready_timeout
@@ -189,13 +210,18 @@ class Remote:
         pull = (f"gcloud storage rsync --recursive {self.bucket}/raw {self.remote_data} && "
                 f"gcloud storage rsync --recursive {self.bucket}/work {self.remote_work}")
         push = f"gcloud storage rsync --recursive {self.remote_work} {self.bucket}/work"
+        # Before and after: the idle watchdog reads this stamp, and a job
+        # launched detached (`nohup ... &`) returns at once, so the stamp at
+        # the end is when the box was last *asked* for something, not when it
+        # stopped working -- which is why the watchdog reads the job logs too.
+        touch = watchdog.touch_sh(self.remote_work)
         # A --command runs in a non-login shell, so the profile (and the API
         # key the bootstrap put in it) is sourced by hand.
-        return (f". ~/.profile 2>/dev/null; cd {self.remote_repo} && "
+        return (f". ~/.profile 2>/dev/null; {touch}; cd {self.remote_repo} && "
                 f"git fetch -q origin {self.branch} && "
                 f"git reset -q --hard origin/{self.branch} && "
                 f".venv/bin/pip install -q -e '.[{EXTRAS}]' && {pull} && "
-                f"({command}); rc=$?; "
+                f"({command}); rc=$?; {touch}; "
                 # the status page is rebuilt after every run, whatever happened
                 f".venv/bin/nepal status-page >/dev/null 2>&1; {push}; exit $rc")
 

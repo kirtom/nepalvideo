@@ -2,8 +2,13 @@
 import pathlib
 import shutil
 import subprocess
+import sys
 
 import pytest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+
+from nepal.cloud import watchdog
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "tools" / "cloud" / "bootstrap-gcp.sh"
 
@@ -46,6 +51,18 @@ def test_the_user_manager_lingers_before_the_first_rsync():
     killed the snap gcloud rsync registered in it (exit 143)."""
     s = SCRIPT.read_text()
     assert s.index("loginctl enable-linger $USER_NAME") < s.index("gcloud storage rsync")
+
+
+def test_every_boot_installs_the_idle_watchdog_and_stamps_the_boot():
+    """The box has to be able to stop itself: the session that should have
+    stopped it is exactly what failed in 2026-09. The stamp is touched
+    after the bucket rsync, or the clock would start at whatever mtime came
+    back with work/."""
+    s = SCRIPT.read_text()
+    assert "from nepal.cloud import watchdog; print(watchdog.install_sh(" in s
+    assert watchdog.touch_sh("/data/projects/nepal_work") in s
+    assert s.index("rsync --recursive \"$BUCKET/work\" $ROOT/nepal_work") < \
+        s.index(watchdog.touch_sh("/data/projects/nepal_work"))
 
 
 def test_a_box_with_state_pushes_work_on_boot_rather_than_pulling():
