@@ -130,10 +130,24 @@ def test_fallback_similarity_is_deterministic_and_graded():
     assert assemble.fallback_similarity(a, e, weights=w) == 0.0
 
 
+def test_a_stamp_that_cannot_be_read_is_no_time_at_all_not_epoch_zero():
+    """Every caller tests the result against None before doing arithmetic on
+    it. A 0.0 would pass that test and then compare as a real instant --
+    1970 -- so an unreadable stamp would put two shots an eternity apart
+    instead of dropping them out of the comparison entirely."""
+    assert assemble.parse_utc("not a date") is None
+    assert assemble.parse_utc(None) is None
+    assert assemble.parse_utc("") is None
+    assert assemble.epoch_utc("not a date") is None
+    assert assemble.epoch_utc(None) is None
+    stamp = "2024-05-01T04:00:00+00:00"
+    assert assemble.epoch_utc(stamp) == assemble.parse_utc(stamp).timestamp()
+
+
 def test_the_same_recording_still_counts_when_a_stamp_is_missing_or_unparseable():
     """Two shots of one recording are the same material whether or not either
-    carries a readable clock; only the 60 s and the hour need one. A stamp
-    that cannot be parsed must read as "no time", never as time zero."""
+    carries a readable clock; only the 60 s and the hour need one. That the
+    unreadable stamp is None rather than zero is the test above."""
     w = _FALLBACK_W
     a = {"recording_id": "r1", "start_utc": "2024-05-01T04:00:00+00:00", "place_name": "Deng"}
     no_stamp = {"recording_id": "r1", "place_name": "Deng"}

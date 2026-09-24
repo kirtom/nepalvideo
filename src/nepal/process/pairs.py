@@ -166,8 +166,10 @@ def find_pairs(rows: Sequence[Mapping[str, Any]], *, window_s: float,
                    secondary_shot_id=secondary["shot_id"],
                    src_in=primary_src_in, secondary_src_in=secondary_src_in,
                    src_out=src_out, motion='{"type":"split"}', speed=1.0,
-                   # `dip_black` is the film's punctuation and Act 0 owns it
-                   # (anchors.cold_open_pick, s05_cut's title card); a pair is
+                   # `dip_black` is the film's punctuation and Act 0's cold
+                   # open owns it -- the shot itself, from
+                   # anchors.cold_open_pick or s05_cut's fallback when no beat
+                   # opens the film; even the card after it cuts. A pair is
                    # an ordinary picture inside an act's run -- placed among
                    # the fill and re-timed by rhythm.retime like the rest --
                    # so it takes the same plain cut every other fill slot gets.
