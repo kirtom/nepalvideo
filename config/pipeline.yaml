@@ -49,7 +49,11 @@ film:
   # Per-act overrides. Act 4 is the one worth a deliberate decision: the brief
   # makes it one swell into a hard cut to silence. Set it to 0.0 to keep stills
   # out of the summit entirely.
-  photo_share_by_act: {}
+  # 2026-09-24, on the first draft: Acts 1 and 2 run out of clips -- 54 of
+  # act 1's 82 surviving rows are stills, and holding them to a tenth of the
+  # act means the same few videos come round again. Three tenths is what the
+  # material is.
+  photo_share_by_act: {1: 0.3, 2: 0.3}
   # The pre-title sequence: 15-25 s from Act 3 or 4, then a hard cut to a title
   # card. Carved off the top, so the acts are allocated over the remainder. This
   # is the one deliberate break in chronology.
@@ -81,7 +85,9 @@ film:
 acts:
   - {act: 1, name: Planning,          target_s:  83, min_s:  45, max_s:  180}
   - {act: 2, name: Approach,          target_s: 287, min_s: 150, max_s:  700}
-  - {act: 3, name: Climb,             target_s: 407, min_s: 240, max_s: 1150}
+  # 2026-09-24: the operator has material to spare in the climb and would
+  # rather the film spent it there than anywhere else; 1150 -> 1400.
+  - {act: 3, name: Climb,             target_s: 407, min_s: 240, max_s: 1400}
   - {act: 4, name: Highest point,     target_s: 113, min_s:  90, max_s:  150}
   - {act: 5, name: Descent and return, target_s: 311, min_s: 150, max_s:  700}
 
@@ -448,7 +454,12 @@ render:
   # One rate for every leg of the concat. The proxies are 15 fps, the phones
   # 30 or 60, and a concat of mixed rates produced a 120 fps draft.
   fps: 30
-  music_lufs: -14.0            # the music bed
+  # 2026-09-24, Gate 3: location sound leads and the music sits under it --
+  # the operator's "it's not messing up with some kind of other information"
+  # is about level as much as about placement. Was -14.0; 3 dB down is the
+  # difference between a bed you hear past and a bed you hear over. Act 4's
+  # designed swell keeps the old level (music.placement.swell_lufs).
+  music_lufs: -17.0            # the music bed
   duck_lufs: -28.0             # location audio under the bed
   duck_lufs_speech: -22.0      # music under speech
   # -- Film v2 section 6: the audio graph's own loudness targets, separate
@@ -549,16 +560,42 @@ music:
   # groups into windows, and the map's segments tile those windows instead of
   # the acts.
   placement:
-    # Both sides of a speech beat's span: the bed ends before the line and
-    # comes back after it, rather than ducking under it. One breath is enough
-    # for the fade to read as deliberate and short enough that a pause
-    # between two lines of the same exchange is not mistaken for a window.
-    speech_margin_s: 2.0
-    # A window shorter than this is dropped rather than filled: a ten-second
-    # sting under nothing arrives, states nothing and leaves -- which is the
-    # "messing up with some kind of other information" the ruling is about,
-    # not the music the film wants.
-    min_window_s: 30
+    # Asymmetric, because the two edges do different jobs (operator,
+    # 2026-09-24): the bed must be out of the way before a line starts, and
+    # it must let the line land before coming back. Two seconds of run-out,
+    # four of silence after -- a cue returning on the last syllable is the
+    # "messing up with some kind of other information" the ruling names.
+    speech_margin_before_s: 2.0
+    speech_margin_after_s: 4.0
+    # A window shorter than this is dropped rather than filled: a sting under
+    # nothing arrives, states nothing and leaves. 30 -> 60 with
+    # max_windows_per_act below: one arc per act, not a scattering of cues
+    # (operator, 2026-09-24).
+    min_window_s: 60
+    # At most this many windows in an act, the rest left on ambience. Two is
+    # "one arc per act" with room for a reprise; act 5 takes one, which
+    # resolves into the credits instead of returning.
+    max_windows_per_act: 2
+    max_windows_by_act: {5: 1}
+    # Which acts keep their LAST eligible window rather than their longest:
+    # act 5 is the descent and the return, and its one cue belongs as late as
+    # eligibility allows, running into the credits (operator, 2026-09-24).
+    prefer_late_acts: [5]
+    # Music enters on movement, never on talk or rest (operator,
+    # 2026-09-24). These are spine/scenes.py's own activity classes, not new
+    # ones: walking, climbing, descending and crossing are the trek moving,
+    # and summit is act 4's push. What is left out is what the ruling means
+    # by rest -- resting, village and city (a tea-house stop, a meal, a
+    # lodge) and transport (sitting in a jeep). A window may only OPEN on one
+    # of these; once the cue is established any class may lie inside it.
+    enter_on: [walking, climbing, descending, crossing, summit]
+    # An arrival is where the trail flattens after a climb -- the pass, the
+    # viewpoint, the village reached. A window opening on one is kept ahead
+    # of a merely longer window when an act has more than it may keep
+    # (operator, 2026-09-24: the climb before it stays silent, the arrival
+    # gets the cue). Read off the scene's own duration-weighted gain.
+    arrival_gain_m_per_h: 100
+    climb_gain_m_per_h: 300
     # "Definitely not from the start." The cold open, the opening card and
     # Act 1's first chat cards play on location sound alone; 90 s is what
     # those take at assemble.card_s + assemble.chat_card_s apiece.
@@ -570,6 +607,18 @@ music:
     # playing. A key, not a literal, because it is a judgement about the
     # film's pace and the next draft may want "mid".
     no_music_band: low
+    # Act 4 is one swell into a hard cut to silence -- the brief's single
+    # most powerful move -- so it keeps the level the whole film had before
+    # 2026-09-24 put the bed under the location sound. The rest of the film
+    # plays at render.music_lufs.
+    swell_lufs: -14.0
+    # No one piece may hold the film longer than this without a break
+    # (operator, 2026-09-24, after one track ran 1814 s unbroken). The
+    # recalibrated switch_cost/continuity_bonus above cut the longest run to
+    # 743 s, which is still a quarter of an hour on one cue. Hard, not a
+    # cost: the assignment may not extend a run past it, and the run resets
+    # at a window boundary and at every switch.
+    max_track_run_s: 240
 
 # Remote execution (Film v2 section 2.2). The local machine computes nothing;
 # everything runs on one GCP Spot VM with the bucket as the hub.

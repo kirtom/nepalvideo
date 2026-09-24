@@ -387,7 +387,8 @@ def test_two_windows_meeting_edge_to_edge_are_one_bed_and_crossfade():
          "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 60.0, "src_in": 0.0, "src_out": 60.0}]},
         {"act": 2, "t_start": 60.0, "t_end": 120.0,
          "music_windows": [{"t_start": 60.0, "t_end": 120.0}],
-         "segments": [{"track_id": "t2", "t_in": 60.0, "t_end": 120.0, "src_in": 0.0, "src_out": 60.0}]}],
+         # act-local, like every segment in the map
+         "segments": [{"track_id": "t2", "t_in": 0.0, "t_end": 60.0, "src_in": 0.0, "src_out": 60.0}]}],
         "silence_window": {}}
     rows = cues.music_cues(mmap, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0)
     assert [r["fade_out_s"] for r in rows] == [2.0, 1.0], "only the film's last edge stops"
@@ -421,3 +422,47 @@ def test_the_location_sound_is_the_mix_wherever_there_is_no_music():
     rows = cues.location_cues(slots, speech_spans=[(30.0, 40.0)], windows=[], silence={},
                               music_spans=[(0.0, 20.0)], **LEVELS, **FADES)
     assert [r["gain_lufs"] for r in rows] == [-28.0, -28.0, -18.0, -24.0, -18.0]
+
+
+def test_the_bed_arrives_and_leaves_on_a_cut():
+    """A fade coming up mid-shot reads as a mistake; one on the cut reads as
+    the film doing it (operator, 2026-09-24). The rhythm pass re-timed every
+    slot after the windows were placed, so the edges are snapped back onto
+    the cuts the picture actually has."""
+    slots = [{"t_in": 0.0, "t_out": 18.4}, {"t_in": 18.4, "t_out": 47.9},
+             {"t_in": 47.9, "t_out": 83.2}, {"t_in": 83.2, "t_out": 122.6},
+             {"t_in": 122.6, "t_out": 181.0}, {"t_in": 181.0, "t_out": 200.0}]
+    snapped = cues.snap_windows_to_cuts(_windowed_map(), slots)
+    assert snapped["acts"][0]["music_windows"] == [{"t_start": 18.4, "t_end": 83.2},
+                                                  {"t_start": 122.6, "t_end": 181.0}]
+    rows = cues.music_cues(snapped, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0)
+    cuts = {s["t_in"] for s in slots} | {s["t_out"] for s in slots}
+    assert min(r["t_in"] for r in rows) in cuts and max(r["t_out"] for r in rows) in cuts
+
+
+def test_a_window_that_snaps_onto_one_cut_is_dropped_not_played_at_zero_length():
+    """One shot spanning the act: both edges of both windows land on the
+    same pair of cuts, so neither window has anything left to play."""
+    snapped = cues.snap_windows_to_cuts(_windowed_map(), [{"t_in": 0.0, "t_out": 200.0}])
+    assert snapped["acts"][0]["music_windows"] == []
+    assert cues.music_cues(snapped, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0) == []
+    assert cues.music_spans(snapped) == []
+
+
+def test_the_summit_keeps_the_level_the_rest_of_the_film_gave_up():
+    """Gate 3 put the bed under the location sound; act 4 is one swell into
+    a hard cut to silence, which is the move that ruling was not about."""
+    mmap = {"acts": [
+        {"act": 3, "t_start": 0.0, "t_end": 60.0,
+         "music_windows": [{"t_start": 0.0, "t_end": 60.0}],
+         "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 60.0, "src_in": 0.0, "src_out": 60.0}]},
+        {"act": 4, "t_start": 60.0, "t_end": 120.0,
+         "music_windows": [{"t_start": 60.0, "t_end": 120.0}],
+         "segments": [{"track_id": "t2", "t_in": 0.0, "t_end": 60.0, "src_in": 0.0, "src_out": 60.0}]}],
+        "silence_window": {}}
+    rows = cues.music_cues(mmap, lufs=-17.0, xfade_s=2.0, window_fade_s=1.0,
+                           swell_lufs=-14.0, swell_act=4)
+    assert [r["gain_lufs"] for r in rows] == [-17.0, -14.0]
+    # without a swell level named, every act plays at the film's own
+    assert all(r["gain_lufs"] == -17.0 for r in
+               cues.music_cues(mmap, lufs=-17.0, xfade_s=2.0, window_fade_s=1.0))

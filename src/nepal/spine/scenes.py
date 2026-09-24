@@ -20,6 +20,7 @@ asking for, before anything is compared against it.
 from __future__ import annotations
 
 import bisect
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
@@ -423,6 +424,10 @@ class MusicWindow:
     t_in: float
     t_out: float
     scene_ids: tuple[int, ...]
+    # Whether the window opens on an arrival -- the trail flattening after a
+    # climb. Carried rather than recomputed because the trim below ranks on
+    # it and the run report prints it.
+    arrival: bool = False
 
 
 def _overlaps(a0: float, a1: float, b0: float, b1: float) -> bool:
@@ -433,22 +438,29 @@ def blocking_spans(*, speech_spans: Sequence[tuple[float, float]],
                    overlay_spans: Sequence[tuple[float, float]],
                    natural_spans: Sequence[tuple[float, float]],
                    cold_open_end_s: float, no_music_before_s: float,
-                   speech_margin_s: float) -> list[tuple[float, float]]:
+                   speech_margin_before_s: float,
+                   speech_margin_after_s: float) -> list[tuple[float, float]]:
     """Every span of film where something other than music already carries
     the information -- the one place that answers "what counts as
     information", so the eligibility rule below has nothing to decide.
 
-    Only the speech spans get the margin: the ruling is that music must not
+    Only the speech spans get a margin: the ruling is that music must not
     mess with what is being said, and a bed that stops on the syllable reads
     as a fault rather than as a choice. A card is on screen for a fixed few
     seconds and needs no run-up, and a natural-sound window is already the
     quiet it asks for.
 
+    The two margins differ because the two edges do different jobs (operator,
+    2026-09-24): ``speech_margin_before_s`` is the bed getting out of the
+    way, ``speech_margin_after_s`` is letting the line land before anything
+    comes back over it -- so the second is the longer of the two.
+
     The opening is the union of the cold open and ``no_music_before_s``
     rather than either alone: "definitely not from the start" is about the
     film's opening, and the cold open is only the first part of it.
     """
-    out = [(float(a) - speech_margin_s, float(b) + speech_margin_s) for a, b in speech_spans]
+    out = [(float(a) - speech_margin_before_s, float(b) + speech_margin_after_s)
+           for a, b in speech_spans]
     out += [(float(a), float(b)) for a, b in overlay_spans]
     out += [(float(a), float(b)) for a, b in natural_spans]
     opening = max(float(cold_open_end_s), float(no_music_before_s))
@@ -457,10 +469,34 @@ def blocking_spans(*, speech_spans: Sequence[tuple[float, float]],
     return sorted(s for s in out if s[1] > s[0])
 
 
+def _is_arrival(opening: Scene, scenes: Sequence[Scene], *, arrival_gain_m_per_h: float,
+                climb_gain_m_per_h: float) -> bool:
+    """Whether ``opening`` is the trail flattening after a climb -- the pass,
+    the viewpoint, the village reached (operator, 2026-09-24).
+
+    Read against the scene immediately before it in film order, blocked or
+    not: what makes an arrival is the climb that preceded it, and whether
+    that climb could have carried music has nothing to do with it.
+    """
+    if opening.gain_m_per_h is None or opening.gain_m_per_h >= arrival_gain_m_per_h:
+        return False
+    i = scenes.index(opening)
+    if i == 0:
+        return False
+    before = scenes[i - 1]
+    return before.gain_m_per_h is not None and before.gain_m_per_h > climb_gain_m_per_h
+
+
 def music_windows(scenes: Sequence[Scene], *, blocked: Sequence[tuple[float, float]],
-                  min_window_s: float) -> list[MusicWindow]:
+                  min_window_s: float, enter_on: Sequence[str] = (),
+                  max_windows_per_act: int | None = None,
+                  max_windows_by_act: Mapping[int, int] | None = None,
+                  prefer_late_acts: Sequence[int] = (),
+                  arrival_gain_m_per_h: float = 0.0,
+                  climb_gain_m_per_h: float = math.inf) -> list[MusicWindow]:
     """The stretches that may carry music: runs of consecutive scenes that no
-    blocking span touches, each at least ``min_window_s`` long.
+    blocking span touches, opening on movement, each at least
+    ``min_window_s`` long, and at most ``max_windows_per_act`` to an act.
 
     A run breaks at an act boundary as well as at a blocked scene, because
     the map records its windows per act and the segments tile them there --
@@ -470,9 +506,22 @@ def music_windows(scenes: Sequence[Scene], *, blocked: Sequence[tuple[float, flo
     Act 0 is never eligible: the cold open takes no music at all ("definitely
     not from the start"), whatever ``no_music_before_s`` is set to.
 
+    ``enter_on`` is the activity classes music may *enter* on (operator,
+    2026-09-24: "music enters on movement, never on talk or rest"). A run's
+    leading rest is trimmed rather than the run dropped -- the cue arrives
+    when the party starts moving again, which is the moment worth scoring --
+    and a run that never moves has nothing to open on and goes. Once the cue
+    is established any class may lie inside the window; the ruling is about
+    where music comes in, not about holding it to the trail.
+
     A window under ``min_window_s`` is dropped rather than shortened: a sting
     too brief to establish itself is noise, and the scenes in it simply go
     unassigned -- which is silence, which is the point.
+
+    What an act may keep when it has more than its share: an arrival first
+    (the climb before it stays silent, the top gets the cue), then the
+    longest -- or, for an act in ``prefer_late_acts``, the latest, which is
+    act 5 resolving into the credits rather than opening on the descent.
     """
     spans = [(float(a), float(b)) for a, b in blocked if b > a]
     runs: list[list[Scene]] = []
@@ -486,6 +535,30 @@ def music_windows(scenes: Sequence[Scene], *, blocked: Sequence[tuple[float, flo
         else:
             runs[-1].append(sc)
         broken = False
-    return [MusicWindow(act=run[0].act, t_in=run[0].t_in, t_out=run[-1].t_out,
-                        scene_ids=tuple(sc.scene_id for sc in run))
-            for run in runs if run[-1].t_out - run[0].t_in >= min_window_s]
+
+    windows: list[MusicWindow] = []
+    for run in runs:
+        if enter_on:
+            opens = next((k for k, sc in enumerate(run) if sc.activity in enter_on), None)
+            if opens is None:
+                continue                        # nothing here to enter on
+            run = run[opens:]
+        if run[-1].t_out - run[0].t_in < min_window_s:
+            continue
+        windows.append(MusicWindow(
+            act=run[0].act, t_in=run[0].t_in, t_out=run[-1].t_out,
+            scene_ids=tuple(sc.scene_id for sc in run),
+            arrival=_is_arrival(run[0], scenes, arrival_gain_m_per_h=arrival_gain_m_per_h,
+                                climb_gain_m_per_h=climb_gain_m_per_h)))
+
+    caps = dict(max_windows_by_act or {})
+    kept: list[MusicWindow] = []
+    for act in {w.act for w in windows}:
+        cap = caps.get(act, max_windows_per_act)
+        mine = [w for w in windows if w.act == act]
+        if cap is not None and len(mine) > cap:
+            late = act in prefer_late_acts
+            mine = sorted(mine, key=lambda w: (not w.arrival,
+                                               -w.t_in if late else -(w.t_out - w.t_in)))[:cap]
+        kept += mine
+    return sorted(kept, key=lambda w: w.t_in)

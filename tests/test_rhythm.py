@@ -439,7 +439,8 @@ def test_slots_outside_a_window_are_cut_to_the_configured_band():
     lengths = [round(s["t_out"] - s["t_in"], 3) for s in out]
     under_music = [l for s, l in zip(out, lengths) if s["t_in"] < 20.0]
     under_none = [l for s, l in zip(out, lengths) if s["t_in"] >= 20.0]
-    assert under_music and all(l == 2.0 for l in under_music), "the high band's midpoint"
+    assert under_music and all(l == 4.0 for l in under_music), \
+        "the mid band's midpoint -- the one music section is the whole ranking"
     assert under_none and all(l == 6.5 for l in under_none), "the low band's midpoint"
 
 

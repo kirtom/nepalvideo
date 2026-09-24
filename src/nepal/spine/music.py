@@ -1005,6 +1005,32 @@ def _recent_tracks(prev_state: tuple[str, str], i: int, scenes: Sequence[Scene],
     return seen
 
 
+def _run_s(prev_state: tuple[str, str], i: int, scenes: Sequence[Scene],
+           back: list[dict[tuple[str, str], tuple[str, str] | None]],
+           window_starts: Collection[int]) -> float:
+    """How long the piece playing at scene ``i-1`` has been playing without a
+    break, along the path that reached ``prev_state`` -- film seconds, the
+    same walk ``_recent_tracks`` does and computed once per predecessor for
+    the same reason.
+
+    The run resets where the music does: at a switch to another track, and at
+    a window start, where the bed stopped and came back. It is the same
+    single-best-path approximation ``_recent_tracks`` documents at length.
+    """
+    track = prev_state[0]
+    state, j = prev_state, i - 1
+    end = scenes[j].t_out
+    while True:
+        start = scenes[j].t_in
+        if scenes[j].scene_id in window_starts:
+            break
+        nxt = back[j].get(state) if j > 0 else None
+        if nxt is None or nxt[0] != track:
+            break
+        state, j = nxt, j - 1
+    return end - start
+
+
 def _act1_track_along_path(state: tuple[str, str], step: int,
                            back: list[dict[tuple[str, str], tuple[str, str] | None]],
                            act1_idx: int) -> str | None:
@@ -1028,7 +1054,8 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
                   reuse_gap_s: float, preferred: Sequence[str],
                   preferred_bonus: float, exclude: Sequence[str],
                   act4_swell: bool = True,
-                  window_starts: Collection[int] = ()) -> SceneAssignment:
+                  window_starts: Collection[int] = (),
+                  max_track_run_s: float = math.inf) -> SceneAssignment:
     """A Viterbi pass over ``scenes`` with (track, section) pairs as states.
 
     ``scenes`` must already be in chronological order (as ``group_scenes``
@@ -1046,6 +1073,13 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
     heard four minutes and one silence ago is still a track heard four
     minutes ago -- so at a window start every candidate recently heard pays
     it, including the one that was playing when the music stopped.
+
+    ``max_track_run_s`` is a refusal, not a cost (operator, 2026-09-24, after
+    one piece ran 1814 s unbroken): a path may not extend a track's
+    continuous run past it, so the assignment has to hand over whatever the
+    fit says. A library with nothing to hand over to cannot obey it, and
+    rather than return no assignment at all the step is retried without the
+    cap and the note says so.
     """
     excluded_ids, excluded_unmatched = _named_track_ids(tracks, exclude)
     preferred_ids, preferred_unmatched = _named_track_ids(tracks, preferred)
@@ -1071,6 +1105,7 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
                                f"no track sections available -- {len(excluded_ids)} track(s) excluded"
                                + unmatched_note)
 
+    run_capped_giveup = False
     energies, dyn_ranges, centroids = _library_stats(pool)
     feat_of = {s: section_features(by_id[s[0]], section_of[s], energies=energies,
                                    dyn_ranges=dyn_ranges, centroids=centroids)
@@ -1122,37 +1157,55 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
         recent_by_prev = {prev: _recent_tracks(prev, i, scenes, back, reuse_gap_s) for prev in dp}
         act1_by_prev = ({prev: _act1_track_along_path(prev, i - 1, back, act1_idx) for prev in dp}
                         if wants_callback else {})
+        run_by_prev = ({prev: _run_s(prev, i, scenes, back, window_starts) for prev in dp}
+                       if max_track_run_s < math.inf else {})
 
         fresh = scene.scene_id in window_starts
-        for cand in candidates:
-            emission = pair_cost(target, feat_of[cand], weights=weights)
-            if cand[0] in preferred_ids:
-                emission -= preferred_bonus
+        scene_s = scene.t_out - scene.t_in
+        # Enforced, then -- only if that left the step with nowhere to go at
+        # all, which takes a library of one track -- not.
+        for enforce in (True, False):
+            new_dp, step_back = {}, {}
+            for cand in candidates:
+                emission = pair_cost(target, feat_of[cand], weights=weights)
+                if cand[0] in preferred_ids:
+                    emission -= preferred_bonus
 
-            best_cost, best_prev = math.inf, None
-            for prev, prev_cost in dp.items():
-                cost = prev_cost + emission
-                if fresh:
-                    if cand[0] in recent_by_prev[prev]:
-                        cost += repeat_penalty
-                elif cand[0] != prev[0]:
-                    cost += switch_cost
-                    if cand[0] in recent_by_prev[prev]:
-                        cost += repeat_penalty
-                elif _is_continuation(prev, cand, order):
-                    cost -= continuity_bonus
-                if wants_callback:
-                    act1_track = act1_by_prev[prev]
-                    if act1_track is not None:
-                        cost -= callback_affinity(by_id[act1_track], by_id[cand[0]])
-                if cost < best_cost:
-                    best_cost, best_prev = cost, prev
-            new_dp[cand] = best_cost
-            step_back[cand] = best_prev
+                best_cost, best_prev = math.inf, None
+                for prev, prev_cost in dp.items():
+                    if (enforce and run_by_prev and not fresh and cand[0] == prev[0]
+                            and run_by_prev[prev] + scene_s > max_track_run_s):
+                        continue        # this path may not hold the piece any longer
+                    cost = prev_cost + emission
+                    if fresh:
+                        if cand[0] in recent_by_prev[prev]:
+                            cost += repeat_penalty
+                    elif cand[0] != prev[0]:
+                        cost += switch_cost
+                        if cand[0] in recent_by_prev[prev]:
+                            cost += repeat_penalty
+                    elif _is_continuation(prev, cand, order):
+                        cost -= continuity_bonus
+                    if wants_callback:
+                        act1_track = act1_by_prev[prev]
+                        if act1_track is not None:
+                            cost -= callback_affinity(by_id[act1_track], by_id[cand[0]])
+                    if cost < best_cost:
+                        best_cost, best_prev = cost, prev
+                if best_prev is not None:
+                    new_dp[cand] = best_cost
+                    step_back[cand] = best_prev
+            if new_dp:
+                if not enforce:
+                    run_capped_giveup = True
+                break
 
         dp = new_dp
         back.append(step_back)
 
+    if run_capped_giveup:
+        unmatched_note += ("; the track-run cap had to be given up at least once: "
+                           "nothing else in the library could take over")
     best_final = min(dp, key=dp.get)
     total_cost = dp[best_final]
 

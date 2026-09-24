@@ -344,7 +344,8 @@ def _run(n=4, *, act=2, start=200.0, length=60.0):
 
 def _spans(**kw):
     base = dict(speech_spans=(), overlay_spans=(), natural_spans=(),
-               cold_open_end_s=0.0, no_music_before_s=0.0, speech_margin_s=2.0)
+               cold_open_end_s=0.0, no_music_before_s=0.0,
+               speech_margin_before_s=2.0, speech_margin_after_s=4.0)
     base.update(kw)
     return blocking_spans(**base)
 
@@ -365,24 +366,32 @@ def test_every_kind_of_information_takes_its_scene_out(kind):
     assert [x.scene_ids for x in w] == [(1,), (3, 4)], "the blocked scene splits the window"
 
 
-def test_a_line_just_before_a_scene_still_takes_it_by_the_margin():
-    """The bed ends before the line and returns after it, so the margin is
-    part of what blocks -- without it music would stop on the syllable."""
-    just_outside = [(258.5, 259.5)]                   # ends 0.5s before scene 2 opens
+def test_a_line_near_a_scenes_edge_takes_the_next_scene_by_the_margin():
+    """The bed ends before the line and lets it land before coming back, so
+    both margins are part of what blocks -- without them music would stop on
+    the syllable and return on the last word."""
+    late = [(258.5, 259.5)]                  # the last second of scene 1
     assert [x.scene_ids for x in music_windows(
-        _run(), blocked=_spans(speech_spans=just_outside, speech_margin_s=0.0),
-        min_window_s=30)] == [(1, 2, 3, 4)]
+        _run(), blocked=_spans(speech_spans=late, speech_margin_before_s=0.0,
+                              speech_margin_after_s=0.0),
+        min_window_s=30)] == [(2, 3, 4)]
     assert [x.scene_ids for x in music_windows(
-        _run(), blocked=_spans(speech_spans=just_outside, speech_margin_s=2.0),
-        min_window_s=30)] == [(1,), (3, 4)]
+        _run(), blocked=_spans(speech_spans=late, speech_margin_before_s=2.0,
+                              speech_margin_after_s=4.0),
+        min_window_s=30)] == [(3, 4)], "four seconds of run-out reaches into scene 2"
+    early = [(260.5, 261.5)]                 # the first second of scene 2
+    assert [x.scene_ids for x in music_windows(
+        _run(), blocked=_spans(speech_spans=early, speech_margin_before_s=2.0,
+                              speech_margin_after_s=4.0),
+        min_window_s=30)] == [(3, 4)], "two seconds of run-in reaches back into scene 1"
 
 
 def test_a_card_gets_no_margin_of_its_own():
-    """Only speech carries the margin: a card is on screen for a fixed few
+    """Only speech carries the margins: a card is on screen for a fixed few
     seconds and the bed has no line to keep clear of."""
     assert [x.scene_ids for x in music_windows(
-        _run(), blocked=_spans(overlay_spans=[(258.5, 259.5)], speech_margin_s=2.0),
-        min_window_s=30)] == [(1, 2, 3, 4)]
+        _run(), blocked=_spans(overlay_spans=[(258.5, 259.5)]),
+        min_window_s=30)] == [(2, 3, 4)], "the card's own scene, and no neighbour"
 
 
 def test_a_window_too_short_to_state_anything_is_dropped():
@@ -411,7 +420,7 @@ def test_the_cold_open_extends_the_opening_when_it_is_the_longer_of_the_two():
     """The opening is the union of the two, not whichever was configured:
     a cold open running past no_music_before_s still opens in silence."""
     scenes = [_scene(scene_id=1, act=1, t_in=100.0, t_out=200.0),
-              _scene(scene_id=2, act=1, t_in=200.0, t_out=300.0)]
+              _scene(scene_id=2, act=1, t_in=220.0, t_out=320.0)]
     assert [x.scene_ids for x in music_windows(
         scenes, blocked=_spans(no_music_before_s=90.0, cold_open_end_s=210.0),
         min_window_s=30)] == [(2,)]
@@ -429,5 +438,73 @@ def test_a_window_never_runs_over_an_act_boundary():
 
 def test_blocking_spans_drops_an_empty_span_and_sorts():
     out = _spans(speech_spans=[(300.0, 310.0)], natural_spans=[(50.0, 50.0)],
-                 no_music_before_s=90.0, speech_margin_s=2.0)
-    assert out == [(0.0, 90.0), (298.0, 312.0)]
+                 no_music_before_s=90.0)
+    assert out == [(0.0, 90.0), (298.0, 314.0)]
+
+
+# -- what the operator ruled on top of the placement rule (2026-09-24) ----
+
+def test_music_enters_on_movement_never_on_rest():
+    """"Music enters on movement, never on talk or rest." A run's leading
+    rest is trimmed rather than the run dropped: the cue arrives when the
+    party starts moving again."""
+    scenes = [_scene(scene_id=1, act=2, t_in=200.0, t_out=260.0, activity="resting"),
+              _scene(scene_id=2, act=2, t_in=260.0, t_out=320.0, activity="walking"),
+              _scene(scene_id=3, act=2, t_in=320.0, t_out=380.0, activity="village")]
+    w = music_windows(scenes, blocked=_spans(), min_window_s=30,
+                      enter_on=["walking", "climbing"])
+    assert [(x.t_in, x.scene_ids) for x in w] == [(260.0, (2, 3))], \
+        "the tea-house stop before it carries no music; the one after it does"
+    assert music_windows([scenes[0], scenes[2]], blocked=_spans(), min_window_s=30,
+                         enter_on=["walking", "climbing"]) == [], \
+        "a run that never moves has nothing to enter on"
+    # and with no list configured the rule is simply off
+    assert len(music_windows(scenes, blocked=_spans(), min_window_s=30)) == 1
+
+
+def test_an_act_keeps_only_its_longest_windows():
+    """One arc per act, not a scattering of cues."""
+    # contiguous scenes, three of them taken by a natural-sound window, so
+    # what is left is four separate windows of 100, 300, 100 and 200 s
+    edges = [0.0, 100.0, 160.0, 460.0, 520.0, 620.0, 680.0, 880.0]
+    scenes = [_scene(scene_id=i + 1, act=2, t_in=a, t_out=b)
+              for i, (a, b) in enumerate(zip(edges, edges[1:]))]
+    blocked = _spans(natural_spans=[(110.0, 120.0), (470.0, 480.0), (630.0, 640.0)])
+    assert [x.scene_ids for x in music_windows(scenes, blocked=blocked, min_window_s=60)] == [
+        (1,), (3,), (5,), (7,)]
+    kept = music_windows(scenes, blocked=blocked, min_window_s=60, max_windows_per_act=2)
+    assert [x.scene_ids for x in kept] == [(3,), (7,)], "300 s and 200 s, in film order"
+
+
+def test_an_arrival_window_is_kept_over_a_merely_longer_one():
+    """The pass, the viewpoint, the village reached: the climb before it
+    stays silent and the top gets the cue (operator, 2026-09-24)."""
+    scenes = [_scene(scene_id=1, act=3, t_in=0.0, t_out=400.0, gain_m_per_h=0.0),
+              _scene(scene_id=2, act=3, t_in=400.0, t_out=500.0, gain_m_per_h=400.0),
+              _scene(scene_id=3, act=3, t_in=500.0, t_out=600.0, gain_m_per_h=10.0)]
+    blocked = _spans(speech_spans=[(430.0, 440.0)])       # the climb itself is spoken over
+    kept = music_windows(scenes, blocked=blocked, min_window_s=60, max_windows_per_act=1,
+                         arrival_gain_m_per_h=100.0, climb_gain_m_per_h=300.0)
+    assert [x.scene_ids for x in kept] == [(3,)]
+    assert kept[0].arrival, "the window opening where the trail flattens is the one kept"
+    # without the arrival numbers the 400 s window wins on length alone
+    plain = music_windows(scenes, blocked=blocked, min_window_s=60, max_windows_per_act=1)
+    assert [x.scene_ids for x in plain] == [(1,)] and not plain[0].arrival
+
+
+def test_act_five_keeps_its_last_window_not_its_longest():
+    """Act 5 is the descent and the return: its one cue belongs as late as
+    eligibility allows, resolving into the credits."""
+    scenes = [_scene(scene_id=1, act=5, t_in=0.0, t_out=400.0, activity="descending"),
+              _scene(scene_id=2, act=5, t_in=400.0, t_out=460.0, activity="descending"),
+              _scene(scene_id=3, act=5, t_in=460.0, t_out=560.0, activity="descending")]
+    blocked = _spans(natural_spans=[(420.0, 430.0)])
+    assert [x.scene_ids for x in music_windows(
+        scenes, blocked=blocked, min_window_s=60, max_windows_per_act=2,
+        max_windows_by_act={5: 1}, prefer_late_acts=[5])] == [(3,)]
+    # any other act, with the same shape, keeps the longer one instead
+    other = [_scene(scene_id=x.scene_id, act=3, t_in=x.t_in, t_out=x.t_out,
+                    activity=x.activity) for x in scenes]
+    assert [x.scene_ids for x in music_windows(
+        other, blocked=blocked, min_window_s=60, max_windows_per_act=1,
+        prefer_late_acts=[5])] == [(1,)]

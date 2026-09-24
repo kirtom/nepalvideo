@@ -1308,3 +1308,41 @@ def test_the_reuse_gap_still_reaches_across_a_windows_silence():
     assert a.by_scene[1][0] == "driving"
     assert a.by_scene[2][0] == "calm", \
         "the piece heard 30 s ago pays the repeat penalty though a silence sat between"
+
+
+def test_no_one_piece_holds_the_film_past_the_run_cap():
+    """The operator, 2026-09-24, after one track ran 1814 s unbroken. A
+    refusal, not a cost: here the driving track fits every scene and would
+    otherwise take all of them."""
+    calm, driving = two_track_library()
+    scenes = [trek_scene(i + 1, 3, i * 60.0, (i + 1) * 60.0, "climbing", hr=190, speed=1.4)
+              for i in range(8)]
+    targets = scene_targets_for(scenes)
+    params = dict(targets=targets, weights=SCENE_WEIGHTS, switch_cost=0.0,
+                  continuity_bonus=0.0, repeat_penalty=0.0, reuse_gap_s=0,
+                  preferred=[], preferred_bonus=0.0, exclude=[], act4_swell=False)
+    uncapped = assign_scenes(scenes, [calm, driving], **params)
+    assert len({uncapped.by_scene[sc.scene_id][0] for sc in scenes}) == 1, \
+        "the fixture must prefer one track everywhere for the cap to mean anything"
+
+    capped = assign_scenes(scenes, [calm, driving], max_track_run_s=180.0, **params)
+    runs, run, prev = [], 0.0, None
+    for sc in scenes:
+        track = capped.by_scene[sc.scene_id][0]
+        run = run + (sc.t_out - sc.t_in) if track == prev else (sc.t_out - sc.t_in)
+        prev = track
+        runs.append(run)
+    assert max(runs) <= 180.0, f"a run of {max(runs)}s past a 180s cap"
+
+
+def test_the_run_cap_is_given_up_rather_than_return_no_assignment():
+    """A library of one track cannot hand over to anything. Saying so beats
+    coming back empty."""
+    only = scene_track("only", "A", 100, [0.5])
+    scenes = [trek_scene(i + 1, 3, i * 60.0, (i + 1) * 60.0, "climbing", hr=190)
+              for i in range(4)]
+    a = assign_scenes(scenes, [only], targets=scene_targets_for(scenes), weights=SCENE_WEIGHTS,
+                      switch_cost=0.0, continuity_bonus=0.0, repeat_penalty=0.0, reuse_gap_s=0,
+                      preferred=[], preferred_bonus=0.0, exclude=[], act4_swell=False,
+                      max_track_run_s=60.0)
+    assert len(a.by_scene) == 4 and "track-run cap" in a.note

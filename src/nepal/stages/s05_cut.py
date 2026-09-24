@@ -796,7 +796,8 @@ def _info_spans(cfg: Config, slots: Sequence[Mapping[str, Any]], beats: Sequence
         natural_spans=[(float(w["t_in"]), float(w["t_out"])) for w in natural],
         cold_open_end_s=cold_open_end_s,
         no_music_before_s=float(cfg.get("music.placement.no_music_before_s")),
-        speech_margin_s=float(cfg.get("music.placement.speech_margin_s")))
+        speech_margin_before_s=float(cfg.get("music.placement.speech_margin_before_s")),
+        speech_margin_after_s=float(cfg.get("music.placement.speech_margin_after_s")))
 
 
 def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, tracks, *,
@@ -820,16 +821,25 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
         cities=list(cfg.get("assemble.cities")))
     windows = scenes_mod.music_windows(
         scenes, blocked=info_spans,
-        min_window_s=float(cfg.get("music.placement.min_window_s")))
+        min_window_s=float(cfg.get("music.placement.min_window_s")),
+        enter_on=list(cfg.get("music.placement.enter_on") or []),
+        max_windows_per_act=int(cfg.get("music.placement.max_windows_per_act")),
+        max_windows_by_act={int(k): int(v) for k, v in
+                            (cfg.get("music.placement.max_windows_by_act") or {}).items()},
+        prefer_late_acts=[int(a) for a in (cfg.get("music.placement.prefer_late_acts") or [])],
+        arrival_gain_m_per_h=float(cfg.get("music.placement.arrival_gain_m_per_h")),
+        climb_gain_m_per_h=float(cfg.get("music.placement.climb_gain_m_per_h")))
     in_window = {sid for w in windows for sid in w.scene_ids}
     eligible = [sc for sc in scenes if sc.scene_id in in_window]
     window_starts = {w.scene_ids[0] for w in windows}
     by_act: dict[int, list[tuple[float, float]]] = {}
     for w in windows:
         by_act.setdefault(w.act, []).append((w.t_in, w.t_out))
-    log.info("S06 music placement: %d window(s) over %d of %d scene(s), %.1fs of film",
-             len(windows), len(eligible), len(scenes),
-             sum(w.t_out - w.t_in for w in windows))
+    log.info("S06 music placement: %d window(s) over %d of %d scene(s), %.1fs of film; "
+             "per act %s, %d opening on an arrival", len(windows), len(eligible), len(scenes),
+             sum(w.t_out - w.t_in for w in windows),
+             {a: len(v) for a, v in sorted(by_act.items())},
+             sum(1 for w in windows if w.arrival))
     mode = str(cfg.get("music.assignment"))
     if mode == "act":
         # S02.7's per-act choice, laid through the same machinery: every
@@ -854,7 +864,8 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
             preferred=list(cfg.get("music.preferred_tracks", []) or []),
             preferred_bonus=float(cfg.get("music.preferred_bonus")),
             exclude=[credits] if credits else [],
-            window_starts=window_starts)
+            window_starts=window_starts,
+            max_track_run_s=float(cfg.get("music.placement.max_track_run_s")))
     # The eligible scenes, not all of them: the callback bonus the map
     # reports is the one the assignment actually paid, and the assignment
     # never saw the rest.
@@ -1361,7 +1372,11 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
     for s in slots:
         lo, hi = act_spans.get(int(s["act"]), (math.inf, -math.inf))
         act_spans[int(s["act"])] = (min(lo, float(s["t_in"])), max(hi, float(s["t_out"])))
-    mmap = cues_mod.map_on_film_time(json.loads(map_path.read_text()), act_spans)
+    # The windows are placed on scene bounds and the acts drifted under
+    # them; snapped last so the bed arrives and leaves on a cut the rhythm
+    # pass already put on the beat.
+    mmap = cues_mod.snap_windows_to_cuts(
+        cues_mod.map_on_film_time(json.loads(map_path.read_text()), act_spans), slots)
     # The act the table has can be up to music.min_scene_s longer than the one
     # the map was planned on, and that difference all lands on the act's last
     # cue -- which the track may not have. The durations say when to loop.
@@ -1391,7 +1406,9 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
                                   xfade_s=float(cfg.get("render.music_xfade_s")),
                                   window_fade_s=float(cfg.get("render.window_fade_s")),
                                   track_s=track_s,
-                                  loop_min_piece_s=float(cfg.get("music.loop_min_piece_s"))))
+                                  loop_min_piece_s=float(cfg.get("music.loop_min_piece_s")),
+                                  swell_lufs=float(cfg.get("music.placement.swell_lufs")),
+                                  swell_act=music_mod.SUMMIT_ACT))
     # The same lettering the beat sheet's prompt gave the authors, from the
     # same rows in the same order, so "A" on a card is the "A" Claude quoted.
     cast = beats_input.Cast.build(

@@ -399,15 +399,19 @@ def test_material_bounds_an_act_band_but_never_below_its_floor(tmp_path):
     only as the share the photo budget admits on top -- and an act with less
     than its floor keeps the floor and comes out short."""
     cfg = _cfg(tmp_path)
-    assert (cfg.get("assemble.expected_slot_s"), cfg.get("film.photo_share")) == (2.5, 0.1), \
+    # Act 3, not act 2: acts 1 and 2 carry a photo_share_by_act override
+    # (2026-09-24, they run out of clips) and the arithmetic below is the
+    # film-wide share.
+    assert (cfg.get("assemble.expected_slot_s"), cfg.get("film.photo_share")) == (2.5, 0.1) \
+        and 3 not in (cfg.get("film.photo_share_by_act") or {}), \
         "the arithmetic below assumes these"
-    rows = ([{"act": 2, "media_kind": "video", "start_s": 0.0, "end_s": 15.0}] * 36      # 36 x 2.5 = 90 s
-            + [{"act": 2, "media_kind": "photo", "start_s": 0.0, "end_s": 4.0}] * 20     # only as the 10 % share
+    rows = ([{"act": 3, "media_kind": "video", "start_s": 0.0, "end_s": 15.0}] * 36      # 36 x 2.5 = 90 s
+            + [{"act": 3, "media_kind": "photo", "start_s": 0.0, "end_s": 4.0}] * 20     # only as the 10 % share
             + [{"act": 4, "media_kind": "video", "start_s": 0.0, "end_s": 1.0}] * 10)    # 10 x 1.0 = 10 s
-    specs = [{"act": 2, "min_s": 50, "max_s": 700}, {"act": 4, "min_s": 90, "max_s": 150}]
+    specs = [{"act": 3, "min_s": 50, "max_s": 700}, {"act": 4, "min_s": 90, "max_s": 150}]
     bounded, material = s05_cut._material_bound(cfg, specs, rows)
-    assert material[2] == pytest.approx(100.0) and material[4] == pytest.approx(10.0 / 0.9)
-    assert [(b["act"], b["min_s"]) for b in bounded] == [(2, 50), (4, 90)]
+    assert material[3] == pytest.approx(100.0) and material[4] == pytest.approx(10.0 / 0.9)
+    assert [(b["act"], b["min_s"]) for b in bounded] == [(3, 50), (4, 90)]
     assert bounded[0]["max_s"] == pytest.approx(100.0) and bounded[1]["max_s"] == 90.0
 
 
@@ -795,7 +799,10 @@ def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
         abs(spans[a["act"]][0] - a["t_start"]) > 1.0 for a in mmap["acts"])
     q0 = spans[4][1]
     q1 = q0 + float(cfg.get("assemble.silence_window_s"))
-    on_film = s05_cut.cues_mod.map_on_film_time(mmap, spans)
+    # the same two passes build_cues makes: onto the acts the table has, then
+    # onto the cuts the picture has
+    on_film = s05_cut.cues_mod.snap_windows_to_cuts(
+        s05_cut.cues_mod.map_on_film_time(mmap, spans), slots)
     music_spans = s05_cut.cues_mod.music_spans(on_film)
     assert music_spans, "the seeded film has somewhere music may play"
     for a in on_film["acts"]:

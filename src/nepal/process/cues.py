@@ -304,10 +304,49 @@ def _loop_cuts(t0: float, t1: float, src_in: float, duration: float | None,
     return cuts
 
 
+def snap_windows_to_cuts(mmap: Mapping[str, Any],
+                         slots: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Every music window's edges moved onto the nearest cut.
+
+    The bed arrives and leaves on a cut, never inside a shot (operator,
+    2026-09-24): a fade coming up mid-shot reads as a mistake, one on the
+    cut reads as the film doing it. The windows were placed on scene bounds,
+    which *are* slot bounds -- but the rhythm pass re-timed every slot
+    afterwards and ``map_on_film_time`` only shifts each window by its act's
+    delta, so by the time the cues are laid an edge has drifted off the cut
+    it was placed on. The cut it lands on is one ``retime`` snapped to the
+    music's own beat grid (downbeats above the high band), so entering on a
+    cut is also entering on the beat.
+
+    A window that collapses onto one cut is dropped: the map's segments
+    inside it then lie outside every window, which ``music_cues`` skips and
+    ``check_music_map`` would report.
+    """
+    cuts = sorted({float(s["t_in"]) for s in slots} | {float(s["t_out"]) for s in slots})
+    if not cuts:
+        return dict(mmap)
+
+    def nearest(t: float) -> float:
+        return min(cuts, key=lambda c: abs(c - t))
+
+    acts = []
+    for entry in mmap.get("acts", []):
+        wins = entry.get("music_windows")
+        if wins is None:
+            acts.append(dict(entry))
+            continue
+        moved = [(nearest(float(w["t_start"])), nearest(float(w["t_end"]))) for w in wins]
+        acts.append(dict(entry, music_windows=[{"t_start": round(a, 3), "t_end": round(b, 3)}
+                                               for a, b in moved if b - a > _EDGE_TOL_S]))
+    return dict(mmap, acts=acts)
+
+
 def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
                window_fade_s: float,
                track_s: Mapping[str, float | None] | None = None,
-               loop_min_piece_s: float = _LOOP_MIN_PIECE_S) -> list[dict[str, Any]]:
+               loop_min_piece_s: float = _LOOP_MIN_PIECE_S,
+               swell_lufs: float | None = None,
+               swell_act: int | None = None) -> list[dict[str, Any]]:
     """One cue per segment of every music window in the map, on film time.
     Adjacent cues inside a window carry the crossfade on both ends; the
     renderer overlaps them. The silence window gets no music: a segment
@@ -340,7 +379,12 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
     is taken as before) a last cue that would run past its file's end is
     laid as several cues instead, the track restarting at the segment's own
     section cue. ffmpeg would otherwise deliver what exists and stop, which
-    is dead bed under the window's closing shots."""
+    is dead bed under the window's closing shots.
+
+    ``swell_act`` (act 4) keeps ``swell_lufs`` where the rest of the film
+    plays at ``lufs``: Gate 3 put the bed under the location sound, and the
+    summit's one swell into the hard cut to silence is the move that ruling
+    was not about."""
     q = mmap.get("silence_window") or {}
     q0, q1 = (float(q["t_start"]), float(q["t_end"])) if q else (math.inf, math.inf)
     by_act = {int(e["act"]): _entry_windows(e) for e in mmap.get("acts", [])}
@@ -365,6 +409,16 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
                 seg = segments[i]
                 t0, t1 = t_start + float(seg["t_in"]), t_start + float(seg["t_end"])
                 src_in = float(seg["src_in"])
+                if i == kept[0] and abs(t0 - w0) > _EDGE_TOL_S:
+                    # The window's first cue opens ON the window, whichever
+                    # side the segment fell: snapping the edges to the cuts
+                    # moves the window off the scene bounds the segments were
+                    # laid on, and the track moves with it so the cue is
+                    # still the piece the map chose, from the same distance
+                    # into it. Short would be a hole at the window's start,
+                    # over would be a bed before it opened.
+                    src_in = max(0.0, src_in - (t0 - w0))
+                    t0 = w0
                 if i == kept[-1]:
                     t1 = w1
                 cuts = _loop_cuts(t0, min(t1, w1), src_in, (track_s or {}).get(seg["track_id"]),
@@ -386,7 +440,8 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
                     out.append(_cue(cue_id=cue_id, track="music", t_in=round(t0, 3),
                                     t_out=round(t1, 3), source=seg["track_id"],
                                     src_in=round(src_in, 3), src_out=round(src_out, 3),
-                                    gain_lufs=lufs,
+                                    gain_lufs=(swell_lufs if swell_lufs is not None
+                                               and int(entry["act"]) == swell_act else lufs),
                                     fade_in_s=window_fade_s if opens else xfade_s,
                                     fade_out_s=fade_out))
     return out
