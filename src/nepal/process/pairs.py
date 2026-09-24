@@ -12,10 +12,9 @@ into an actual split-screen render.
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import Any, Mapping, Sequence
 
-from nepal.process.assemble import SLOT_KEYS
+from nepal.process.assemble import SLOT_KEYS, epoch_utc
 
 # The brief's own number: two shots of the same moment from two angles, one
 # of them a genuine reaction rather than the same face twice, is worth more
@@ -77,17 +76,6 @@ def is_portrait(row: Mapping[str, Any]) -> bool:
     return height > width
 
 
-def _epoch(iso: str | None) -> float | None:
-    """Parse an ISO 8601 capture stamp, exactly as anchors.py does: a
-    malformed or missing stamp means this shot cannot pair, not an error."""
-    if not iso:
-        return None
-    try:
-        return datetime.fromisoformat(str(iso)).timestamp()
-    except ValueError:
-        return None
-
-
 def _score(row: Mapping[str, Any]) -> float:
     return float(row.get("score_total") or 0.0)
 
@@ -115,7 +103,7 @@ def find_pairs(rows: Sequence[Mapping[str, Any]], *, window_s: float,
     """
     spans = []
     for r in rows:
-        ts = _epoch(r.get("start_utc"))
+        ts = epoch_utc(r.get("start_utc"))     # no clock, no alignment: this shot cannot pair
         if ts is None:
             continue
         duration = float(r["end_s"]) - float(r["start_s"])
@@ -156,7 +144,13 @@ def find_pairs(rows: Sequence[Mapping[str, Any]], *, window_s: float,
         if a["shot_id"] in used_shots or b["shot_id"] in used_shots:
             continue
         primary, secondary = (a, b) if _score(a) >= _score(b) else (b, a)
-        act = primary.get("act")               # paired shots are simultaneous, so they share an act; the primary's is taken
+        # Paired shots are simultaneous, so they normally share an act -- but
+        # at an act boundary the two clocks can straddle it, and this field is
+        # what s05_cut routes the pair by (`p.get("act") == act`) before it
+        # looks the *primary* up in that act's rows
+        # (`plan_act`'s `shots_by_id[slot["shot_id"]]`). Filing the pair under
+        # the secondary's act would hand plan_act a primary its act never saw.
+        act = primary.get("act")
         if per_act_count.get(act, 0) >= per_act:
             continue
         later0 = max(a0, b0)
@@ -172,7 +166,14 @@ def find_pairs(rows: Sequence[Mapping[str, Any]], *, window_s: float,
                    secondary_shot_id=secondary["shot_id"],
                    src_in=primary_src_in, secondary_src_in=secondary_src_in,
                    src_out=src_out, motion='{"type":"split"}', speed=1.0,
-                   transition="cut",  # a split needs no transition of its own; the cut is instant
+                   # `dip_black` is the film's punctuation and Act 0 owns it
+                   # (anchors.cold_open_pick, s05_cut's title card); a pair is
+                   # an ordinary picture inside an act's run -- placed among
+                   # the fill and re-timed by rhythm.retime like the rest --
+                   # so it takes the same plain cut every other fill slot gets.
+                   # The split itself is the event; announcing it with a
+                   # transition would announce it a beat early.
+                   transition="cut",
                    locked=0)
         pairs.append(slot)
         used_shots.add(a["shot_id"])
