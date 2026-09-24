@@ -505,8 +505,9 @@ def test_music_cues_land_at_their_own_t_in_and_crossfade_by_overlap(tmp_path):
     """Chaining cues with acrossfade collapsed every gap and shortened the
     run by one crossfade per join, so every cue after the first hole landed
     early under a picture cut. Each cue is placed by adelay like the others;
-    the crossfade is the outgoing cue read xfade_s longer and fading out
-    under the incoming one, which fades in as its row says. The extension
+    the crossfade is the outgoing cue read its own fade-out longer -- here
+    music_xfade_s, as cues.py writes it where a cue hands over -- and
+    fading out under the incoming one, which fades in as its row says. The extension
     is clamped to the film's end (mu_1: 3 s of a possible 5 for a film of
     7), the fade-out then sitting inside the cue, so the mix never
     outlasts the picture."""
@@ -517,6 +518,22 @@ def test_music_cues_land_at_their_own_t_in_and_crossfade_by_overlap(tmp_path):
     assert ("[6:a]atrim=start=10.000:end=13.000,asetpts=PTS-STARTPTS,"
             "afade=t=in:d=2,afade=t=out:st=1.000:d=2,adelay=4000|4000[mu1]") in fc
     assert "[mu0][mu1]amix=inputs=2:normalize=0,volume='between(t,0,7)*0.5':eval=frame[mus]" in fc
+
+
+def test_a_music_cue_fades_out_as_its_row_says_and_reads_only_that_much(tmp_path):
+    """The fade-out is the row's, like the other two tracks. cues.py gives
+    the cue that hands over to the next one ``music_xfade_s`` and the cue
+    that runs into the silence window the shorter window fade; a renderer
+    that overrode both with the flat crossfade played a second of music
+    into the window and threw the distinction away. The extension read
+    past the slot is that same length, so the fade still begins at the
+    cue's own end."""
+    into_window = [c if c["cue_id"] != "mu_0" else c | {"fade_out_s": 1.0} for c in CUES]
+    cmd = _mixed(tmp_path, cues=into_window)
+    i = [k for k, c in enumerate(cmd) if c == "-i"]
+    assert cmd[i[5] - 2:i[5] + 2] == ["-t", "5.000", "-i", "/mu/a.mp3"], "one second past the slot, not two"
+    assert ("[5:a]atrim=start=0.000:end=5.000,asetpts=PTS-STARTPTS,"
+            "afade=t=out:st=4.000:d=1,adelay=0|0[mu0]") in _graph(cmd)
 
 
 def test_a_music_cue_fades_in_as_its_row_says_not_as_the_gap_suggests(tmp_path):

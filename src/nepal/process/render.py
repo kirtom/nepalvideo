@@ -243,9 +243,13 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any], fl
     cue by cue at its own ``t_in``: chaining the cues with ``acrossfade``
     instead collapsed every gap and shortened the run by one crossfade
     per join, so every cue after the first hole landed early under a
-    picture cut. The crossfade is made by overlap -- each cue is read
-    ``music_xfade_s`` longer than its slot and fades out over that
-    extension under the cue that follows, which fades in as its row says.
+    picture cut. The crossfade is made by overlap -- each cue is read its
+    own fade-out longer than its slot and fades out over that extension
+    under the cue that follows, which fades in as its row says. The row
+    is the only source of that length: ``cues.py`` writes ``music_xfade_s``
+    where a cue hands over to the next and the shorter window fade where
+    it runs into the silence, and a renderer that overrode it with the
+    flat crossfade threw the distinction away.
     A music cue is cut from a decoded-from-start track with ``atrim``
     rather than seeked (see build_command), so its timestamps are reset
     the way a seek would have. Location and music are then shaped by the
@@ -291,11 +295,10 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any], fl
                         f",volume='{envelopes['location']}':eval=frame" if location else "", "[loc]"))
 
     music = tracks.get("music") or ()
-    xfade = float(levels["music_xfade_s"])
     for k, (i, c, length) in enumerate(music):
         ms, src_in = _ms(c["t_in"]), float(c["src_in"])
         chain = [f"atrim=start={src_in:.3f}:end={src_in + length:.3f}", "asetpts=PTS-STARTPTS",
-                 *_afades(_fades(c, levels)[0], xfade, end=length), f"adelay={ms}|{ms}"]
+                 *_afades(*_fades(c, levels), end=length), f"adelay={ms}|{ms}"]
         parts.append(f"[{i}:a]" + ",".join(chain) + f"[mu{k}]")
     parts.append(summed("mu", len(music),
                         f",volume='{envelopes['music']}':eval=frame" if music else "", "[mus]"))
@@ -358,7 +361,7 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
 
     The inputs are, in order: one per row (a split's secondary right after
     its primary), then one per speech, location and music cue, each track
-    in time order, a music cue read ``music_xfade_s`` longer for its
+    in time order, a music cue read its own fade-out longer for its
     crossfade. Every pad index in the graph follows from that order.
     ``levels`` is the config's ``render`` block; ``envelopes`` the mix's
     per-track ``volume`` expressions. Without cues this is the silent draft
@@ -449,10 +452,14 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
             if src is None:
                 raise KeyError(f"no audio source for cue {c.get('cue_id')} ({track}: {c['source']})")
             if track == "music":
-                # A music cue reads its slot plus the crossfade extension,
-                # which plays out under the next cue (see audio_filters) --
-                # clamped to the film's end so the mix never outlasts the
-                # picture. No -ss: the library is VBR MP3, and an input seek
+                # A music cue reads its slot plus its own fade-out, the
+                # extension that plays out under the next cue (see
+                # audio_filters) -- clamped to the film's end so the mix
+                # never outlasts the picture. The row's value and not the
+                # flat crossfade: a cue that hands over reads the whole
+                # crossfade, one that runs into the silence window reads
+                # only the shorter fade cues.py gave it and stops there.
+                # No -ss: the library is VBR MP3, and an input seek
                 # on MP3 without a table of contents goes by a bitrate
                 # estimate that can land seconds off, which the overlap
                 # arithmetic cannot survive. (An -ss after the -i is no
@@ -460,7 +467,7 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
                 # track is decoded from its start, bounded by -t, and cut
                 # to the sample in the graph. ffmpeg simply stops where the
                 # track ends if there is less.
-                length = max(0.0, min(_cue_len(c) + float(levels["music_xfade_s"]),
+                length = max(0.0, min(_cue_len(c) + _fades(c, levels)[1],
                                       film_len - float(c["t_in"])))
                 cmd += ["-t", f"{float(c['src_in']) + length:.3f}", "-i", str(src)]
             else:
