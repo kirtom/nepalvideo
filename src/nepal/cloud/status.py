@@ -22,6 +22,32 @@ from nepal.cloud import spend
 per_act_sources = db.per_act_sources
 
 
+def _last_report(path: Path) -> dict[str, Any]:
+    """The newest stage report, and whether it is finished.
+
+    A report is written after every sub-step now (a kill at hour five must
+    leave something to resume from), so the file exists long before the
+    stage ends and `finished_utc` is null for the whole of a cut. Null is
+    not "failed" and not "unknown": it is running, and the report itself
+    says since when and how far.
+    """
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    out: dict[str, Any] = {"name": path.name, "finished_utc": raw.get("finished_utc")}
+    if not out["finished_utc"]:
+        out["running_since"] = raw.get("started_utc")
+        out["updated_utc"] = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) \
+            .isoformat(timespec="seconds")
+        # Every step writes its result under its own name before the report
+        # is checkpointed, so the dict-valued keys are the steps that are done.
+        out["steps_done"] = [k for k, v in raw.items() if isinstance(v, dict)]
+    return out
+
+
 def _spend(ledger: spend.Ledger, state_path: Path, now: datetime) -> dict[str, Any]:
     """Booked, running, and the sum -- the number the ceiling is about.
 
@@ -70,13 +96,7 @@ def build_status(conn, ledger: spend.Ledger, reports_dir: Path, *,
         "timeline_s": float(q("SELECT COALESCE(MAX(t_out), 0) FROM timeline")),
     }
     reports = sorted(Path(reports_dir).glob("s0*.json"), key=lambda p: p.stat().st_mtime)
-    last_report = None
-    if reports:
-        try:
-            last_report = {"name": reports[-1].name,
-                           "finished_utc": json.loads(reports[-1].read_text()).get("finished_utc")}
-        except (OSError, ValueError):
-            last_report = {"name": reports[-1].name, "finished_utc": None}
+    last_report = _last_report(reports[-1]) if reports else None
     draft = Path(reports_dir).parent / "gates" / "gate3" / "draft.mp4"
     draft_info = None
     if draft.exists():
@@ -122,7 +142,15 @@ def render_html(st: dict[str, Any]) -> str:
     draft = st.get("draft")
     draft_txt = f"{draft['bytes'] / 1e6:.0f} MB, {draft['mtime']}" if draft else "none yet"
     rep = st.get("last_report") or {}
-    rep_txt = f"{rep.get('name')} {rep.get('finished_utc')}"
+    if not rep:
+        rep_txt = "none yet"
+    elif rep.get("finished_utc"):
+        rep_txt = f"{rep['name']} finished {rep['finished_utc']}"
+    else:
+        rep_txt = (f"{rep['name']} running since "
+                   f"{rep.get('running_since') or rep.get('updated_utc')}, steps done: "
+                   f"{', '.join(rep.get('steps_done') or []) or 'none'} "
+                   f"(last write {rep.get('updated_utc')})")
     sp = st["spend"]
     spend_txt = f"total {sp['total_usd']:.2f} USD"
     if sp.get("running_usd"):

@@ -69,6 +69,29 @@ def test_render_html_is_self_contained_and_names_the_stage(tmp_path):
     assert "<td>3</td><td>phone_keller</td><td>0</td><td>1</td><td>0%</td>" in page
 
 
+def test_a_report_with_no_finished_stamp_is_running_not_unknown(tmp_path):
+    """S05 checkpoints its report after every sub-step, so the file exists
+    for the whole of a cut with `finished_utc` null. The page said nothing
+    at all for the hours that mattered most."""
+    conn, led, reports = _seed(tmp_path)
+    (reports / "s05_cut.json").write_text(json.dumps(
+        {"stage": "S05", "started_utc": "2026-09-18T05:30:00+00:00",
+         "skipped_stale": False, "score": {"n": 3}, "timeline": {"slots": 1}}))
+    st = status.build_status(conn, led, reports)
+    rep = st["last_report"]
+    assert rep["name"] == "s05_cut.json" and rep["finished_utc"] is None
+    assert rep["running_since"] == "2026-09-18T05:30:00+00:00"
+    assert rep["steps_done"] == ["score", "timeline"]      # not cues, not draft
+    assert rep["updated_utc"].endswith("+00:00")           # the last checkpoint
+    assert "running since 2026-09-18T05:30:00+00:00" in status.render_html(st)
+    # and a finished report still reads as finished
+    (reports / "s05_cut.json").write_text(json.dumps(
+        {"stage": "S05", "started_utc": "2026-09-18T05:30:00+00:00",
+         "finished_utc": "2026-09-18T06:30:00+00:00", "score": {"n": 3}}))
+    done = status.build_status(conn, led, reports)["last_report"]
+    assert done["finished_utc"] == "2026-09-18T06:30:00+00:00" and "steps_done" not in done
+
+
 def test_the_page_counts_a_box_that_is_up_and_not_booked(tmp_path):
     """The ledger books VM hours at `down`; `up` leaves its stamp and its
     price in remote_state.json, and until `down` clears them the meter is
