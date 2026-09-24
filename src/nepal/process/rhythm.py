@@ -121,7 +121,7 @@ def _burst_end(t_in: float, beats: Sequence[float], ceiling: float) -> float | N
     return end if end <= ceiling else None
 
 
-def _slot_avail_s(slot: Mapping[str, Any], shot: Mapping[str, Any] | None) -> float:
+def _slot_avail_s(slot: Mapping[str, Any], shots: Mapping[str, Mapping[str, Any]]) -> float:
     """How much footage this specific slot can actually claim.
 
     ``shot_available_s`` caps by the shot's own ``start_s``/``end_s``, but a
@@ -130,21 +130,30 @@ def _slot_avail_s(slot: Mapping[str, Any], shot: Mapping[str, Any] | None) -> fl
     two streams had to align to share an instant -- so the real ceiling is
     ``end_s - src_in``, which can only be tighter, never looser, than
     ``shot_available_s``. A split slot has a second, independent ceiling
-    besides: the overlap ``find_pairs`` already measured between the two
-    streams (``src_out - src_in``, computed once at pairing time), since a
-    beat snap may stretch a split no further than either camera actually
-    has at the aligned instant.
+    besides: the other camera has its own ``end_s`` from its own
+    ``secondary_src_in``, and a beat snap may stretch a split no further than
+    either camera actually has at the aligned instant.
+
+    Both ceilings are read from the two *shots*, never from the slot's own
+    ``src_out``. ``src_out`` is descriptive -- ``retime`` rewrites it to
+    whatever length it just gave the slot -- so a split that stays unlocked
+    through several refill rounds would have read the previous round's
+    result as this round's ceiling, and could then only ever get shorter.
+    Material does not shrink between rounds; what the slot was last cut to
+    has no business bounding what it may be cut to now.
     """
+    shot = shots.get(slot.get("shot_id"))
     if shot is None:
         return math.inf
     avail = shot_available_s(shot)
-    if avail == math.inf:
-        return avail                        # a photo (or a shot with no end_s) has nothing to tighten
     src_in = slot.get("src_in")
-    if src_in is not None:
+    if avail != math.inf and src_in is not None:
+        # a photo (or a shot with no end_s) has nothing to tighten
         avail = min(avail, float(shot["end_s"]) - float(src_in))
-        if slot.get("secondary_shot_id") is not None and slot.get("src_out") is not None:
-            avail = min(avail, float(slot["src_out"]) - float(src_in))
+    other = shots.get(slot.get("secondary_shot_id"))
+    if other is not None and other.get("end_s") is not None:
+        other_in = other["start_s"] if slot.get("secondary_src_in") is None else slot["secondary_src_in"]
+        avail = min(avail, float(other["end_s"]) - float(other_in or 0.0))
     return max(0.0, avail)
 
 
@@ -180,8 +189,7 @@ def _apply_held_shot(out: list[dict[str, Any]], *, shots: Mapping[str, Mapping[s
     if candidate is None:
         return
 
-    shot = shots.get(candidate.get("shot_id"))
-    avail = _slot_avail_s(candidate, shot)
+    avail = _slot_avail_s(candidate, shots)
     held_mid = (float(held_shot_s[0]) + float(held_shot_s[1])) / 2.0
     held = min(held_mid, avail)
     prev_end = float(out[idx - 1]["t_out"]) if idx > 0 else -math.inf
@@ -214,7 +222,8 @@ def retime(slots: Sequence[Mapping[str, Any]], *, sections: Sequence[Mapping[str
     Order matters here: the nominal length is decided first (band midpoint,
     or one beat inside the burst), the beat snap is applied second, and
     ``_slot_avail_s`` -- this slot's own ceiling, which is ``shot_available_s``
-    tightened by ``src_in`` and by a split's recorded overlap -- is consulted
+    tightened by ``src_in`` and, for a split, by the second camera's own
+    remaining footage -- is consulted
     at every step and is the final word: a snap is never allowed to hand a
     slot more footage than its shot has.
     """
@@ -266,8 +275,7 @@ def retime(slots: Sequence[Mapping[str, Any]], *, sections: Sequence[Mapping[str
         # against its footage -- it is left at its nominal length rather
         # than treated as having none, since inventing a clamp this module
         # was given no data for is worse than leaving the length alone.
-        shot = shots.get(slot.get("shot_id"))
-        avail = _slot_avail_s(slot, shot)
+        avail = _slot_avail_s(slot, shots)
 
         if swell is not None and section is swell and not burst_started:
             burst_started = True

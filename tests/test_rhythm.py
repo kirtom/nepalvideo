@@ -289,19 +289,37 @@ def test_offset_src_in_tightens_the_clamp_below_shot_available_s():
     assert out[0]["src_out"] == 10.0                          # src_in + the actual clamped length
 
 
-def test_split_slot_never_outlasts_the_recorded_overlap():
-    # find_pairs already computed src_out - src_in as the true overlap
-    # between the two cameras (1.5s); the shot's own footage runs on for
-    # far longer, but a split may not use more than either camera actually
-    # shares at the aligned instant.
+def test_split_slot_never_outlasts_the_second_cameras_own_footage():
+    # the primary runs on for far longer, but the other camera has only
+    # 1.5s left from where the two were aligned, and a split may not use
+    # more than either camera actually has at the aligned instant.
     slot = _slot("s1", 40.0, src_in=5.0, src_out=6.5, secondary_shot_id="s2",
                 secondary_src_in=1.0)
-    shot = _shot(start_s=0.0, end_s=1000.0)
     out = retime([slot], sections=SECTIONS, beats=[], downbeats=[],
                 table=TABLE, burst_slots=[8, 12], is_act4=False,
-                held_shot_s=[6.0, 10.0], silence_t=None, shots={"s1": shot})
+                held_shot_s=[6.0, 10.0], silence_t=None,
+                shots={"s1": _shot(start_s=0.0, end_s=1000.0),
+                       "s2": _shot(start_s=0.0, end_s=2.5)})
     assert out[0]["t_out"] - out[0]["t_in"] == 1.5
     assert out[0]["src_out"] == 6.5
+
+
+def test_a_split_does_not_shrink_when_the_act_is_re_timed_again():
+    """A split stays unlocked, so every refill round re-times it. Reading
+    its ceiling from the src_out the previous walk wrote made each round's
+    result the next round's ceiling: a ratchet that could only ever
+    shorten. The material is what bounds it, and the material does not
+    change between rounds."""
+    shots = {"s1": _shot(start_s=0.0, end_s=1000.0), "s2": _shot(start_s=0.0, end_s=1000.0)}
+    kw = dict(sections=SECTIONS, beats=[], downbeats=[], table=TABLE, burst_slots=[8, 12],
+              is_act4=False, held_shot_s=[6.0, 10.0], silence_t=None, shots=shots)
+    # a pair whose overlap the previous round already cut down to 1.5s
+    slot = _slot("s1", 40.0, src_in=5.0, src_out=6.5, secondary_shot_id="s2",
+                secondary_src_in=1.0)
+    first = retime([slot], **kw)
+    second = retime(first, **kw)
+    assert first[0]["t_out"] - first[0]["t_in"] == 4.0    # the mid band's midpoint, unclamped
+    assert (second[0]["t_out"] - second[0]["t_in"]) == (first[0]["t_out"] - first[0]["t_in"])
 
 
 # -- retime: Act 4's held shot --------------------------------------------
