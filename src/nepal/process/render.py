@@ -240,7 +240,10 @@ def _location_pieces(location: Sequence[tuple[int, Mapping[str, Any], float]], *
     streams whose lengths average half the film, of the order of 3e10
     samples: measured on the real draft, 19.5 minutes at 100 % of one core
     for the audio-only measurement pass alone, and the same graph again
-    under the render -- twice what the picture costs.
+    under the render -- twice what the picture costs. Timed both ways on
+    the box against one synthetic timeline, 700 cues over 600 s, the
+    measurement pass alone: 397.4 s summed against 57.1 s laid end to
+    end, 7.0x. A measured 3x is worth taking.
 
     Where no cue covers a stretch of film -- a card that opens an act is
     intended dead air -- concat can only say so with a piece of silence.
