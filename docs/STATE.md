@@ -337,6 +337,67 @@ exhaust their clips, should admit more stills (`film.photo_share_by_act`;
 683 of 1550 shots are stills); whether Act 3 should be allowed past its
 1150 s `max_s`.
 
+## Film v2 — step 4, part B: the draft hears itself (2026-09-24)
+
+Tasks 11–14 are built and reviewed: `cues.py` writes the `audio_cues`
+(speech, location, music) and `overlays` rows from the timeline on disk;
+`mix.py` turns them into breakpoint envelopes; `render.py` builds one
+graph with three tracks, an audio-only measurement pass and a static-gain
+final stage; `s05_cut.py` renders the draft and the Gate 3 page. **The
+first draft with sound is on disk** — `work/gates/gate3/draft.mp4`, 30.4
+minutes, 735 slots, AAC stereo at 48 kHz — with **16 speech, 735 location
+and 31 music cues, 8 overlays, one natural-sound window**; the mix measured
+−12.7 LUFS integrated, 11.1 LU range, +1.6 dBTP before the final stage
+brought it to −14 with a −1.5 dBTP ceiling.
+
+**What the mix taught.** `loudnorm`'s linear mode is a precondition, not a
+mode: it holds only while the measured range fits the `LRA` option, whose
+range ends at 20 LU, and a film with a designed silence is wider; the
+measured branch now asks for what linear mode is made of — one `volume`
+gain and an `alimiter` — and the fixture lands at −14.00 LUFS exactly. The
+`acrossfade` chain collapsed gaps, so music drifted early; every cue is
+`adelay`ed to its own second and crossfaded by its row's fades. `-ss` after
+`-i` binds to the next input, so music is cut with `atrim`. Location cues
+had no fades — a click at every cut — and now fade as their rows say. The
+location track stacked 735 `adelay`ed streams into one `amix`, which cost
+20 minutes of one core per pass; laid end to end with `concat` it is
+**7.0× faster** (397 s → 57 s on 700 cues, 0.000 dB apart in every window).
+That first draft took 60 minutes to render; the next takes a fraction.
+
+**What the music taught, and what is still wrong in this draft.** The
+scene Viterbi put **one track — The Long Song — under all 1814 seconds**,
+looped eight times and six times past its own end (146 s of dead bed in
+the draft on disk). Measured, not reasoned: 30 of 31 scene targets are
+distinct and every section is featured, but the most any scene could gain
+by leaving the incumbent was 0.36 (median 0.016) against a 0.6 switch
+cost, and the 0.15 "soft" preferred bonus outweighed the whole available
+gain in 24 scenes. The knobs are now 0.05 / 0.01 / 0.05 (7 tracks, longest
+run 743 s on the same corpus). A run that outruns its track now loops its
+section instead of going silent, and an over-claim is a `music_map_problems`
+line, not prose in the JSON. The `music_tracks` table had no `artist`
+column, so the callback affinity's strongest term was dead (being added).
+**None of this is in the draft on disk**; the next `nepal cut --redo
+timeline,cues,draft` carries all of it.
+
+**Operations.** A session died on a rate limit with the box RUNNING and it
+billed 104 idle hours (~31 USD) before anyone looked; the ledger booked
+hours only at `remote down`. Now `remote status` prices the running span
+from GCP's `lastStartTimestamp`, every command books a box that stopped
+without `down`, and **the box stops itself** after
+`cloud.gcp.idle_stop_min` (30) of no job and no activity, or after
+`stuck_job_min` (240) of a job that writes nothing. A `remote exec` rsyncs
+`work/` from the bucket before its command and replaced the draft under a
+running ffmpeg (rescued through `/proc/<pid>/fd`); the pull now skips
+`work/` while a job runs and the draft renders through a temporary name.
+
+**Gate 3 (Part B) is the operator's listen**, after the next cut: the
+ducking under speech, the natural-sound window, the silence after Act 4's
+swell and the return out of it, whether seven tracks over 30 minutes is
+the film or a longest run of 743 s still wants a cap on consecutive scenes
+per track, and — from Part A — the 2.5-second pace, more stills in Acts 1–2,
+Act 3 past its `max_s`. Open: DEM drop for the bridge, six acts in step 7,
+overlays rendered in step 6.
+
 ## The last full run
 
 S01 + S03.0/.1/.2 on the real corpus, 4.5 hours wall clock. These numbers are
