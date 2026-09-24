@@ -25,14 +25,15 @@ import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-# The tiling check below asks the same question cues.py asks of its own
-# edges -- do these two times coincide? -- so it asks it with the same
-# tolerance rather than a second one that can drift away from it.
-from nepal.process.cues import _EDGE_TOL_S
-
 log = logging.getLogger(__name__)
 
 DRAFT_W, DRAFT_H, DRAFT_CRF, DRAFT_FPS = 960, 540, 23, 30
+
+# The checks below ask the same question cues.py asks of its own edges --
+# do these two times coincide? -- and must answer it the same way. The
+# value is repeated rather than imported because it is private over there;
+# a test asserts the two cannot drift apart.
+EDGE_TOL_S = 1e-3
 
 # A card slot (the cold-open title) has no plate of its own to show, and the
 # spec asks for nothing fancier than a caption over black.
@@ -253,7 +254,7 @@ def _location_pieces(location: Sequence[tuple[int, Mapping[str, Any], float]], *
     played = 0.0
     for k, (i, c, length) in enumerate(location):
         t_in = float(c["t_in"])
-        if t_in - played > _EDGE_TOL_S:
+        if t_in - played > EDGE_TOL_S:
             parts.append(f"anullsrc=r={AUDIO_RATE}:cl=stereo,"
                          f"atrim=duration={t_in - played:.3f},{CONCAT_AFORMAT}[log{k}]")
             labels.append(f"[log{k}]")
@@ -350,7 +351,7 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any], fl
     full = float(levels["location_full_lufs"])
     envelope = f",volume='{envelopes['location']}':eval=frame" if location else ""
     overlap = next((p for p in zip(location, location[1:])
-                    if float(p[1][1]["t_in"]) < float(p[0][1]["t_out"]) - _EDGE_TOL_S), None)
+                    if float(p[1][1]["t_in"]) < float(p[0][1]["t_out"]) - EDGE_TOL_S), None)
     if location and overlap is None:
         pieces, labels = _location_pieces(location, full=full, levels=levels)
         parts += pieces

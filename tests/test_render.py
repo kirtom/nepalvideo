@@ -904,7 +904,7 @@ def test_the_concatenated_location_track_sounds_like_the_summed_one(tmp_path, mo
 
     # A tolerance no abutting pair can satisfy: every join now reads as an
     # overlap, so the same cues take the amix path untouched.
-    monkeypatch.setattr(render, "_EDGE_TOL_S", -1.0)
+    monkeypatch.setattr(render, "EDGE_TOL_S", -1.0)
     cmd = render.build_command(rows, out_path=summed, **kw)
     assert "[lo0][lo1][lo2]amix=inputs=3:normalize=0" in _graph(cmd)
     assert render.run_render(cmd, summed).returncode == 0
@@ -949,3 +949,12 @@ def test_a_failed_render_leaves_the_previous_draft_alone(tmp_path):
     render.part_path(out).write_bytes(b"half a render")
     assert render.run_render(["false"], out).returncode != 0
     assert out.read_bytes() == b"last good draft"
+
+
+def test_the_edge_tolerance_is_the_one_cues_uses(tmp_path):
+    """Two modules answering "do these times coincide?" differently would
+    put a gap in the mix that the picture does not have. The value is
+    copied rather than imported across the module boundary, so the only
+    thing stopping it drifting is this assertion."""
+    from nepal.process import cues
+    assert render.EDGE_TOL_S == cues._EDGE_TOL_S
