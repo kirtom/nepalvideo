@@ -639,10 +639,12 @@ def _sections_for_act(entry: Mapping[str, Any], tracks_by_id: Mapping[str, music
     the rhythm pass can rank energies -- the map's segments are act-local
     and a merged run may span several sections.
 
-    The last piece is stretched to the act's planned end (and one silent
-    piece covers an act with no music at all): ``retime`` drops whatever
-    lies past its last section, and the fill that follows must be able to
-    reach the whole act, not just the part the planned slots covered.
+    The map's segments already tile their act (``check_music_map`` asserts
+    it), so the last piece reaches the act's planned end on its own and
+    nothing is stretched here -- ``retime`` drops whatever lies past the last
+    section, and the fill that follows must be able to reach the whole act.
+    An act with no music at all still needs one silent piece to stand for it,
+    or the act would have no span for the walk to run in.
     """
     out: list[dict[str, Any]] = []
     t_start = float(entry.get("t_start", 0.0)) + shift
@@ -657,9 +659,7 @@ def _sections_for_act(entry: Mapping[str, Any], tracks_by_id: Mapping[str, music
         if covered < f_out - 1e-6:
             pieces.append((covered, f_out, None))   # past the piece's end: nothing to read
         out += [{"t_in": round(a, 3), "t_out": round(b, 3), "energy": e} for a, b, e in pieces if b > a]
-    if out:
-        out[-1]["t_out"] = max(out[-1]["t_out"], round(t1, 3))
-    else:
+    if not out:
         out = [{"t_in": round(t0, 3), "t_out": round(t1, 3), "energy": None}]
     return out
 

@@ -11,7 +11,8 @@ from nepal.spine.music import (Track, parse_artist_title, estimate_key, mark_swe
                                build_music_map, check_music_map,
                                detect_licence, ACT_WEIGHTS, PITCH_CLASSES,
                                MAJOR_PROFILE, MINOR_PROFILE,
-                               assign_scenes, pair_cost, music_map_from_scenes)
+                               assign_scenes, pair_cost, music_map_from_scenes,
+                               SceneAssignment, _segment_problems)
 from nepal.spine.scenes import Scene, scene_target
 
 ACT_SPECS = [
@@ -882,6 +883,65 @@ def test_the_map_covers_each_acts_span_and_the_beat_grid_is_on_the_film_timeline
     # every act needs a swell timestamp; this fixture's scenes never land on
     # one directly, so the loudest-section fallback must be doing its job
     assert not [p for p in check_music_map(m, target_s=300.0) if "swell" in p]
+
+
+def _cue_assignment(scenes, states):
+    """A hand-picked (track, section) per scene -- the Viterbi's own choices
+    are what every other scene test is about, and these are about what the
+    map does with them once made."""
+    return SceneAssignment({sc.scene_id: st for sc, st in zip(scenes, states)}, 0.0, "")
+
+
+def test_a_gap_between_two_scenes_is_covered_by_the_earlier_segment():
+    """A scene is a cue, not a segment. The slots two scenes were grouped on
+    can leave a hole between them; the music does not stop there, so the
+    earlier segment holds until the next cue and never claims the gap twice."""
+    calm, driving = two_track_library()
+    scenes = [trek_scene(1, 2, 0.0, 40.0, "village", hr=60),
+              trek_scene(2, 2, 70.0, 100.0, "climbing", hr=150)]
+    a = _cue_assignment(scenes, [(calm.track_id, calm.sections[0]["section_id"]),
+                                 (driving.track_id, driving.sections[0]["section_id"])])
+    m = music_map_from_scenes(scenes, a, [calm, driving],
+                              act_spans={2: (0.0, 120.0)}, silence_s=3.0)
+    segs = m["acts"][0]["segments"]
+    assert [s["track_id"] for s in segs] == ["calm", "driving"]
+    assert (segs[0]["t_in"], segs[0]["t_end"]) == (0.0, 70.0)   # over the 30s gap to the next cue
+    assert (segs[1]["t_in"], segs[1]["t_end"]) == (70.0, 120.0)  # and on to the act's own end
+    for s in segs:
+        assert s["t_end"] - s["t_in"] == pytest.approx(s["src_out"] - s["src_in"])
+    assert _segment_problems(m["acts"][0]) == []
+
+
+def test_an_act_whose_scenes_start_late_and_stop_early_is_still_covered():
+    """The one scene runs 10-40s of a 120s act: the bed starts with the act
+    and holds to its end, which is what fill_act promises in act mode and
+    what both consumers used to patch back on for themselves."""
+    calm, driving = two_track_library()
+    scenes = [trek_scene(1, 2, 10.0, 40.0, "village", hr=60)]
+    a = _cue_assignment(scenes, [(calm.track_id, calm.sections[0]["section_id"])])
+    m = music_map_from_scenes(scenes, a, [calm, driving],
+                              act_spans={2: (0.0, 120.0)}, silence_s=3.0)
+    seg, = m["acts"][0]["segments"]
+    assert (seg["t_in"], seg["t_end"]) == (0.0, 120.0)
+    assert seg["src_out"] - seg["src_in"] == pytest.approx(120.0)
+    assert _segment_problems(m["acts"][0]) == []
+
+
+def test_check_music_map_flags_a_map_whose_segments_do_not_tile_their_act():
+    tracks = library()
+    gapped = build_music_map(tracks, assign_acts(tracks), ACT_SPECS, total_s=1200)
+    act = gapped["acts"][0]
+    act_len = float(act["t_end"]) - float(act["t_start"])
+    seg = act["segments"][0]
+    act["segments"] = [dict(seg, t_in=0.0, t_end=10.0, src_in=0.0, src_out=10.0),
+                       dict(seg, t_in=20.0, t_end=act_len, src_in=20.0, src_out=act_len)]
+    assert any("not continuous" in p for p in check_music_map(gapped, target_s=1200, min_headroom=1.0))
+
+    short = build_music_map(tracks, assign_acts(tracks), ACT_SPECS, total_s=1200)
+    tail = short["acts"][0]["segments"][-1]
+    tail["t_end"] = float(tail["t_end"]) - 5.0
+    tail["src_out"] = float(tail["src_out"]) - 5.0
+    assert any("of the act's" in p for p in check_music_map(short, target_s=1200, min_headroom=1.0))
 
 
 def test_act0_takes_the_act4_swell_segment():

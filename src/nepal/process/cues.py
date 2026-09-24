@@ -222,12 +222,14 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
     starts inside it resumes where the silence ends, the track advanced by
     the same amount so the map's beat grid still lines up.
 
-    An act's last cue ends where the act ends. The map's segments follow the
-    slots its scenes were grouped on, and those stop short of the act's end
-    or run past it (on the seeded corpus 1.3 s short in act 1, 7.6 s over in
-    act 3): short would be a hole in the bed right before the cut, over
-    would be two beds under the next act's first shot. A segment that only
-    begins past the end is dropped."""
+    An act's last cue ends where the act ends. The map's segments tile the
+    act the map was *planned* on, but the acts here are the ones the picture
+    actually has: ``map_on_film_time`` rebases each act onto the table's own
+    span, and the map is only rebuilt when an act moved by more than a scene,
+    so the difference (8.4 s in act 4 on the seeded corpus) lands on the last
+    cue either way. Short would be a hole in the bed right before the cut,
+    over would be two beds under the next act's first shot. A segment that
+    only begins past the end is dropped."""
     q = mmap.get("silence_window") or {}
     q0, q1 = (float(q["t_start"]), float(q["t_end"])) if q else (math.inf, math.inf)
     out: list[dict[str, Any]] = []

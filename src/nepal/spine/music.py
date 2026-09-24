@@ -639,16 +639,55 @@ def build_music_map(tracks: Sequence[Track], assignment: Assignment,
     }
 
 
+# Every segment edge is rounded to three decimals at both ends of the
+# subtraction, so two roundings of half a millisecond each is the widest a
+# tiling map may legitimately miss by.
+_SEGMENT_TOL_S = 2e-3
+
+
+def _segment_problems(a: Mapping[str, Any]) -> list[str]:
+    """One act's segments must tile it: from 0 to the act's length, no gap
+    and no overlap, each segment claiming exactly as much source as film.
+
+    Both builders promise this -- ``fill_act`` by construction, and
+    ``_segments_for_act`` by holding each cue until the next -- and the audio
+    graph, the cue list and the rhythm pass all read it as given. A hole is
+    silence under the picture and an overlap is two beds at once, so the map
+    is checked where it is written rather than at whichever consumer notices.
+    """
+    segments = a.get("segments") or []
+    if not segments:
+        return []                       # an act with no music is already reported as having no track
+    act_len = float(a.get("t_end", 0.0)) - float(a.get("t_start", 0.0))
+    out: list[str] = []
+    cursor = 0.0
+    for i, seg in enumerate(segments):
+        t_in, t_end = float(seg["t_in"]), float(seg["t_end"])
+        if abs(t_in - cursor) > _SEGMENT_TOL_S:
+            out.append(f"act {a['act']}: segment {i} ({seg.get('track_id')}) starts at {t_in:.3f}s "
+                       f"but the one before it ends at {cursor:.3f}s -- the bed is not continuous")
+        if abs((t_end - t_in) - (float(seg["src_out"]) - float(seg["src_in"]))) > _SEGMENT_TOL_S:
+            out.append(f"act {a['act']}: segment {i} ({seg.get('track_id')}) plays for "
+                       f"{t_end - t_in:.3f}s of film from {float(seg['src_out']) - float(seg['src_in']):.3f}s "
+                       f"of track -- the map would over- or under-report the source")
+        cursor = t_end
+    if act_len > 0 and abs(cursor - act_len) > _SEGMENT_TOL_S:
+        out.append(f"act {a['act']}: segments cover {cursor:.3f}s of the act's {act_len:.3f}s")
+    return out
+
+
 def check_music_map(mmap: dict[str, Any], *, target_s: float,
                     tolerance_s: float = 30.0,
                     max_repeats_per_act: int = 2,
                     min_headroom: float = 2.0) -> list[str]:
-    """Section S02.8 acceptance, plus two checks the spec does not state.
+    """Section S02.8 acceptance, plus three checks the spec does not state.
 
     The spec's criteria are that act durations sum to within +/-30 s of target
-    and that every act carries a swell. Two more are needed in practice: that
-    the beat grid actually spans each act, since S06 snaps cuts to it, and that
-    no single track is laid down so many times that the audience hears a loop.
+    and that every act carries a swell. Three more are needed in practice: that
+    the beat grid actually spans each act, since S06 snaps cuts to it, that
+    no single track is laid down so many times that the audience hears a loop,
+    and that each act's segments actually tile the act (below) -- a broken map
+    is caught where it is written rather than heard as a hole in the bed.
     """
     problems: list[str] = []
     total = float(mmap.get("total_duration_s", 0.0))
@@ -687,6 +726,7 @@ def check_music_map(mmap: dict[str, Any], *, target_s: float,
             problems.append(
                 f"act {a['act']}: beat grid covers {grid:.0f}s of {act_len:.0f}s "
                 f"({grid/act_len*100:.0f}%) -- cuts past that cannot be beat-snapped")
+        problems += _segment_problems(a)
         # A track laid down several times within one act is a loop the audience
         # will hear, whatever the library's total length.
         repeats = int(a.get("max_track_repeats", 0))
@@ -1042,13 +1082,24 @@ def _overrun_note(label: str, track: Track, src_out: float) -> str | None:
 
 def _segments_for_act(act_scenes: Sequence[Scene], assignment: SceneAssignment,
                       by_id: dict[str, Track], section_of: dict[tuple[str, str], dict],
-                      t_start: float) -> tuple[list[dict[str, Any]], list[str]]:
-    """Each scene becomes a segment, in the act's own local time -- the same
+                      t_start: float, t_end: float) -> tuple[list[dict[str, Any]], list[str]]:
+    """The act's music bed, in the act's own local time -- the same
     convention ``fill_act``/``build_music_map`` use (a cursor from 0 per act;
     ``_act_entry`` adds ``t_start`` back only where film time is actually
     needed, for the beat/swell grid). Consecutive scenes assigned the same
     (track, section) merge into one, since nothing about the music actually
     changed at that cut.
+
+    A scene is a *cue*, not a segment: it says when the music changes, not
+    how long it plays. So the segments tile the act -- 0 to the act's length,
+    no gap and no overlap -- rather than copying each run's own span. Scenes
+    are grouped on the slots they cover and a slot may start after the
+    previous one ended or after the act already began, which left the map
+    holding holes in the bed; whatever lies between two cues belongs to the
+    earlier one, whether the state changed there or not, and the last cue
+    holds to the act's end. Two consumers were each patching their own end
+    of that (``cues.music_cues`` and s05's ``_sections_for_act``), which is
+    two chances to disagree about what the map says; the map says it once.
 
     ``src_out`` is never capped at the track's own duration -- see
     ``_overrun_note`` -- so a scene that outlasts what is left of its
@@ -1061,26 +1112,34 @@ def _segments_for_act(act_scenes: Sequence[Scene], assignment: SceneAssignment,
         if state is None:
             continue
         if runs and runs[-1]["state"] == state:
-            runs[-1]["t_end"] = sc.t_out
             runs[-1]["last_scene_id"] = sc.scene_id
         else:
-            runs.append({"state": state, "t_in": sc.t_in, "t_end": sc.t_out,
-                        "last_scene_id": sc.scene_id})
+            runs.append({"state": state, "t_in": sc.t_in, "last_scene_id": sc.scene_id})
+
+    # Each run holds from the act's start (the first) or its own cue until
+    # the next cue, clamped into the act: a cue outside the act's span is a
+    # scene the act's slots no longer reach, and collapses to nothing rather
+    # than laying a segment backwards.
+    bounds = [t_start]
+    for r in runs[1:]:
+        bounds.append(min(max(float(r["t_in"]), bounds[-1]), t_end))
+    bounds.append(t_end)
 
     segments: list[dict[str, Any]] = []
     overruns: list[str] = []
-    for r in runs:
-        track_id, section_id = r["state"]
-        track = by_id[track_id]
+    for r, t0, t1 in zip(runs, bounds, bounds[1:]):
+        length = t1 - t0
+        if length <= 1e-6:
+            continue
+        track = by_id[r["state"][0]]
         src_in = float(section_of[r["state"]]["start_s"])
-        length = r["t_end"] - r["t_in"]
         src_out = src_in + length
         note = _overrun_note(f"scene {r['last_scene_id']}", track, src_out)
         if note:
             overruns.append(note)
         segments.append({
-            "track_id": track_id, "title": track.title, "artist": track.artist,
-            "t_in": round(r["t_in"] - t_start, 3), "t_end": round(r["t_end"] - t_start, 3),
+            "track_id": track.track_id, "title": track.title, "artist": track.artist,
+            "t_in": round(t0 - t_start, 3), "t_end": round(t1 - t_start, 3),
             "src_in": round(src_in, 3), "src_out": round(src_out, 3),
         })
     return segments, overruns
@@ -1227,7 +1286,8 @@ def music_map_from_scenes(scenes: Sequence[Scene], assignment: SceneAssignment,
     for act in sorted(act_spans):
         t_start, t_end = act_spans[act]
         act_scenes = [sc for sc in scenes if sc.act == act]
-        segments, seg_overruns = _segments_for_act(act_scenes, assignment, by_id, section_of, t_start)
+        segments, seg_overruns = _segments_for_act(act_scenes, assignment, by_id, section_of,
+                                                   t_start, t_end)
         overruns.extend(seg_overruns)
         acts_out.append(_act_entry(act, None, segments, t_start, t_end, by_id))
 
