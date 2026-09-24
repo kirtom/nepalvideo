@@ -213,8 +213,32 @@ def map_on_film_time(mmap: Mapping[str, Any],
     return out
 
 
+def _loop_cuts(t0: float, t1: float, src_in: float, duration: float | None
+               ) -> list[tuple[float, float, float]]:
+    """``t0``..``t1`` played from ``src_in``, as (t_in, t_out, src_in) pieces
+    that each fit inside ``duration``.
+
+    The same arithmetic as ``spine.music._loop_spans`` and deliberately not
+    an import of it: this module is pure rows-in/rows-out and does not reach
+    into the spine package, the same line rhythm.py draws. ffmpeg delivers
+    what the file holds and stops, so a cue asking past the end is silence
+    under the picture; an editor restarts the bed instead, and the renderer's
+    own crossfade between contiguous cues makes the seam.
+    """
+    room = (float(duration) - src_in) if duration else 0.0
+    if room <= 0 or (t1 - t0) <= room + _EDGE_TOL_S:
+        return [(t0, t1, src_in)]
+    cuts, cursor = [], t0
+    while t1 - cursor > _EDGE_TOL_S:
+        take = min(t1 - cursor, room)
+        cuts.append((cursor, cursor + take, src_in))
+        cursor += take
+    return cuts
+
+
 def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
-               window_fade_s: float) -> list[dict[str, Any]]:
+               window_fade_s: float,
+               track_s: Mapping[str, float] | None = None) -> list[dict[str, Any]]:
     """One cue per segment of every act in the map, on film time. Adjacent
     cues carry the crossfade on both ends; the renderer overlaps them. The
     silence window gets no music: a segment inside it is dropped, one that
@@ -229,7 +253,14 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
     so the difference (8.4 s in act 4 on the seeded corpus) lands on the last
     cue either way. Short would be a hole in the bed right before the cut,
     over would be two beds under the next act's first shot. A segment that
-    only begins past the end is dropped."""
+    only begins past the end is dropped.
+
+    That stretch is unbounded -- up to `music.min_scene_s` (45 s) can be
+    added -- so with ``track_s`` (track_id -> duration_s; absent, the stretch
+    is taken as before) a last cue that would run past its file's end is
+    laid as several cues instead, the track restarting at the segment's own
+    section cue. ffmpeg would otherwise deliver what exists and stop, which
+    is dead bed under the act's closing shots."""
     q = mmap.get("silence_window") or {}
     q0, q1 = (float(q["t_start"]), float(q["t_end"])) if q else (math.inf, math.inf)
     out: list[dict[str, Any]] = []
@@ -240,21 +271,25 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
         for i in kept:
             seg = segments[i]
             t0, t1 = t_start + float(seg["t_in"]), t_start + float(seg["t_end"])
-            src_in, src_out = float(seg["src_in"]), float(seg["src_out"])
+            src_in = float(seg["src_in"])
             if i == kept[-1]:
-                src_out, t1 = src_out + (t_end - t1), t_end
-            if t0 < q1 and t1 > q0:
-                if t0 >= q0 and t1 <= q1:
-                    continue
-                if t0 < q0:
-                    src_out, t1 = src_out - (t1 - q0), q0
-                else:
-                    src_in, t0 = src_in + (q1 - t0), q1
-            fade_out = window_fade_s if math.isclose(t1, q0, abs_tol=_EDGE_TOL_S) else xfade_s
-            out.append(_cue(cue_id=f"mu_{entry['act']}_{i}", track="music", t_in=round(t0, 3),
-                            t_out=round(t1, 3), source=seg["track_id"], src_in=round(src_in, 3),
-                            src_out=round(src_out, 3), gain_lufs=lufs, fade_in_s=xfade_s,
-                            fade_out_s=fade_out))
+                t1 = t_end
+            cuts = _loop_cuts(t0, t1, src_in, (track_s or {}).get(seg["track_id"]))
+            for k, (t0, t1, src_in) in enumerate(cuts):
+                src_out = src_in + (t1 - t0)
+                if t0 < q1 and t1 > q0:
+                    if t0 >= q0 and t1 <= q1:
+                        continue
+                    if t0 < q0:
+                        src_out, t1 = src_out - (t1 - q0), q0
+                    else:
+                        src_in, t0 = src_in + (q1 - t0), q1
+                fade_out = window_fade_s if math.isclose(t1, q0, abs_tol=_EDGE_TOL_S) else xfade_s
+                cue_id = f"mu_{entry['act']}_{i}" if k == 0 else f"mu_{entry['act']}_{i}c{k}"
+                out.append(_cue(cue_id=cue_id, track="music", t_in=round(t0, 3),
+                                t_out=round(t1, 3), source=seg["track_id"], src_in=round(src_in, 3),
+                                src_out=round(src_out, 3), gain_lufs=lufs, fade_in_s=xfade_s,
+                                fade_out_s=fade_out))
     return out
 
 

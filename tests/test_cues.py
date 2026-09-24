@@ -232,6 +232,31 @@ def test_a_segment_that_begins_past_the_acts_real_end_is_dropped():
     assert [(r["cue_id"], r["t_in"], r["t_out"], r["src_out"]) for r in rows] == [("mu_3_0", 100.0, 125.0, 25.0)]
 
 
+def test_the_last_cue_loops_rather_than_ask_for_a_track_that_has_run_out():
+    """The stretch to the table's act end is unbounded -- up to
+    music.min_scene_s (45 s) can land on one cue -- and ffmpeg delivers what
+    the file holds and stops, so an unbounded stretch is dead bed under the
+    act's closing shots. Here the table's act is 40 s longer than the map
+    planned and the track has 10 s left past where the cue already plays."""
+    mmap = {"acts": [{"act": 3, "t_start": 0.0, "t_end": 60.0,
+                      "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 60.0,
+                                    "src_in": 20.0, "src_out": 80.0}]}],
+            "silence_window": {}}
+    on_film = cues.map_on_film_time(mmap, {3: (0.0, 100.0)})
+
+    rows = cues.music_cues(on_film, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0,
+                           track_s={"t1": 90.0})
+    assert [(r["cue_id"], r["t_in"], r["t_out"], r["src_in"], r["src_out"]) for r in rows] == [
+        ("mu_3_0", 0.0, 70.0, 20.0, 90.0),        # 60s of map + the 10s the track had left
+        ("mu_3_0c1", 70.0, 100.0, 20.0, 50.0)]    # the rest, from the segment's own section cue
+    assert all(r["source"] == "t1" for r in rows)
+
+    # without the durations nothing knows where the file ends: today's
+    # behaviour, one cue asking 30s past it
+    plain = cues.music_cues(on_film, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0)
+    assert [(r["t_in"], r["t_out"], r["src_out"]) for r in plain] == [(0.0, 100.0, 120.0)]
+
+
 def test_a_segment_wholly_inside_the_silence_is_dropped():
     mmap = {"acts": [{"act": 5, "t_start": 150.0, "t_end": 160.0,
                       "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 10.0, "src_in": 0.0, "src_out": 10.0}]}],
