@@ -50,10 +50,18 @@ ACT_UTC = {
 
 
 def _seed(cfg, *, lopsided_act=None):
-    """``lopsided_act``: that act's bulk comes five parts keller to one
-    kulikov, keller a fifth of a point stronger -- the corpus's act 3, not
-    the round-robin symmetry of the other acts, which hides a share rule
-    that only ever ran per gap."""
+    """``lopsided_act``: that act's bulk comes three parts keller to one
+    kulikov, keller a fifth of a point stronger -- the corpus's act 3 in
+    kind, not the round-robin symmetry of the other acts, which hides a
+    share rule that only ever ran per gap.
+
+    Three to one and not the corpus's five because the share is bounded by
+    the material, not by the repair: an act that puts most of its clips on
+    screen cannot give a quarter of its slots to a phone holding a sixth of
+    its rows, however hard the repair swaps. Twice the recordings, for the
+    same reason -- the act needs slack to be selective in, or the fill takes
+    everything either phone has and there is nothing left to swap.
+    """
     cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = db.init(cfg.db_path)
     recordings: list[tuple] = []
@@ -192,9 +200,9 @@ def _seed(cfg, *, lopsided_act=None):
                                      (4, datetime(2024, 5, 4, 1, 30, tzinfo=timezone.utc), 10, 6.5),
                                      (5, datetime(2024, 5, 8, 8, tzinfo=timezone.utc), 26, 6.5)):
         lopsided = act == lopsided_act
-        for i in range(30 if lopsided else n_recs):
+        for i in range(60 if lopsided else n_recs):
             rid, start = f"f{act}_{i:02d}", day + timedelta(minutes=4 * i)
-            src = (("phone_kulikov" if i % 6 == 0 else "phone_keller") if lopsided
+            src = (("phone_kulikov" if i % 4 == 0 else "phone_keller") if lopsided
                    else ("phone_keller", "phone_kulikov", "camera")[i % 3])
             recording(rid, src, start, 20)
             for j in range(3):
@@ -452,10 +460,13 @@ def test_refill_budget_is_the_gap_at_what_a_slot_actually_runs():
 
 def test_a_starved_phone_gets_its_share_of_the_act_not_of_each_gap(tmp_path):
     """source_share_repair runs per gap over that gap's picks and never over
-    the act, so with one phone holding five times the rows and a score edge
+    the act, so with one phone holding three times the rows and a score edge
     the other ended far under its share of the act. After the refill rounds
     the act is re-balanced by swapping shots, slot for slot, until the
-    starved phone holds its share of the act's phone video slots."""
+    starved phone holds its share of the act's phone video slots.
+
+    With the repair switched off this act gives kulikov 20% of its phone
+    slots, so the assertion below is the repair's work and not the fill's."""
     cfg = _cfg(tmp_path)
     conn = _seed(cfg, lopsided_act=5)
     s05_cut.build_timeline(cfg, conn)

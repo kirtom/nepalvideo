@@ -927,23 +927,18 @@ def test_an_act_whose_scenes_start_late_and_stop_early_is_still_covered():
     assert _segment_problems(m["acts"][0]) == []
 
 
-def test_a_run_past_the_end_of_its_track_loops_the_section_instead_of_claiming_it():
-    """ffmpeg delivers what the file holds and stops, so a segment asking
-    past its track's end is dead bed under the picture -- 28.6 s of it on
-    the real corpus. The cue restarts instead, as an editor would, and the
-    note says the bed looped."""
+def test_a_looped_run_restarts_at_its_own_section_cue_not_at_the_file():
+    """The loop is the editor's move, so it restarts where the editor
+    started: the section the scene was assigned, not the top of the file.
+    Section 1 begins 50s into a 100s track and the act runs 130s."""
     short = scene_track("short", "Z", 100, [0.5, 0.5], duration=100.0)   # sections at 0 and 50
     scenes = [trek_scene(1, 2, 0.0, 130.0, "climbing", hr=140)]
     a = _cue_assignment(scenes, [(short.track_id, short.sections[1]["section_id"])])
     m = music_map_from_scenes(scenes, a, [short], act_spans={2: (0.0, 130.0)}, silence_s=3.0)
     segs = m["acts"][0]["segments"]
-    # 50 s of track left from the section cue, 130 s of act to cover
     assert [(s["t_in"], s["t_end"], s["src_in"], s["src_out"]) for s in segs] == [
         (0.0, 50.0, 50.0, 100.0), (50.0, 100.0, 50.0, 100.0), (100.0, 130.0, 50.0, 80.0)]
-    assert all(s["src_out"] <= short.duration_s for s in segs)
-    assert "looped" in m["assignment_note"] and "short" in m["assignment_note"]
-    track_s = {short.track_id: short.duration_s}
-    assert _segment_problems(m["acts"][0], track_s) == []
+    assert _segment_problems(m["acts"][0], {short.track_id: short.duration_s}) == []
 
 
 def test_check_music_map_flags_a_segment_that_plays_past_its_tracks_end():
@@ -1135,22 +1130,26 @@ def test_the_callback_bonus_applies_once_not_to_every_last_act_scene():
     assert a.by_scene[3][0] == "fit", "but not the second -- fit alone decides there"
 
 
-def test_a_scene_that_outlasts_its_track_reports_the_overrun_without_capping():
-    """Every fixture above uses 600s tracks against scenes under 120s, so a
+def test_a_scene_that_outlasts_its_track_loops_it_rather_than_claim_what_is_not_there():
+    """Every other fixture uses 600s tracks against scenes under 120s, so a
     scene never actually runs past its track's own end; build one on
-    purpose. Capping src_out there would make t_end-t_in disagree with
-    src_out-src_in, so the length is never capped -- the overrun is named
-    in the note instead."""
+    purpose. Capping src_out at the track's length would make t_end-t_in
+    disagree with src_out-src_in, which is the over-report trap read
+    backwards, and leaving it uncapped is 60s of silence under the picture
+    -- ffmpeg gives what the file holds and stops. The bed restarts instead,
+    and the note says so."""
     short = scene_track("short", "Z", 100, [0.5], duration=30.0)
     scene = trek_scene(1, 2, 0.0, 90.0, "climbing", hr=140, speed=1.2, alt=3000, hour=9)
     a = assign_scenes([scene], [short], targets=scene_targets_for([scene]), weights=SCENE_WEIGHTS,
                       switch_cost=0.3, continuity_bonus=0.3, repeat_penalty=0.5,
                       reuse_gap_s=300, preferred=[], preferred_bonus=0.0, exclude=[])
     m = music_map_from_scenes([scene], a, [short], act_spans={2: (0.0, 90.0)}, silence_s=3.0)
-    seg = m["acts"][0]["segments"][0]
-    assert seg["t_end"] - seg["t_in"] == pytest.approx(seg["src_out"] - seg["src_in"])
-    assert seg["src_out"] == pytest.approx(90.0)          # not capped at the 30s track length
-    assert "short" in m["assignment_note"] and "overrun" in m["assignment_note"]
+    segs = m["acts"][0]["segments"]
+    assert [(s["t_in"], s["t_end"], s["src_in"], s["src_out"]) for s in segs] == [
+        (0.0, 30.0, 0.0, 30.0), (30.0, 60.0, 0.0, 30.0), (60.0, 90.0, 0.0, 30.0)]
+    assert all(s["t_end"] - s["t_in"] == pytest.approx(s["src_out"] - s["src_in"]) for s in segs)
+    assert "short" in m["assignment_note"] and "looped" in m["assignment_note"]
+    assert _segment_problems(m["acts"][0], {"short": 30.0}) == []
 
 
 def test_unmatched_preferred_and_exclude_names_are_reported_in_the_note():
