@@ -1661,15 +1661,27 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
     log.info("S07 rendering %d of %d slot(s) to %s", len(usable), len(rows), out)
     log.debug("S07 %s", render_mod.describe(cmd))
     _raise_fd_limit(cmd.count("-i"))
-    proc = render_mod.run_render(cmd, out)
+    # What the picture is supposed to be, which is the only thing that can
+    # tell a finished render from one that stopped: ffmpeg exits 0 either way.
+    timeline_s = max(float(r["t_out"]) for r in usable)
+    proc = render_mod.run_render(cmd, out, expect_s=timeline_s,
+                                 tol_s=float(cfg.get("render.draft_tol_s")))
     if proc.returncode != 0:
-        log.error("S07 render failed: %s", (proc.stderr or "")[-600:])
-        return {"error": (proc.stderr or "")[-600:], "n_slots": len(usable)}
+        # Not a report field and a zero exit from the stage: a draft that did
+        # not render is the stage failing, and a run that says otherwise sends
+        # someone to Gate 3 to watch the last good draft thinking it is this
+        # cut. The short file, when there is one, is named in the message.
+        tail = (proc.stderr or "")[-600:].strip()
+        log.error("S07 render failed: %s", tail)
+        raise RuntimeError(f"S07 draft render failed: {tail}")
     size = out.stat().st_size if out.exists() else 0
     log.info("S07 draft written: %s (%.1f MB)", out, size / 1e6)
     report = {"path": str(out), "bytes": size, "n_slots": len(usable), "n_skipped": len(rows) - len(usable),
               "audio_tracks": len(n_cues) if cues else 0, "n_cues": n_cues, "n_dropped_cues": n_dropped,
-              "two_pass": measured is not None, "draft_s": _draft_seconds(out) if out.exists() else None}
+              "two_pass": measured is not None, "draft_s": _draft_seconds(out) if out.exists() else None,
+              # Beside draft_s so the page and the report show the two numbers
+              # that must agree, rather than only the one that was measured.
+              "timeline_s": round(timeline_s, 3)}
 
     # The editor's files again, now with the tracks the cues step laid --
     # the timeline step wrote them before any cue existed.

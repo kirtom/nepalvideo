@@ -505,9 +505,9 @@ def test_location_cues_sit_against_full_level_fade_at_their_edges_and_ride_the_e
     fc = _graph(_mixed(tmp_path))
     fmt = render.CONCAT_AFORMAT
     assert ("[3:a]volume=0dB,afade=t=in:d=0.15,afade=t=out:st=2.850:d=0.15,"
-            f"atrim=duration=3.000,apad=whole_dur=3.000,{fmt}[lo0]") in fc
+            f"atrim=duration=3.000,apad=whole_dur=3.000,asetpts=N/SR/TB,{fmt}[lo0]") in fc
     assert ("[4:a]volume=-6dB,afade=t=in:d=0.5,afade=t=out:st=3.000:d=1,"
-            f"atrim=duration=4.000,apad=whole_dur=4.000,{fmt}[lo1]") in fc
+            f"atrim=duration=4.000,apad=whole_dur=4.000,asetpts=N/SR/TB,{fmt}[lo1]") in fc
     assert ("[lo0][lo1]concat=n=2:v=0:a=1,"
             "volume='between(t,0,3)*1+between(t,3,7)*0.25':eval=frame[loc]") in fc
 
@@ -521,6 +521,22 @@ def test_the_location_track_is_laid_end_to_end_rather_than_delayed_and_summed(tm
     fc = _graph(_mixed(tmp_path))
     assert not any("adelay" in p for p in _loc(fc)), "no cue carries the film ahead of it"
     assert "concat=n=2:v=0:a=1" in fc
+
+
+def test_every_location_piece_times_itself_off_its_own_samples(tmp_path):
+    """apad gives a piece its length; it cannot give those samples a time.
+    An input that decodes nothing -- a cue seeked at or past the end of its
+    recording -- leaves apad's padding with no pts at all, and concat adds
+    each piece's end time to the delta it shifts every later piece by. One
+    such cue therefore puts the whole rest of the track at a nonsense time.
+    Every piece, not only the empty ones, so nothing depends on which
+    inputs happened to deliver."""
+    pieces = [p for p in _loc(_graph(_mixed(tmp_path))) if "apad=whole_dur" in p]
+    assert len(pieces) == 2, pieces
+    for piece in pieces:
+        assert "asetpts=N/SR/TB" in piece, piece
+        assert piece.index("apad=whole_dur") < piece.index("asetpts=N/SR/TB"), \
+            "the piece is timed after it is padded, not before"
 
 
 def test_a_stretch_with_no_location_cue_becomes_silence_of_its_own_length(tmp_path):
@@ -950,6 +966,88 @@ def test_a_failed_render_leaves_the_previous_draft_alone(tmp_path):
     render.part_path(out).write_bytes(b"half a render")
     assert render.run_render(["false"], out).returncode != 0
     assert out.read_bytes() == b"last good draft"
+
+
+@pytest.mark.slow
+def test_a_location_cue_with_nothing_left_to_play_still_renders_the_whole_film(tmp_path):
+    """The real corpus, 2026-09-25: the ambience held on under a still ran
+    past the end of the recording it was held from, so that cue's input was
+    seeked to the wav's own length and decoded no samples at all. apad still
+    padded the piece to its span, but with frames carrying no pts, and
+    concat folded that into the delta it shifts every later piece by: the
+    graph died at "Invalid data found when processing input" and ffmpeg
+    wrote a valid trailer and exited 0 on 138.7 s of a 2145.9 s draft.
+
+    Run against real ffmpeg because that is where it went wrong: a 1 s cue,
+    a 6.5 s cue whose source has nothing left, a 1 s cue after it, and the
+    film has to come out 8.5 s long on both streams. (ffmpeg prints
+    "Invalid value NaN for volume" once per eval=frame volume filter
+    whatever the inputs do -- af_volume seeds every variable NaN and
+    evaluates once at init, before any frame has a t. It is not a symptom
+    of this and it does not go away.)"""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("needs ffmpeg")
+
+    def lavfi(src, path, *extra):
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", src, *extra, str(path)], check=True)
+    vid, amb = tmp_path / "v.mp4", tmp_path / "amb.wav"
+    lavfi("testsrc=size=320x240:rate=25:duration=10", vid, "-c:v", "libx264", "-pix_fmt", "yuv420p")
+    lavfi("sine=frequency=220:duration=2", amb, "-ac", "2")
+    rows = [{"shot_id": "v1", "t_in": 0.0, "t_out": 8.5, "src_in": 0.0}]
+    cues = [_cue(cue_id="lo_0", track="location", t_in=0.0, t_out=1.0, source="amb",
+                 src_in=0.0, src_out=1.0, gain_lufs=-18.0),
+            # Seeked to exactly the wav's length: nothing decodes at all.
+            _cue(cue_id="lo_1", track="location", t_in=1.0, t_out=7.5, source="amb",
+                 src_in=2.0, src_out=8.5, gain_lufs=-18.0),
+            _cue(cue_id="lo_2", track="location", t_in=7.5, t_out=8.5, source="amb",
+                 src_in=0.5, src_out=1.5, gain_lufs=-18.0)]
+    out = tmp_path / "draft.mp4"
+    cmd = render.build_command(rows, sources={"v1": vid}, out_path=out, cues=cues,
+                               audio_sources={"amb": amb}, levels=LEVELS,
+                               envelopes={"location": "between(t,0,8.5)*1", "music": "between(t,0,8.5)*1"})
+    proc = render.run_render(cmd, out, expect_s=8.5, tol_s=0.3)
+    assert proc.returncode == 0, proc.stderr[-800:]
+    assert out.exists()
+
+    def stream_s(kind):
+        return float(subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", kind, "-show_entries",
+             "stream=duration", "-of", "csv=p=0", str(out)],
+            capture_output=True, text=True, check=True).stdout.strip())
+    assert stream_s("v:0") == pytest.approx(8.5, abs=0.2), "the picture stopped short"
+    assert stream_s("a:0") == pytest.approx(8.5, abs=0.2), "the mix stopped short"
+
+
+@pytest.mark.slow
+def test_a_render_that_stopped_part_way_is_never_published(tmp_path):
+    """ffmpeg's exit code cannot tell a finished film from one that stopped:
+    it breaks out of its transcode loop on a mid-graph error, flushes, writes
+    a valid trailer and returns 0. The length is the verdict it will not
+    give, so a file short of the timeline stays at its temporary name and
+    comes back as the failure it is -- checked against real ffmpeg output
+    rather than a hand-written stub, because the number being read is
+    ffprobe's."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("needs ffmpeg")
+    src = tmp_path / "s.mp4"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+                    "-i", "testsrc=size=320x240:rate=25:duration=4", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", str(src)], check=True)
+    rows = [{"shot_id": "v1", "t_in": 0.0, "t_out": 2.0, "src_in": 0.0}]
+    out = tmp_path / "draft.mp4"
+    out.write_bytes(b"last good draft")
+    cmd = render.build_command(rows, sources={"v1": src}, out_path=out)
+
+    proc = render.run_render(cmd, out, expect_s=20.0, tol_s=0.5)
+    assert proc.returncode != 0, "a two-second file is not a twenty-second film"
+    assert "2.000 s" in proc.stderr and "20.000 s" in proc.stderr, proc.stderr[-400:]
+    assert out.read_bytes() == b"last good draft", "the last good draft must survive"
+    assert render.part_path(out).exists(), "the short file is kept, to look at where it stopped"
+
+    # The same render, asked for the length it actually is, publishes.
+    assert render.run_render(cmd, out, expect_s=2.0, tol_s=0.5).returncode == 0
+    assert out.read_bytes() != b"last good draft" and not render.part_path(out).exists()
 
 
 def test_the_edge_tolerance_is_the_one_cues_uses(tmp_path):

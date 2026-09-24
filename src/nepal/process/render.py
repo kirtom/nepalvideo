@@ -29,6 +29,14 @@ log = logging.getLogger(__name__)
 
 DRAFT_W, DRAFT_H, DRAFT_CRF, DRAFT_FPS = 960, 540, 23, 30
 
+# How far the rendered draft may sit from the length the timeline asked for
+# before ``run_render`` calls it a failed render. Every leg is resampled to
+# one rate, so each one's length is quantised to a frame and the sum drifts a
+# little; a render that stopped part-way is out by slots, not by frames. The
+# stage passes ``render.draft_tol_s``; this is the fallback for a caller with
+# no config to hand.
+DRAFT_TOL_S = 5.0
+
 # The checks below ask the same question cues.py asks of its own edges --
 # do these two times coincide? -- and must answer it the same way. The
 # value is repeated rather than imported because it is private over there;
@@ -271,6 +279,20 @@ def _location_pieces(location: Sequence[tuple[int, Mapping[str, Any], float]], *
                  # pts_time 0), which is also why the fades above are
                  # written relative.
                  f"atrim=duration={length:.3f}", f"apad=whole_dur={length:.3f}",
+                 # apad can give a piece its length but not give those samples
+                 # a time. A cue seeked at or past the end of its recording --
+                 # the ambience held on under a still, after the recording it
+                 # is held from has run out -- decodes nothing at all, and the
+                 # padding apad then invents carries no pts. concat adds each
+                 # piece's end time to the delta it shifts every later piece
+                 # by, so one such cue puts the whole rest of the track at a
+                 # nonsense time: the graph dies mid-film with "Invalid data
+                 # found when processing input" and ffmpeg still writes a
+                 # valid trailer and exits 0. Measured on the real corpus --
+                 # one cue at 132.2 s left 138.7 s of a 2145.9 s draft.
+                 # Counting a piece's timestamps off its own samples cannot
+                 # depend on what the input did or did not deliver.
+                 "asetpts=N/SR/TB",
                  CONCAT_AFORMAT]
         parts.append(f"[{i}:a]" + ",".join(chain) + f"[lo{k}]")
         labels.append(f"[lo{k}]")
@@ -593,8 +615,23 @@ def part_path(out_path: Path) -> Path:
     return out_path.with_suffix(".part" + out_path.suffix)
 
 
-def run_render(cmd: Sequence[str], out_path: Path) -> subprocess.CompletedProcess:
-    """Run the render and publish its output only if ffmpeg succeeded.
+def media_seconds(path: Path) -> float | None:
+    """The video stream's length as ffprobe reads it back, or None if it
+    cannot be read at all."""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                              "stream=duration", "-of", "csv=p=0", str(path)],
+                             capture_output=True, text=True, check=True).stdout
+        return round(float(out.strip()), 3)
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        log.warning("S07 could not probe the length of %s: %s", path, e)
+        return None
+
+
+def run_render(cmd: Sequence[str], out_path: Path, *, expect_s: float | None = None,
+               tol_s: float = DRAFT_TOL_S) -> subprocess.CompletedProcess:
+    """Run the render and publish its output only if ffmpeg succeeded and
+    the file is as long as it was asked to be.
 
     A render measured in tens of minutes that is killed, preempted or
     rsynced over leaves a truncated file where the good draft was, and
@@ -602,12 +639,30 @@ def run_render(cmd: Sequence[str], out_path: Path) -> subprocess.CompletedProces
     watches it -- reads that as the draft. Written through a temporary name
     and renamed, which is atomic on one filesystem, so draft.mp4 is either
     the last complete render or nothing at all.
+
+    A zero exit is not the whole verdict. ffmpeg breaks out of its transcode
+    loop on a mid-graph error, then flushes its encoders, writes a valid
+    trailer and returns 0 -- so a render that died at 138.7 s of a 2145.9 s
+    film came back "successful", with a playable file that was 6 % of the
+    cut. The length is the verdict ffmpeg will not give: ``expect_s`` is
+    what the timeline says the picture is, and a file short of that by more
+    than ``tol_s`` is not published and comes back as the failure it is.
+    The short file is kept at its temporary name, because the thing to look
+    at when this fires is where it stopped.
     """
     proc = subprocess.run(cmd, capture_output=True, text=True)
     part = part_path(out_path)
-    if proc.returncode == 0 and part.exists():
+    if proc.returncode != 0 or not part.exists():
+        return proc
+    got = media_seconds(part) if expect_s is not None else None
+    if expect_s is None or (got is not None and abs(got - expect_s) <= tol_s):
         part.replace(out_path)
-    return proc
+        return proc
+    msg = (f"ffmpeg exited 0 but wrote {'a file whose length cannot be read' if got is None else f'{got:.3f} s'} "
+           f"where the timeline is {expect_s:.3f} s (tolerance {tol_s:g} s): the render stopped "
+           f"part-way through the film. {out_path} is left as it was; the short file is at {part}.")
+    log.error("S07 %s", msg)
+    return subprocess.CompletedProcess(proc.args, 1, proc.stdout, (proc.stderr or "") + "\n" + msg)
 
 
 def describe(cmd: Sequence[str]) -> str:
