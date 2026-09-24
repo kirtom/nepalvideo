@@ -976,12 +976,40 @@ def test_act0_takes_the_act4_swell_segment():
     assert act0["swells"][0] == pytest.approx(act0["t_start"])
     assert act0["t_start"] == 0.0 and act0["t_end"] == 20.0
 
-    # the map's own callback_bonus must be the real number applied, not a
-    # placeholder -- cross-checked against callback_affinity directly on the
-    # tracks the assignment actually chose for Act 1 and the last act
-    by_id = {t.track_id: t for t in tracks}
-    expected_bonus = callback_affinity(by_id[a.by_scene[1][0]], by_id[a.by_scene[3][0]])
-    assert m["callback_bonus"] == pytest.approx(expected_bonus)
+
+def test_the_map_reports_the_callback_bonus_it_actually_applied():
+    """The map's callback_bonus must be the number applied, not a
+    placeholder. two_track_library shares neither artist nor key, so a map
+    built on it reports 0.0 whatever the code does and proves nothing; here
+    the last act opens on another piece by Act 1's artist, in Act 1's key."""
+    opening = scene_track("opening", "Shared", 60, [0.1, 0.2], key="Amin")
+    echo = scene_track("echo", "Shared", 100, [0.5, 0.9], key="Amin")
+    scenes = [trek_scene(1, 1, 0.0, 60.0, "village", hr=60),
+              trek_scene(2, 4, 60.0, 120.0, "summit", hr=190)]
+    a = _cue_assignment(scenes, [(opening.track_id, opening.sections[0]["section_id"]),
+                                 (echo.track_id, echo.sections[0]["section_id"])])
+    m = music_map_from_scenes(scenes, a, [opening, echo],
+                              act_spans={1: (0.0, 60.0), 4: (60.0, 120.0)}, silence_s=3.0)
+    assert m["callback_bonus"] == pytest.approx(callback_affinity(opening, echo))
+    assert m["callback_bonus"] == pytest.approx(2.5), "same artist (1.5) and same key (1.0)"
+
+
+def test_act0_is_empty_when_act4_has_no_segments_of_its_own():
+    """Act 0 plays the piece Act 4 opens with, so an Act 4 with no scenes
+    (its slots all went elsewhere) leaves nothing to open on -- the cold open
+    comes back empty rather than reaching for a segment that is not there,
+    and check_music_map says which act has no music."""
+    calm, driving = two_track_library()
+    scenes = [trek_scene(1, 1, 30.0, 60.0, "village", hr=60)]
+    a = _cue_assignment(scenes, [(calm.track_id, calm.sections[0]["section_id"])])
+    m = music_map_from_scenes(scenes, a, [calm, driving],
+                              act_spans={1: (30.0, 60.0), 4: (60.0, 120.0)}, silence_s=3.0,
+                              act0_span=(0.0, 20.0))
+    act0 = next(x for x in m["acts"] if x["act"] == 0)
+    assert act0["segments"] == [] and act0["track_id"] is None
+    assert (act0["t_start"], act0["t_end"]) == (0.0, 20.0)
+    assert m["silence_window"]["t_start"] == 120.0      # the silence still follows Act 4
+    assert any("act 4 has no track assigned" in p for p in check_music_map(m, target_s=120.0))
 
 
 def test_act0_is_never_silent_when_act4_has_no_swell():
