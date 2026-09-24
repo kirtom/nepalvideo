@@ -25,6 +25,11 @@ import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+# The tiling check below asks the same question cues.py asks of its own
+# edges -- do these two times coincide? -- so it asks it with the same
+# tolerance rather than a second one that can drift away from it.
+from nepal.process.cues import _EDGE_TOL_S
+
 log = logging.getLogger(__name__)
 
 DRAFT_W, DRAFT_H, DRAFT_CRF, DRAFT_FPS = 960, 540, 23, 30
@@ -46,6 +51,13 @@ SPEECH_TP_DB, LRA = -1.5, 11
 # on, and left to itself the encoder negotiated 96 kHz -- the highest it
 # takes -- for a draft whose every source is 48.
 AUDIO_RATE = 48000
+# concat refuses pieces that disagree on rate, sample format or layout, and
+# the location recordings agree on none of the three. aformat states the
+# constraint and lets the graph insert the resampler wherever a piece needs
+# one -- amix did that conversion itself, which is why the old path could
+# ignore it.
+CONCAT_AFORMAT = (f"aformat=sample_fmts=fltp:sample_rates={AUDIO_RATE}"
+                  ":channel_layouts=stereo")
 
 _HAS_DRAWTEXT: bool | None = None
 
@@ -215,6 +227,53 @@ def _afades(fade_in: float, fade_out: float, *, end: float) -> list[str]:
     return out
 
 
+def _location_pieces(location: Sequence[tuple[int, Mapping[str, Any], float]], *,
+                     full: float, levels: Mapping[str, float]) -> tuple[list[str], list[str]]:
+    """The location track's cues laid end to end, as graph parts and the
+    labels to hand ``concat``, in time order.
+
+    The cues tile the timeline: each is a slot's span, and a photo or card
+    slot's cue continues the previous recording from its ``src_out``. So the
+    track can be built by laying them end to end, which is what it is --
+    one film's length of sound, ~1800 s. Placing each one with ``adelay``
+    instead and summing 735 of them with ``amix`` asked amix to add 735
+    streams whose lengths average half the film, of the order of 3e10
+    samples: measured on the real draft, 19.5 minutes at 100 % of one core
+    for the audio-only measurement pass alone, and the same graph again
+    under the render -- twice what the picture costs.
+
+    Where no cue covers a stretch of film -- a card that opens an act is
+    intended dead air -- concat can only say so with a piece of silence.
+    """
+    parts: list[str] = []
+    labels: list[str] = []
+    played = 0.0
+    for k, (i, c, length) in enumerate(location):
+        t_in = float(c["t_in"])
+        if t_in - played > _EDGE_TOL_S:
+            parts.append(f"anullsrc=r={AUDIO_RATE}:cl=stereo,"
+                         f"atrim=duration={t_in - played:.3f},{CONCAT_AFORMAT}[log{k}]")
+            labels.append(f"[log{k}]")
+        chain = [f"volume={float(c['gain_lufs']) - full:g}dB",
+                 *_afades(*_fades(c, levels), end=length),
+                 # Input -t stops at a packet boundary, not at the sample,
+                 # and a source that ends early simply ends. amix did not
+                 # care -- every cue was pinned to its own t_in by adelay --
+                 # but in a concat one piece's overshoot pushes every later
+                 # cue late and an undershoot pulls them early, cue after
+                 # cue. So each piece is held to exactly its span. Both
+                 # filters read the cue's own span because an input seek
+                 # rebases the stream to zero (checked: `-ss 5` delivers
+                 # pts_time 0), which is also why the fades above are
+                 # written relative.
+                 f"atrim=duration={length:.3f}", f"apad=whole_dur={length:.3f}",
+                 CONCAT_AFORMAT]
+        parts.append(f"[{i}:a]" + ",".join(chain) + f"[lo{k}]")
+        labels.append(f"[lo{k}]")
+        played = float(c["t_out"])
+    return parts, labels
+
+
 def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any], float]]], *,
                   envelopes: Mapping[str, str], levels: Mapping[str, float],
                   film_len: float, measured: Mapping[str, float] | None = None,
@@ -222,12 +281,16 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any], fl
     """The three tracks and their mix, as graph parts ending in ``[aout]``.
 
     ``tracks`` maps each track to its cues in time order, each with the
-    index of the input that carries it and how much of it is read. A cue
-    is placed on film time with ``adelay`` -- one delay per channel of
-    the stereo the mix ends in; a mono cue takes the first and ignores the
-    rest -- and a track's cues are summed without rescaling
+    index of the input that carries it and how much of it is read. A speech
+    or music cue is placed on film time with ``adelay`` -- one delay per
+    channel of the stereo the mix ends in; a mono cue takes the first and
+    ignores the rest -- and those tracks are summed without rescaling
     (``normalize=0``): amix's default halves everything while two inputs
-    are live, which would dip a cue every time another began.
+    are live, which would dip a cue every time another began. They overlap
+    -- crossfades, a replay under a card -- and there are 47 of them in the
+    real film. The 735 location cues do not overlap, so they are laid end
+    to end with ``concat`` instead (see ``_location_pieces``); only cues
+    that do overlap send that track back to ``adelay`` and ``amix``.
 
     Every cue fades at its edges as its row says (``_fades``): without
     that, every change of recording is a butt-splice of two unrelated
@@ -276,15 +339,35 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any], fl
         parts.append(f"[{i}:a]" + ",".join(chain) + f"[sp{k}]")
     parts.append(summed("sp", len(speech), "", "[speech]"))
 
-    location = tracks.get("location") or ()
+    # concat lays its pieces down in the order it is given them, so the
+    # graph's order has to be film order. build_command already sorts every
+    # track by t_in; sorting here is what makes the tiling test below mean
+    # what it says rather than rest on that promise.
+    location = sorted(tracks.get("location") or (), key=lambda p: float(p[1]["t_in"]))
     full = float(levels["location_full_lufs"])
-    for k, (i, c, length) in enumerate(location):
-        ms = _ms(c["t_in"])
-        chain = [f"volume={float(c['gain_lufs']) - full:g}dB",
-                 *_afades(*_fades(c, levels), end=length), f"adelay={ms}|{ms}"]
-        parts.append(f"[{i}:a]" + ",".join(chain) + f"[lo{k}]")
-    parts.append(summed("lo", len(location),
-                        f",volume='{envelopes['location']}':eval=frame" if location else "", "[loc]"))
+    envelope = f",volume='{envelopes['location']}':eval=frame" if location else ""
+    overlap = next((p for p in zip(location, location[1:])
+                    if float(p[1][1]["t_in"]) < float(p[0][1]["t_out"]) - _EDGE_TOL_S), None)
+    if location and overlap is None:
+        pieces, labels = _location_pieces(location, full=full, levels=levels)
+        parts += pieces
+        parts.append("".join(labels) + f"concat=n={len(labels)}:v=0:a=1{envelope}[loc]")
+    else:
+        if overlap is not None:
+            # Two cues that sound at once cannot be laid end to end, and
+            # getting the film's ambience right beats getting it fast.
+            (_, a, _), (_, b, _) = overlap
+            log.warning("S07 location cues %s (%.3f-%.3f) and %s (%.3f-%.3f) overlap, so the "
+                        "track cannot be concatenated; falling back to adelay+amix, which is "
+                        "correct but costs ~20 min of one core per pass on a film-length mix.",
+                        a.get("cue_id"), float(a["t_in"]), float(a["t_out"]),
+                        b.get("cue_id"), float(b["t_in"]), float(b["t_out"]))
+        for k, (i, c, length) in enumerate(location):
+            ms = _ms(c["t_in"])
+            chain = [f"volume={float(c['gain_lufs']) - full:g}dB",
+                     *_afades(*_fades(c, levels), end=length), f"adelay={ms}|{ms}"]
+            parts.append(f"[{i}:a]" + ",".join(chain) + f"[lo{k}]")
+        parts.append(summed("lo", len(location), envelope, "[loc]"))
 
     music = tracks.get("music") or ()
     for k, (i, c, length) in enumerate(music):

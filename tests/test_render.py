@@ -1,5 +1,6 @@
 """S07 -- the draft render command, and one real render at the boundary."""
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -489,16 +490,63 @@ def test_speech_cues_are_normalised_faded_placed_and_summed(tmp_path):
     assert "[sp0]amix=inputs=1:normalize=0[speech]" in fc
 
 
+def _loc(fc):
+    """The location track's own parts of the graph."""
+    return [p for p in fc.split(";") if re.search(r"\[log?\d+\]$|\[loc\]$", p)]
+
+
 def test_location_cues_sit_against_full_level_fade_at_their_edges_and_ride_the_envelope(tmp_path):
     """Every change of recording is a butt-splice of two unrelated
     waveforms unless each cue fades at its edges -- hundreds of clicks at
     picture cuts. The row's own fades where it has them, the config's
-    cut fade where it does not."""
+    cut fade where it does not. The gains, the fades and the envelope are
+    what they always were; only the placement changed."""
     fc = _graph(_mixed(tmp_path))
-    assert "[3:a]volume=0dB,afade=t=in:d=0.15,afade=t=out:st=2.850:d=0.15,adelay=0|0[lo0]" in fc
-    assert "[4:a]volume=-6dB,afade=t=in:d=0.5,afade=t=out:st=3.000:d=1,adelay=3000|3000[lo1]" in fc
+    fmt = render.CONCAT_AFORMAT
+    assert ("[3:a]volume=0dB,afade=t=in:d=0.15,afade=t=out:st=2.850:d=0.15,"
+            f"atrim=duration=3.000,apad=whole_dur=3.000,{fmt}[lo0]") in fc
+    assert ("[4:a]volume=-6dB,afade=t=in:d=0.5,afade=t=out:st=3.000:d=1,"
+            f"atrim=duration=4.000,apad=whole_dur=4.000,{fmt}[lo1]") in fc
+    assert ("[lo0][lo1]concat=n=2:v=0:a=1,"
+            "volume='between(t,0,3)*1+between(t,3,7)*0.25':eval=frame[loc]") in fc
+
+
+def test_the_location_track_is_laid_end_to_end_rather_than_delayed_and_summed(tmp_path):
+    """735 location cues adelayed and amixed made the audio-only
+    measurement pass 19.5 minutes at 100 % of one core -- amix summing 735
+    streams whose lengths average half the film, ~3e10 samples, for a
+    track that is one film laid end to end. The cues tile the timeline, so
+    the track is a concat and each piece carries only its own span."""
+    fc = _graph(_mixed(tmp_path))
+    assert not any("adelay" in p for p in _loc(fc)), "no cue carries the film ahead of it"
+    assert "concat=n=2:v=0:a=1" in fc
+
+
+def test_a_stretch_with_no_location_cue_becomes_silence_of_its_own_length(tmp_path):
+    """A card that opens an act has no location cue: intended dead air.
+    Summed, that is simply nothing; laid end to end it has to be said, or
+    every cue after it lands early."""
+    shifted = {"lo_0": 0.5, "lo_1": 4.5}
+    moved = [c | {"t_in": shifted[c["cue_id"]]} if c["cue_id"] in shifted else c for c in CUES]
+    fc = _graph(_mixed(tmp_path, cues=moved))
+    fmt = render.CONCAT_AFORMAT
+    assert f"anullsrc=r=48000:cl=stereo,atrim=duration=0.500,{fmt}[log0]" in fc, "the run before the first cue"
+    assert f"anullsrc=r=48000:cl=stereo,atrim=duration=1.500,{fmt}[log1]" in fc, "3.0 to 4.5"
+    assert "[log0][lo0][log1][lo1]concat=n=4:v=0:a=1" in fc
+
+
+def test_overlapping_location_cues_go_back_to_being_summed(tmp_path, caplog):
+    """Two cues that sound at once cannot be laid end to end. Correctness
+    over speed: the track falls back to the placement that can hold them,
+    and says which pair cost it."""
+    clash = [c if c["cue_id"] != "lo_1" else c | {"t_in": 2.0} for c in CUES]
+    with caplog.at_level(logging.WARNING, logger="nepal.process.render"):
+        fc = _graph(_mixed(tmp_path, cues=clash))
+    assert "concat=n=2:v=0:a=1" not in fc
+    assert "adelay=0|0[lo0]" in fc and "adelay=2000|2000[lo1]" in fc
     assert ("[lo0][lo1]amix=inputs=2:normalize=0,"
             "volume='between(t,0,3)*1+between(t,3,7)*0.25':eval=frame[loc]") in fc
+    assert "lo_0" in caplog.text and "lo_1" in caplog.text and "overlap" in caplog.text
 
 
 def test_music_cues_land_at_their_own_t_in_and_crossfade_by_overlap(tmp_path):
@@ -555,7 +603,8 @@ def test_the_three_tracks_meet_in_one_mix_and_one_final_normalisation(tmp_path):
     fc = _graph(cmd)
     assert "-filter_complex_script" in cmd
     assert "[speech][loc][mus]amix=inputs=3:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[aout]" in fc
-    assert fc.count("adelay=") == len(CUES), "every cue is placed on film time, whatever its track"
+    assert fc.count("adelay=") == sum(1 for c in CUES if c["track"] != "location"), \
+        "speech and music are placed on film time; location is laid end to end"
     assert cmd[cmd.index("-map") + 1] == "[vout]" and "[aout]" in cmd
     assert cmd[cmd.index("-c:a") + 1] == "aac" and cmd[cmd.index("-b:a") + 1] == "192k"
     assert cmd[cmd.index("-ar") + 1] == "48000", "loudnorm hands the encoder 192 kHz; the film is 48"
@@ -612,7 +661,8 @@ def test_the_measuring_pass_is_audio_only_and_prints_its_numbers(tmp_path):
     assert cmd.count("-map") == 1 and cmd[cmd.index("-map") + 1] == "[aout]"
     assert "-c:v" not in cmd and "-c:a" not in cmd
     fc = _graph(cmd)
-    assert "[vout]" not in fc and "concat" not in fc
+    assert "[vout]" not in fc and ":v=1:a=0" not in fc, \
+        "no picture -- the only concat left is the location track's, which is audio"
     assert "[0:a]loudnorm=I=-16" in fc, "the first cue reads the first input"
     assert fc.endswith("loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json[aout]")
 
@@ -801,3 +851,72 @@ def test_ffmpeg_mixes_speech_over_music_and_keeps_the_silence_window(tmp_path):
     assert abs(wide_late - wide_alone) < 1.5, (
         f"a mix wider than the LRA option keeps its envelope: the cue after the window reads "
         f"{wide_late} dB against {wide_alone} dB for the bed alone")
+
+
+@pytest.mark.slow
+def test_the_concatenated_location_track_sounds_like_the_summed_one(tmp_path, monkeypatch):
+    """The equivalence, at the boundary. Three location cues -- two
+    abutting at two different levels, then two seconds of dead air, then a
+    third -- rendered once laid end to end and once summed, and heard
+    window by window.
+
+    Only the tiling tolerance is monkeypatched to force the fallback, so
+    both renders are given the same cues, the same gains, the same fades
+    and the same placement; anything concat did differently to any of the
+    three would move a window or change its level. The final stage is the
+    static gain of a measured render rather than loudnorm's dynamics,
+    which would react to each mix separately and hide exactly that.
+    """
+    if not shutil.which("ffmpeg"):
+        pytest.skip("needs ffmpeg")
+
+    def lavfi(src, path, *extra):
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", src, *extra, str(path)], check=True)
+    vid, low, mid = tmp_path / "v.mp4", tmp_path / "low.wav", tmp_path / "mid.wav"
+    lavfi("testsrc=size=320x240:rate=25:duration=14", vid, "-c:v", "libx264", "-pix_fmt", "yuv420p")
+    # Two pitches, so a cue landing in the wrong window cannot pass for the
+    # one that belongs there by coincidence.
+    lavfi("sine=frequency=220:duration=14", low, "-ac", "2")
+    lavfi("sine=frequency=330:duration=14", mid, "-ac", "2")
+    rows = [{"shot_id": "v1", "t_in": 0.0, "t_out": 7.0, "src_in": 0.0},
+            {"shot_id": "v2", "t_in": 7.0, "t_out": 13.0, "src_in": 7.0}]
+    cues = [_cue(cue_id="lo_0", track="location", t_in=0.0, t_out=4.0, source="low",
+                 src_in=0.0, src_out=4.0, gain_lufs=-18.0),
+            _cue(cue_id="lo_1", track="location", t_in=4.0, t_out=7.0, source="mid",
+                 src_in=4.0, src_out=7.0, gain_lufs=-24.0),
+            _cue(cue_id="lo_2", track="location", t_in=9.0, t_out=13.0, source="low",
+                 src_in=9.0, src_out=13.0, gain_lufs=-18.0)]
+    # A measurement this mix could plausibly have produced: one gain of
+    # -11 dB, far enough under the limiter that nothing is compressed and
+    # the two renders differ in nothing but how the track was assembled.
+    measured = {"input_i": -3.0, "input_lra": 2.0, "input_tp": -0.5, "input_thresh": -13.0}
+    kw = dict(sources={"v1": vid, "v2": vid}, cues=cues, audio_sources={"low": low, "mid": mid},
+              music_sources={}, levels=LEVELS, loudnorm_measured=measured,
+              envelopes={"location": "between(t,0,13)*1", "music": "between(t,0,13)*1"})
+    joined, summed = tmp_path / "joined.mp4", tmp_path / "summed.mp4"
+    cmd = render.build_command(rows, out_path=joined, **kw)
+    assert "concat=n=4:v=0:a=1" in _graph(cmd), "two cues, the dead air between them, and the third"
+    subprocess.run(cmd, check=True)
+
+    # A tolerance no abutting pair can satisfy: every join now reads as an
+    # overlap, so the same cues take the amix path untouched.
+    monkeypatch.setattr(render, "_EDGE_TOL_S", -1.0)
+    cmd = render.build_command(rows, out_path=summed, **kw)
+    assert "[lo0][lo1][lo2]amix=inputs=3:normalize=0" in _graph(cmd)
+    subprocess.run(cmd, check=True)
+
+    windows = {"the first cue": (0.5, 3.5), "the second": (4.5, 6.5),
+               "the dead air": (7.3, 8.7), "the cue after it": (9.5, 12.5)}
+    heard = {}
+    for what, (a, b) in windows.items():
+        heard[what] = x = render.probe_loudness(joined, t_in=a, t_out=b)
+        y = render.probe_loudness(summed, t_in=a, t_out=b)
+        assert abs(x - y) <= 0.5, f"{what} reads {x} dB laid end to end and {y} dB summed"
+
+    # And that the windows are worth comparing: the second cue's row puts
+    # it 6 dB under the other two, and the gap is the silence the timeline
+    # asked for rather than the previous cue running on into it.
+    assert abs((heard["the first cue"] - heard["the second"]) - 6.0) <= 1.0, heard
+    assert abs(heard["the cue after it"] - heard["the first cue"]) <= 1.0, heard
+    assert heard["the dead air"] < -50.0, heard
