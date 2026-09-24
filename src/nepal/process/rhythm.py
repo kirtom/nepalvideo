@@ -88,11 +88,11 @@ def _normal_end(t_in: float, pct: float, table: Mapping[str, Sequence[float]],
     would land at or before ``t_in`` can't produce a slot with any length,
     so both leave the clamped, unsnapped end standing.
 
-    Not ``assemble.snap_to_beat``/``snap_within`` (already imported into this
-    module by way of ``shot_available_s``'s neighbours): ``snap_to_beat`` has
-    no ceiling at all, and ``snap_within``'s own fallback is the ceiling
-    itself, which would stretch every clamped-but-unsnapped slot out to the
-    full available footage instead of to its own band's nominal length."""
+    Not ``assemble.snap_to_beat``/``snap_within``, which sit beside the
+    ``shot_available_s`` this module does import: ``snap_to_beat`` has no
+    ceiling at all, and ``snap_within``'s own fallback is the ceiling itself,
+    which would stretch every clamped-but-unsnapped slot out to the full
+    available footage instead of to its own band's nominal length."""
     lo, hi = target_length(pct, table)
     length = min((lo + hi) / 2.0, avail)
     want_end = t_in + length
@@ -213,8 +213,10 @@ def retime(slots: Sequence[Mapping[str, Any]], *, sections: Sequence[Mapping[str
 
     Order matters here: the nominal length is decided first (band midpoint,
     or one beat inside the burst), the beat snap is applied second, and
-    ``shot_available_s`` is consulted at every step and is the final word --
-    a snap is never allowed to hand a slot more footage than its shot has.
+    ``_slot_avail_s`` -- this slot's own ceiling, which is ``shot_available_s``
+    tightened by ``src_in`` and by a split's recorded overlap -- is consulted
+    at every step and is the final word: a snap is never allowed to hand a
+    slot more footage than its shot has.
     """
     section_pcts = [(s, pct) for s, pct in zip(sections, energy_percentiles(sections))]
     swell = max(sections, key=lambda s: float(s.get("energy") or 0.0), default=None)

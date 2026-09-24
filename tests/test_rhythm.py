@@ -240,11 +240,16 @@ def test_every_slot_locked_passes_through_unchanged():
 
 
 def test_first_unlocked_slot_with_no_t_in_starts_at_the_first_sections_t_in():
+    # The sections are shifted off zero on purpose: an act after the first
+    # does not begin at the film's zero, and against SECTIONS (which starts
+    # at 0.0) this assertion would pass just as well for the last-resort
+    # `t = 0.0`, proving nothing about reading the act's own first cue.
+    sections = [dict(s, t_in=s["t_in"] + 30.0, t_out=s["t_out"] + 30.0) for s in SECTIONS]
     slot = _slot("s1", None)
-    out = retime([slot], sections=SECTIONS, beats=[], downbeats=[],
+    out = retime([slot], sections=sections, beats=[], downbeats=[],
                 table=TABLE, burst_slots=[8, 12], is_act4=False,
                 held_shot_s=[6.0, 10.0], silence_t=None, shots={"s1": _shot()})
-    assert out[0]["t_in"] == SECTIONS[0]["t_in"]              # 0.0
+    assert out[0]["t_in"] == 30.0 == sections[0]["t_in"]
 
 
 def test_locked_slot_with_missing_bounds_raises_a_named_error():
@@ -323,6 +328,28 @@ def test_act4_held_shot_shrinks_but_still_ends_on_the_silence_when_the_shot_is_s
     assert out[-1]["t_out"] == 50.0
     assert out[-1]["t_in"] == 47.0
     assert out[-1]["t_out"] - out[-1]["t_in"] == 3.0
+
+
+def test_act4_held_shot_shrinks_rather_than_overlapping_the_previous_slot():
+    # The shot has room for the full 8s midpoint, which would start the hold
+    # at 42.0 -- but the slot before it runs to 45.0. The hold gives up its
+    # front instead: t_out still lands exactly on the silence, t_in meets the
+    # previous slot's end. Without the shrink the two slots overlap by 3s,
+    # and every act length measured off the timeline is that much wrong.
+    # (A dummy high-energy section elsewhere, never queried, keeps the tested
+    # section at percentile 50 rather than letting it become its own swell.)
+    sections = [{"t_in": 0.0, "t_out": 100.0, "energy": 2.0},
+               {"t_in": 100.0, "t_out": 150.0, "energy": 1.0},
+               {"t_in": 150.0, "t_out": 200.0, "energy": 100.0}]
+    slots = [_slot("s0", 41.0), _slot("s1", None)]
+    shots = {"s0": _shot(end_s=1000.0), "s1": _shot(end_s=1000.0)}
+    out = retime(slots, sections=sections, beats=[], downbeats=[],
+                table=TABLE, burst_slots=[8, 12], is_act4=True,
+                held_shot_s=[6.0, 10.0], silence_t=50.0, shots=shots)
+    assert out[0]["t_out"] == 45.0                           # mid band's 4.0s from 41.0
+    assert out[1]["t_in"] == 45.0                            # not the unshrunk 42.0
+    assert out[1]["t_out"] == 50.0                           # still exactly on the silence
+    assert out[1]["src_out"] == 5.0                          # src_in 0.0 + the hold it got
 
 
 def test_act4_silence_before_every_slot_leaves_slots_untouched():
