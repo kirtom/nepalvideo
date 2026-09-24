@@ -578,6 +578,31 @@ def test_two_locked_slots_never_cut_each_other():
     assert (out[0]["t_out"], out[1]["t_in"]) == (10.0, 10.0) and out[1]["t_out"] == 18.0
 
 
+def test_a_locked_slot_pushed_past_the_act_end_is_named_and_counted(caplog):
+    """The same clamp as above, one act shorter: the later beat follows the
+    earlier one past the act's own end, where the next retime round skips
+    it. A story beat may not leave the film without a word about it."""
+    a = s05_cut._new_slot(kind="video", act=2, shot_id="x", beat_id="b_first", src_in=0.0, locked=1)
+    b = s05_cut._new_slot(kind="video", act=2, shot_id="y", beat_id="b_second", src_in=0.0, locked=1)
+    s05_cut._set_length(a, 10.0, 26.0)
+    s05_cut._set_length(b, 20.0, 27.0)
+    resolved = s05_cut._resolve_overlaps([a, b])
+    assert float(resolved[-1]["t_in"]) == 26.0, "the later beat follows the earlier one, whole"
+
+    kept = rhythm.retime(resolved, sections=[{"t_in": 0.0, "t_out": 26.0, "energy": 0.5}],
+                         beats=[], downbeats=[], table={"low": [5.0, 8.0], "mid": [3.0, 5.0],
+                                                        "high": [1.5, 2.5]},
+                         burst_slots=[0, 0], is_act4=False, held_shot_s=[6.0, 10.0],
+                         silence_t=None, shots={"x": {"media_kind": "video", "start_s": 0.0, "end_s": 100.0},
+                                                "y": {"media_kind": "video", "start_s": 0.0, "end_s": 100.0}})
+    assert [s["shot_id"] for s in kept] == ["x"], "the act ends at 26s and y now starts there"
+
+    with caplog.at_level(logging.WARNING):
+        assert s05_cut._count_dropped_locked(resolved, kept, act=2) == 1
+    assert "b_second" in caplog.text and "act 2" in caplog.text
+    assert s05_cut._count_dropped_locked(resolved, resolved, act=2) == 0
+
+
 def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
     """Part B reads only what the timeline step persisted, so it is run on
     the seeded database after ``build_timeline`` exactly as ``--redo cues``

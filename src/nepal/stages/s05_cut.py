@@ -427,6 +427,28 @@ def _resolve_overlaps(slots: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _count_dropped_locked(before: Sequence[Mapping[str, Any]], after: Sequence[Mapping[str, Any]],
+                          *, act: int) -> int:
+    """Locked slots the re-timing walk lost, named one by one.
+
+    ``_resolve_overlaps`` never drops a locked slot -- two locked ones that
+    overlap (``place_anchors`` clamping a crowded act's anchors onto each
+    other) make the later follow the earlier, whole -- but that move can push
+    it past the act's end, and ``retime`` then skips every slot starting
+    there. A locked slot is a story beat or the bridge crossing, so losing
+    one means a line the film was cut around is simply not in it. That must
+    never be silent: it is named here and counted in the report.
+    """
+    kept = {(s.get("beat_id"), s.get("shot_id")) for s in after}
+    lost = [s for s in before
+            if s.get("locked") and (s.get("beat_id"), s.get("shot_id")) not in kept]
+    for s in lost:
+        log.warning("S06 act %s: locked slot on beat %s (shot %s) at %.1f-%.1fs was pushed past "
+                    "the act's end and dropped", act, s.get("beat_id"), s.get("shot_id"),
+                    float(s["t_in"]), float(s["t_out"]))
+    return len(lost)
+
+
 def _close_holes(slots: Sequence[dict[str, Any]], t0: float) -> list[dict[str, Any]]:
     """Whatever no material could cover is closed, not left black: every
     slot after a hole moves up by the hole's length, locked or not -- an
@@ -995,6 +1017,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     final: dict[int, list[dict[str, Any]]] = {}
     final_spans: dict[int, tuple[float, float]] = {}
     shifts: dict[int, float] = {}
+    n_dropped_locked = 0
     t = t0
     for act in acts:
         entry = next((a for a in mmap["acts"] if int(a["act"]) == act), {})
@@ -1025,11 +1048,14 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         burst = rhythm["burst_slots"] if len(sections) >= 2 else (0, 0)
 
         def retimed(current):
-            return _resolve_overlaps(rhythm_mod.retime(
+            nonlocal n_dropped_locked
+            out = _resolve_overlaps(rhythm_mod.retime(
                 current, sections=sections, beats=grid, downbeats=downs, table=rhythm,
                 burst_slots=burst, is_act4=(act == 4),
                 held_shot_s=cfg.get("assemble.act4_held_shot_s"), silence_t=silence_t,
                 shots=shots_by_id))
+            n_dropped_locked += _count_dropped_locked(current, out, act=act)
+            return out
 
         log.info("S06 act %d rhythm: %d section(s) %.1f-%.1fs, grid %d beat(s) to %.1fs, planned "
                  "%.1f-%.1fs", act, len(sections), sections[0]["t_in"], sections[-1]["t_out"],
@@ -1141,7 +1167,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
             "act_spans": {str(a): [round(x, 3) for x in final_spans[a]] for a in acts},
             "act_planned_s": {str(a): act_len[a] for a in acts},
             "act_material_s": {str(a): round(act_material[a], 3) for a in acts},
-            "n_anchors": n_anchors, "n_pairs": len(pairs),
+            "n_anchors": n_anchors, "n_pairs": len(pairs), "n_dropped_locked": n_dropped_locked,
             "long_take": shots_by_id[long_take_id]["recording_id"] if long_take_id else None,
             "n_scenes": len(scenes), "music_assignment": mode,
             "music_map_recomputed": sorted(moved), "music_map_problems": problems,
