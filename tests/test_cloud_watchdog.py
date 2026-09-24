@@ -85,8 +85,10 @@ def test_the_installer_writes_a_timer_that_survives_the_session():
     sh = watchdog.install_sh(repo="/data/projects/nepalvideo", period_min=5)
     assert "/etc/systemd/system/nepal-idle.service" in sh
     assert "/etc/systemd/system/nepal-idle.timer" in sh
-    # quoted: a path with a space would otherwise be two arguments
-    assert 'WorkingDirectory="/data/projects/nepalvideo"' in sh
+    # ExecStart is parsed into words, so its path is quoted; a quoted
+    # WorkingDirectory is "not absolute" to systemd and the unit refuses to
+    # start -- to the journal, where nothing was looking
+    assert "WorkingDirectory=/data/projects/nepalvideo\n" in sh
     assert 'ExecStart="/data/projects/nepalvideo/.venv/bin/python" ' \
            '-m nepal.cloud.watchdog' in sh
     assert "OnUnitActiveSec=5min" in sh and "OnBootSec=5min" in sh

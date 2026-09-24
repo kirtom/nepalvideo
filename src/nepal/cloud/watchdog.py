@@ -101,7 +101,13 @@ def install_sh(*, repo: str, period_min: int) -> str:
     here -- the watchdog reads them from the config in the checkout at
     every tick, which is also why the service names a WorkingDirectory:
     `Config.load()` finds pipeline.yaml by walking up from where it is
-    run, and a systemd unit starts in /."""
+    run, and a systemd unit starts in /.
+
+    ExecStart is quoted word by word and WorkingDirectory is not, because
+    that is what systemd parses: quoting the directory made the unit
+    refuse to start at all ("path is not absolute"), which the timer
+    reported to the journal and nowhere else.
+    """
     return f"""set -eu
 cat > /etc/systemd/system/{UNIT}.service <<'UNIT_EOF'
 [Unit]
@@ -109,7 +115,7 @@ Description=nepal: stop this box when nobody is using it
 
 [Service]
 Type=oneshot
-WorkingDirectory="{repo}"
+WorkingDirectory={repo}
 ExecStart="{repo}/.venv/bin/python" -m nepal.cloud.watchdog
 UNIT_EOF
 cat > /etc/systemd/system/{UNIT}.timer <<'UNIT_EOF'
