@@ -363,7 +363,11 @@ semantic:
   max_caption_shots: 2500     # THE ONLY UNBOUNDED COST — spec section 8.1
   frames_per_caption: 4
   bedrock_model: null         # set at deploy time
-  clip_model: ViT-L-14
+  # The -quickgelu config, not plain ViT-L-14: the openai weights were trained
+  # with QuickGELU, and open_clip loads them into a plain-GELU tower with only
+  # a warning ("QuickGELU mismatch ... pretrained tag 'openai'"). The first
+  # corpus run (2026-10-07) did exactly that for 81 shots before it was read.
+  clip_model: ViT-L-14-quickgelu
   clip_pretrained: openai
   # CPU is a first-class path: the account this ran on had no GPU quota at all.
   # The claim that once stood here -- "ViT-L embeds this corpus in minutes on
