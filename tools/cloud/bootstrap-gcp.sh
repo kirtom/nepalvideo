@@ -97,9 +97,9 @@ if [ -n "$BUCKET" ]; then
   # ends, and a preempted run never did. So the box pushes on boot; only a
   # fresh box pulls. Pulling here once overwrote twenty minutes of a run.
   if [ -f $ROOT/nepal_work/db/nepal.sqlite ]; then
-    sudo -u $USER_NAME gcloud storage rsync --recursive $ROOT/nepal_work "$BUCKET/work"
+    sudo -u $USER_NAME gcloud storage rsync --recursive --exclude='.*\.sqlite-(wal|shm)$' $ROOT/nepal_work "$BUCKET/work"
   else
-    sudo -u $USER_NAME gcloud storage rsync --recursive "$BUCKET/work" $ROOT/nepal_work
+    sudo -u $USER_NAME gcloud storage rsync --recursive --exclude='.*\.sqlite-(wal|shm)$' "$BUCKET/work" $ROOT/nepal_work
   fi
 fi
 

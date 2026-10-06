@@ -9,7 +9,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-EXCLUDE = r".*\.~lock.*|.*\.DS_Store|.*Thumbs\.db"
+# The WAL and shm beside a sqlite file are never a copy's business: a WAL
+# carries frames for the database it was open against, and sqlite validates
+# them by their own checksums, not against the file they land next to. One
+# pushed from the box at boot (left by a killed job) was pulled next to a
+# newer database on 2026-10-07 and applied: "database disk image is
+# malformed", and a draft cut from the result. Only the checkpointed file
+# travels.
+EXCLUDE = r".*\.~lock.*|.*\.DS_Store|.*Thumbs\.db|.*\.sqlite-(wal|shm)$"
 
 # (kind, local subdir, bucket path); kind says which root the subdir is under
 PUSH = (

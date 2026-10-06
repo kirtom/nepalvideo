@@ -254,16 +254,16 @@ class Remote:
         # ffmpeg, which was rescued through /proc/<pid>/fd. A job on the box
         # owns work/ until it finishes; a concurrent command reads what is
         # there and is told why it got no refresh.
-        pull_work = f"gcloud storage rsync --recursive {self.bucket}/work {self.remote_work}"
-        pull = (f"gcloud storage rsync --recursive {self.bucket}/raw {self.remote_data} && "
+        pull_work = f"gcloud storage rsync --recursive --exclude='{sync.EXCLUDE}' {self.bucket}/work {self.remote_work}"
+        pull = (f"gcloud storage rsync --recursive --exclude='{sync.EXCLUDE}' {self.bucket}/raw {self.remote_data} && "
                 f"{{ {JOB_PROBE}; if [ -n \"$job\" ]; then "
                 f"echo \"skipping work/ pull: job running ($job)\"; else {pull_work}; fi; }}")
         # The same hazard at the other end, in the other direction: half a
         # file pushed over a good one in the bucket. The probe runs again
         # rather than reusing the pull's answer -- this command may have
         # started the job itself, detached.
-        push_all = f"gcloud storage rsync --recursive {self.remote_work} {self.bucket}/work"
-        push_safe = (f"gcloud storage rsync --recursive --exclude='{JOB_PUSH_EXCLUDE}' "
+        push_all = f"gcloud storage rsync --recursive --exclude='{sync.EXCLUDE}' {self.remote_work} {self.bucket}/work"
+        push_safe = (f"gcloud storage rsync --recursive --exclude='{JOB_PUSH_EXCLUDE}|{sync.EXCLUDE}' "
                      f"{self.remote_work} {self.bucket}/work")
         push = (f"{{ {JOB_PROBE}; if [ -n \"$job\" ]; then "
                 f"echo \"pushing work/ without gates/: job running ($job)\"; {push_safe}; "

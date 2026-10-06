@@ -7,7 +7,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 import pytest
 
-from nepal.cloud import remote, spend, watchdog
+from nepal.cloud import sync, remote, spend, watchdog
 from nepal.config import Config
 
 FAKE = r'''#!/usr/bin/env python3
@@ -227,7 +227,8 @@ def test_a_running_job_holds_off_the_work_pull_and_the_gates_push(env):
     # raw/ is read-only media and is pulled either way
     assert "rsync --recursive gs://b/raw /data/projects/nepal_data && " in sh
     # and the push does not publish a half-written draft over the good one
-    assert f"--exclude='{remote.JOB_PUSH_EXCLUDE}' /data/projects/nepal_work gs://b/work" in sh
+    assert (f"--exclude='{remote.JOB_PUSH_EXCLUDE}|{sync.EXCLUDE}' /data/projects/nepal_work "
+            f"gs://b/work") in sh
     assert 'echo "pushing work/ without gates/: job running ($job)"' in sh
 
 

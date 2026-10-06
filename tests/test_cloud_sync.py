@@ -39,3 +39,13 @@ def test_pull_plan_is_what_a_run_can_change(tmp_path):
     assert "gs://b/work/semantic" in srcs and "gs://b/work/gates" in srcs
     assert "gs://b/work/proxies" not in srcs                    # never changes after S03.1
     assert all(str(d).startswith(str(tmp_path / "work")) for _, d in plan)
+
+
+def test_a_sqlite_wal_or_shm_never_travels():
+    # A WAL pulled next to a newer database is applied to it: "database disk
+    # image is malformed" on 2026-10-07. Only the checkpointed file is synced.
+    import re
+    for junk in ("db/nepal.sqlite-wal", "db/nepal.sqlite-shm", "x/.DS_Store"):
+        assert re.fullmatch(sync.EXCLUDE, junk), junk
+    assert not re.fullmatch(sync.EXCLUDE, "db/nepal.sqlite")
+    assert not re.fullmatch(sync.EXCLUDE, "db/nepal.sqlite.pre-cloud-1616")
