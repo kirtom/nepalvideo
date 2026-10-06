@@ -793,11 +793,13 @@ def _talk_spans(slots: Sequence[Mapping[str, Any]],
     """Every video slot whose shot has someone speaking in it, as a span.
 
     The speech beats are the sixteen lines the film is built on; they were
-    the only speech the placement rule knew, so both of Act 3's music
-    windows sat over thirty-eight slots of people talking to the camera
-    with their sound ducked under the bed -- "person on the video speaks
-    something, but I don't hear it" (Gate 3, 2026-10-07). Talk carries
-    information whether or not it is a beat."""
+    the only speech the mix knew, so both of Act 3's music windows sat over
+    thirty-eight slots of people talking to the camera with their sound
+    ducked under the bed -- "person on the video speaks something, but I
+    don't hear it" (Gate 3, 2026-10-07). Over these spans the location
+    sound plays full and the music ducks under it, as it does under a
+    beat. Not a blocking span: blocking them left the film with no music
+    at all (0 windows of 25 scenes), which is not what the ruling meant."""
     out: list[tuple[float, float]] = []
     for s in slots:
         shot = shots_by_id.get(s.get("shot_id") or "")
@@ -830,7 +832,7 @@ def _info_spans(cfg: Config, slots: Sequence[Mapping[str, Any]], beats: Sequence
                                      closing_card_s=float(cfg.get("assemble.closing_card_s")),
                                      cast_tags={})
     return scenes_mod.blocking_spans(
-        speech_spans=list(cues_mod.speech_spans(slots)) + _talk_spans(slots, shots_by_id or {}),
+        speech_spans=cues_mod.speech_spans(slots),
         overlay_spans=[(float(o["t_in"]), float(o["t_out"])) for o in overlays],
         natural_spans=[(float(w["t_in"]), float(w["t_out"])) for w in natural],
         cold_open_end_s=cold_open_end_s,
@@ -1457,6 +1459,7 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
                 lufs_full=float(cfg.get("render.location_full_lufs")),
                 lufs_under_speech=float(cfg.get("render.location_under_speech_lufs")),
                 speech_spans=cues_mod.speech_spans(slots), windows=natural,
+                talk_spans=_talk_spans(slots, shots_by_id),
                 silence=mmap.get("silence_window"),
                 music_spans=cues_mod.music_spans(mmap),
                 fade_s=float(cfg.get("render.cue_fade_s")),
@@ -1598,7 +1601,9 @@ def _envelopes(cfg: Config, conn, rows: Sequence[Mapping[str, Any]],
         silence = cues_mod.map_on_film_time(json.loads(map_path.read_text()), spans).get("silence_window")
     return {
         "music": mix_mod.volume_expr(mix_mod.music_envelope(
-            total_s=total, speech_spans=[(float(c["t_in"]), float(c["t_out"])) for c in cues if c["track"] == "speech"],
+            total_s=total,
+            speech_spans=[(float(c["t_in"]), float(c["t_out"])) for c in cues if c["track"] == "speech"]
+            + _talk_spans(rows, {r["shot_id"]: dict(r) for r in conn.execute("SELECT shot_id, has_speech FROM shots")}),
             windows=natural, silence=silence,
             under_speech_db=float(cfg.get("render.duck_lufs_speech")) - float(cfg.get("render.music_lufs")),
             window_fade_s=float(cfg.get("render.window_fade_s")), cue_fade_s=float(cfg.get("render.cue_fade_s")))),

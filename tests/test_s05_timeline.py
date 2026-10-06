@@ -893,7 +893,7 @@ def test_an_excluded_title_fragment_strikes_the_track_whatever_its_case():
     assert not s5._excluded("Send Me on My Way", ["", "  "])
 
 
-def test_a_video_slot_with_someone_speaking_blocks_music_like_a_beat_does():
+def test_a_video_slot_with_someone_speaking_is_a_talk_span_the_music_ducks_under():
     # Gate 3, 2026-10-07: both Act 3 windows sat over people talking to camera.
     from nepal.stages import s05_cut as s5
     slots = [{"slot_index": 0, "kind": "video", "shot_id": "a", "t_in": 0.0, "t_out": 3.0},

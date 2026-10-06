@@ -141,7 +141,8 @@ def location_cues(slots: Sequence[Mapping[str, Any]], *, lufs_under_music: float
                   lufs_under_speech: float, speech_spans: Sequence[tuple[float, float]],
                   windows: Sequence[Mapping[str, Any]], silence: Mapping[str, Any] | None,
                   music_spans: Sequence[tuple[float, float]],
-                  fade_s: float, window_fade_s: float) -> list[dict[str, Any]]:
+                  fade_s: float, window_fade_s: float,
+                  talk_spans: Sequence[tuple[float, float]] = ()) -> list[dict[str, Any]]:
     """One cue per slot, in ``slot_index`` order, each slot carrying its
     shot's ``recording_id``. A video slot plays its own recording at its
     own span (a split slot: its primary); a photo or card holds the act's
@@ -191,6 +192,11 @@ def location_cues(slots: Sequence[Mapping[str, Any]], *, lufs_under_music: float
             gain = lufs_full
         elif _inside(mid, speech_spans):
             gain = lufs_under_speech
+        elif _inside(mid, talk_spans):
+            # Someone is speaking in this very shot: its own sound is the
+            # voice, and ducking it under the bed is the Gate 3 "person
+            # speaks, I don't hear it". The music ducks instead.
+            gain = lufs_full
         elif _inside(mid, music_spans):
             gain = lufs_under_music
         else:

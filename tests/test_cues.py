@@ -573,3 +573,18 @@ def test_a_window_that_ran_to_the_acts_end_follows_the_act_that_grew():
     grown = cues.map_on_film_time(mmap, {3: (0.0, 140.0)})
     assert grown["acts"][0]["music_windows"] == [{"t_start": 10.0, "t_end": 40.0},
                                                  {"t_start": 60.0, "t_end": 140.0}]
+
+
+def test_a_talking_shot_inside_a_music_window_keeps_its_own_sound_full():
+    # Gate 3, 2026-10-07: the person on screen speaks and is not heard.
+    slots = [{"slot_index": 0, "kind": "video", "recording_id": "r", "act": 3,
+              "t_in": 0.0, "t_out": 4.0, "src_in": 0.0, "src_out": 4.0},
+             {"slot_index": 1, "kind": "video", "recording_id": "r", "act": 3,
+              "t_in": 4.0, "t_out": 8.0, "src_in": 4.0, "src_out": 8.0}]
+    kw = dict(lufs_under_music=-28.0, lufs_full=-14.0, lufs_under_speech=-22.0,
+              speech_spans=[], windows=[], silence=None, music_spans=[(0.0, 8.0)],
+              fade_s=0.1, window_fade_s=1.0)
+    plain = cues.location_cues(slots, **kw)
+    assert [c["gain_lufs"] for c in plain] == [-28.0, -28.0]
+    talk = cues.location_cues(slots, talk_spans=[(4.0, 8.0)], **kw)
+    assert [c["gain_lufs"] for c in talk] == [-28.0, -14.0]

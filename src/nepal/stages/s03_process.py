@@ -1371,6 +1371,9 @@ def run(cfg: Config, *, force: bool = False,
     report["skipped_stale"] = freshness.warn_if_stale(
         log, conn, STAGE, force=force, rerun_hint="nepal s03 --force")
 
+    # ``--redo proxies`` walks every recording and rebuilds the proxies whose
+    # shape is not their source's (see ``same_shape``); only ``--force``
+    # rebuilds them all, which is the three-and-a-half-hour run.
     steps = [("proxies", lambda: build_proxies(cfg, conn, force=force)),
              ("shots", lambda: detect_shots(
                  cfg, conn, redo_all=force or "shots" in (redo or ()))),

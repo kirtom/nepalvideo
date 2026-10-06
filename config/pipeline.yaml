@@ -399,10 +399,12 @@ assemble:
   # reach when the moment itself has too little footage, in hours. Unbounded,
   # a thin hour was filled from any day of the trek: the 2026-10-07 draft had
   # 22 backward jumps of 15 to 145 hours inside an act, read by the operator
-  # as "videos from completely different parts of our trip" (Gate 3). Half a
-  # day keeps the fill on the same day and night; past that the gap stays
-  # short.
-  max_time_drift_h: 12
+  # as "videos from completely different parts of our trip" (Gate 3). Two
+  # days: the jumps that read as another part of the trip were 53 to 145
+  # hours; at 12 the sparse acts collapsed (act 5 to 27 slots, the film to
+  # 29 min) because their gaps span days of no footage. Past the bound the
+  # gap stays short.
+  max_time_drift_h: 48
   max_shots_per_place_per_act: 3
   subject_shot_every_s: 40
   levity_min_per_act: 1        # acts 2-5, hard constraint
