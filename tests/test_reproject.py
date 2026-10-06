@@ -552,3 +552,12 @@ def test_display_size_applies_the_rotation_flag_and_same_shape_catches_a_stretch
     assert reproject.same_shape((720, 540), (960, 720))
     assert reproject.same_shape((404, 540), (720, 960))
     assert reproject.same_shape(None, (720, 960))               # unknown is not a verdict
+
+
+def test_a_remuxed_proxy_keeps_its_rotation_flag_and_still_matches_its_source():
+    import json
+    from nepal.process import reproject
+    flagged = {"width": 848, "height": 480,
+               "probe_json": json.dumps({"streams": [{"codec_type": "video", "tags": {"rotate": "90"}}]})}
+    assert reproject.display_size(flagged) == (480, 848)
+    assert reproject.same_shape(reproject.display_size(flagged), (480, 848))

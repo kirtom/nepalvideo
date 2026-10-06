@@ -1351,12 +1351,16 @@ def place_shots(cfg: Config, conn) -> dict[str, Any]:
 
 
 def _proxy_wh(path) -> tuple[int, int] | None:
+    """The proxy's picture as shown. Through ``display_size`` like the
+    source, because a passthrough proxy is a remux that keeps the phone's
+    rotation flag, and reading its coded width and height would call every
+    one of those wrong on every run."""
     try:
         info = proc.probe_summary(path)
     except Exception as exc:                       # unreadable is "rebuild it"
         log.debug("S03.1 %s: %s", path, exc)
         return (0, 0)
-    return (int(info.get("width") or 0), int(info.get("height") or 0))
+    return reproject.display_size(info) or (0, 0)
 
 
 def run(cfg: Config, *, force: bool = False,
