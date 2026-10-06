@@ -85,7 +85,9 @@ film:
 acts:
   # Act 1 halved at Gate 3 (2026-10-07): "cut the length of the preparation
   # part ... two times smaller". Was 83 / 45 / 180; the draft ran it at 104 s.
-  - {act: 1, name: Planning,          target_s:  42, min_s:  25, max_s:   90}
+  # The planner fills an act to its max when the material allows, so the
+  # max is the number that halves it: at 90 the next cut ran it at 91 s.
+  - {act: 1, name: Planning,          target_s:  42, min_s:  25, max_s:   52}
   - {act: 2, name: Approach,          target_s: 287, min_s: 150, max_s:  700}
   # 2026-09-24: the operator has material to spare in the climb and would
   # rather the film spent it there than anywhere else; 1150 -> 1400.
