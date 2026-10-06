@@ -109,6 +109,16 @@ Each of these cost a wrong diagnosis or a wasted multi-hour run.
   `'shortlisted'`, so once a cut existed the stage skipped exactly the shots
   the film was made of. Ask for the complement of the verdict you mean
   (`<> 'rejected'`), which cannot drift as statuses are added.
+- **A sqlite WAL is not part of the database file; it is a patch for one
+  state of it.** The box's boot push carried a `nepal.sqlite-wal` a killed
+  job had left, a later pull put it beside a newer database, and sqlite
+  applied it: "database disk image is malformed", and a draft cut from the
+  result. Every rsync excludes `*.sqlite-wal` / `*.sqlite-shm`; if a run
+  reports a malformed database, check the bucket for those two files
+  before anything else.
+- **cv2.imread returns None for HEIC and says nothing.** Half the stills are
+  iPhone HEIC. Decode photographs with PIL (pillow-heif registers on
+  `import nepal.process.stills`), as S03 and S04 do.
 - **A slot must never claim more footage than its shot has.** The act's
   duration range says what a shot deserves; the shot says what it can give.
   ffmpeg simply stops at the end of the source, so the timeline silently
