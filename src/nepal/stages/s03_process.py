@@ -139,8 +139,14 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
                                     view_size=(proxy_w, proxy_h),
                                     passthrough=passthrough)
         if not force and unit in done and p.proxy_path.exists():
-            skipped += 1
-            continue
+            # Done means the file on disk is the proxy this graph makes. A
+            # flat proxy from before the aspect fix is the same name over a
+            # stretched picture; it is rebuilt, not skipped.
+            if mode != "flat" or reproject.same_shape(_proxy_wh(p.proxy_path),
+                                                       reproject.display_size(first)):
+                skipped += 1
+                continue
+            log.info("S03.1 %s: proxy has the wrong aspect for its source, rebuilding", rid)
 
         # Say what was chosen before the work starts. Three rounds of "it is
         # stuck on this file" were spent guessing which source and which filter
@@ -1342,6 +1348,15 @@ def place_shots(cfg: Config, conn) -> dict[str, Any]:
             "n_dayed": dayed, "n_track_points": len(track),
             "by_kind": {k: {"n": v[0], "positioned": v[1], "dayed": v[2]}
                         for k, v in by_kind.items()}}
+
+
+def _proxy_wh(path) -> tuple[int, int] | None:
+    try:
+        info = proc.probe_summary(path)
+    except Exception as exc:                       # unreadable is "rebuild it"
+        log.debug("S03.1 %s: %s", path, exc)
+        return (0, 0)
+    return (int(info.get("width") or 0), int(info.get("height") or 0))
 
 
 def run(cfg: Config, *, force: bool = False,

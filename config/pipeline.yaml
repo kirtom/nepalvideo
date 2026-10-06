@@ -83,7 +83,9 @@ film:
 # longer only the descent: "walked down" is not an ending, and the return
 # through Kathmandu, the Delhi layover and the flight home is a better one.
 acts:
-  - {act: 1, name: Planning,          target_s:  83, min_s:  45, max_s:  180}
+  # Act 1 halved at Gate 3 (2026-10-07): "cut the length of the preparation
+  # part ... two times smaller". Was 83 / 45 / 180; the draft ran it at 104 s.
+  - {act: 1, name: Planning,          target_s:  42, min_s:  25, max_s:   90}
   - {act: 2, name: Approach,          target_s: 287, min_s: 150, max_s:  700}
   # 2026-09-24: the operator has material to spare in the climb and would
   # rather the film spent it there than anywhere else; 1150 -> 1400.
@@ -393,6 +395,14 @@ score:
 
 assemble:
   mmr_lambda: 0.30
+  # How far from a gap's own moment the fill (and a phone-share swap) may
+  # reach when the moment itself has too little footage, in hours. Unbounded,
+  # a thin hour was filled from any day of the trek: the 2026-10-07 draft had
+  # 22 backward jumps of 15 to 145 hours inside an act, read by the operator
+  # as "videos from completely different parts of our trip" (Gate 3). Half a
+  # day keeps the fill on the same day and night; past that the gap stays
+  # short.
+  max_time_drift_h: 12
   max_shots_per_place_per_act: 3
   subject_shot_every_s: 40
   levity_min_per_act: 1        # acts 2-5, hard constraint
@@ -455,6 +465,13 @@ assemble:
 
 render:
   draft: {width: 960, height: 540, crf: 23}
+  # A 360 recording is shown through a rectilinear window this wide, cut from
+  # its equirectangular proxy at the shot's yaw. The whole sphere letterboxed
+  # into 16:9 was the "disproportional" picture with "vertical lines" of Gate 3
+  # (2026-10-07): a 2:1 panorama squashed, with both lens seams in view. The
+  # vertical field follows from the frame's shape. 100 is what S03's framing
+  # stills are sampled at.
+  view_h_fov: 100
   # How far SHORT of the timeline the rendered draft may fall before the stage
   # calls it a failed render. ffmpeg breaks out of its transcode loop on a
   # mid-graph error, writes a valid trailer and exits 0, so its exit code
@@ -555,6 +572,10 @@ music:
   # or stem like credits_track -- it simply has nothing to prefer, so a later
   # operator can name tracks here without any code coming back.
   preferred_tracks: []
+  # Struck from the film by the operator at Gate 3 (2026-10-07): "Lovely Day"
+  # ("too silly and incorrect"), "The Long Song" (Doctor Who). Matched as a
+  # case-insensitive fragment of the title; the assignment never sees them.
+  excluded_tracks: ["Lovely Day", "The Long Song"]
   # Zero while the list is empty, so nothing is silently tilted by a bonus
   # nobody asked for. Was 0.05, sized against the real corpus: the median
   # best-vs-third gap is 0.056, and 0.15 outweighed the whole available gain

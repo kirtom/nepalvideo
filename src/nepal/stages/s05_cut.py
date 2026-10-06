@@ -177,10 +177,22 @@ def _act_spans(bounds: Sequence[Mapping[str, Any]]) -> dict[int, tuple[float | N
     return out
 
 
-def _tracks(conn) -> list[music_mod.Track]:
-    """The music library as S02.7 stored it, with sections and the beat grid."""
+def _excluded(title: str, excluded: Sequence[str]) -> bool:
+    return any(str(x).lower() in title.lower() for x in excluded if str(x).strip())
+
+
+def _tracks(conn, excluded: Sequence[str] = ()) -> list[music_mod.Track]:
+    """The music library as S02.7 stored it, with sections and the beat grid.
+
+    ``excluded`` are title fragments (case-insensitive) the operator has
+    struck from the film; a track matching one is not in the library the
+    assignment sees, which is the only place a track can be refused that
+    every later choice respects."""
     by_id: dict[str, music_mod.Track] = {}
     for r in conn.execute("SELECT * FROM music_tracks"):
+        if _excluded(r["title"] or "", excluded):
+            log.info("S06 music: %s is excluded by music.excluded_tracks", r["title"])
+            continue
         by_id[r["track_id"]] = music_mod.Track(
             track_id=r["track_id"], s3_key=r["s3_key"] or "", title=r["title"] or "",
             duration_s=float(r["duration_s"] or 0.0), tempo_bpm=float(r["tempo_bpm"] or 0.0),
@@ -295,7 +307,7 @@ def _utc_distance(row: Mapping[str, Any], lo: float | None, hi: float | None) ->
 
 
 def _gap_candidates(free: Sequence[Mapping[str, Any]], lo: float | None, hi: float | None, *,
-                    budget: int) -> tuple[list[Mapping[str, Any]], int]:
+                    budget: int, max_drift_s: float | None = None) -> tuple[list[Mapping[str, Any]], int]:
     """The rows a gap may draw on, and how many of them fell inside its UTC
     window: those inside, widened to the nearest by distance until the list
     holds twice the budget (so ``mmr_select`` still has a choice) whenever
@@ -309,7 +321,12 @@ def _gap_candidates(free: Sequence[Mapping[str, Any]], lo: float | None, hi: flo
     inside = [r for r in free if _utc_distance(r, lo, hi) == 0.0]
     if len(inside) >= budget:
         return inside, len(inside)
-    return sorted(free, key=lambda r: _utc_distance(r, lo, hi))[:2 * budget], len(inside)
+    # ``max_drift_s`` bounds the widening: unbounded, a thin hour drew from
+    # any day, and the 2026-10-07 draft had 22 jumps of 15 to 145 hours
+    # inside an act -- "videos from completely different parts of our trip"
+    # (Gate 3). Past the bound the gap stays short, which is the truth.
+    near = [r for r in free if max_drift_s is None or _utc_distance(r, lo, hi) <= max_drift_s]
+    return sorted(near, key=lambda r: _utc_distance(r, lo, hi))[:2 * budget], len(inside)
 
 
 def _select(cands: Sequence[Mapping[str, Any]], *, budget: int, similarity, lam: float,
@@ -376,7 +393,8 @@ def _fill_gap(cfg: Config, free: Sequence[Mapping[str, Any]], *, act: int, t0: f
     refill = budget is not None
     budget = asm.slot_budget(t1 - t0, rng) if budget is None else budget
     lay_range = (float(cfg.get("assemble.expected_slot_s")),) * 2 if refill else rng
-    cands, n_inside = _gap_candidates(free, lo, hi, budget=budget)
+    cands, n_inside = _gap_candidates(free, lo, hi, budget=budget,
+                                      max_drift_s=float(cfg.get("assemble.max_time_drift_h")) * 3600)
     place_cap = int(cfg.get("assemble.max_shots_per_place_per_act"))
     run_cap = int(cfg.get("assemble.max_consecutive_recording"))
     chosen, n_relaxed = _select(cands, budget=budget, similarity=similarity,
@@ -770,9 +788,28 @@ def _scene_id_by_time(slot: Mapping[str, Any], scenes: Sequence[scenes_mod.Scene
     return nearest.scene_id if nearest else None
 
 
+def _talk_spans(slots: Sequence[Mapping[str, Any]],
+                shots_by_id: Mapping[str, Mapping[str, Any]]) -> list[tuple[float, float]]:
+    """Every video slot whose shot has someone speaking in it, as a span.
+
+    The speech beats are the sixteen lines the film is built on; they were
+    the only speech the placement rule knew, so both of Act 3's music
+    windows sat over thirty-eight slots of people talking to the camera
+    with their sound ducked under the bed -- "person on the video speaks
+    something, but I don't hear it" (Gate 3, 2026-10-07). Talk carries
+    information whether or not it is a beat."""
+    out: list[tuple[float, float]] = []
+    for s in slots:
+        shot = shots_by_id.get(s.get("shot_id") or "")
+        if s.get("kind") == "video" and shot and shot.get("has_speech"):
+            out.append((float(s["t_in"]), float(s["t_out"])))
+    return out
+
+
 def _info_spans(cfg: Config, slots: Sequence[Mapping[str, Any]], beats: Sequence[Mapping[str, Any]],
                 natural: Sequence[Mapping[str, Any]], *,
-                cold_open_end_s: float) -> list[tuple[float, float]]:
+                cold_open_end_s: float,
+                shots_by_id: Mapping[str, Mapping[str, Any]] | None = None) -> list[tuple[float, float]]:
     """Where something other than music already carries the information
     (Gate 3), read off the same slots the cues step will read: the speech
     beats' runs, the chat and closing cards, the natural-sound windows, and
@@ -793,7 +830,7 @@ def _info_spans(cfg: Config, slots: Sequence[Mapping[str, Any]], beats: Sequence
                                      closing_card_s=float(cfg.get("assemble.closing_card_s")),
                                      cast_tags={})
     return scenes_mod.blocking_spans(
-        speech_spans=cues_mod.speech_spans(slots),
+        speech_spans=list(cues_mod.speech_spans(slots)) + _talk_spans(slots, shots_by_id or {}),
         overlay_spans=[(float(o["t_in"]), float(o["t_out"])) for o in overlays],
         natural_spans=[(float(w["t_in"]), float(w["t_out"])) for w in natural],
         cold_open_end_s=cold_open_end_s,
@@ -887,7 +924,7 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
 def _rebalance_phones(slots: list[dict[str, Any]], act_rows: Sequence[Mapping[str, Any]],
                       shots_by_id: Mapping[str, Mapping[str, Any]], *, act: int,
                       act0: Sequence[Mapping[str, Any]], excluded: set, min_share: float,
-                      run_cap: int,
+                      run_cap: int, max_drift_s: float | None = None,
                       phones: Sequence[str] = ("phone_keller", "phone_kulikov")) -> list[tuple[str, str]]:
     """Each phone's share of the act, after the refill rounds; the swaps
     made, old shot for new.
@@ -982,8 +1019,14 @@ def _rebalance_phones(slots: list[dict[str, Any]], act_rows: Sequence[Mapping[st
             if not fits:
                 continue
             here = anchors_mod._epoch(shots_by_id[s["shot_id"]].get("start_utc"))
-            best = min(fits, key=lambda r: abs((anchors_mod._epoch(r.get("start_utc")) or math.inf) - here)
-                       if here is not None else 0.0)
+            drift = (lambda r: abs((anchors_mod._epoch(r.get("start_utc")) or math.inf) - here)
+                     if here is not None else 0.0)
+            # A swap keeps the slot's moment: the replacement is the nearest
+            # in time, and never further than the fill itself may drift.
+            fits = [r for r in fits if max_drift_s is None or drift(r) <= max_drift_s]
+            if not fits:
+                continue
+            best = min(fits, key=drift)
             swaps.append((s["shot_id"], best["shot_id"]))
             s["shot_id"], s["src_in"] = best["shot_id"], float(best.get("start_s") or 0.0)
             s["src_out"] = round(s["src_in"] + length, 3)
@@ -1073,7 +1116,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
                     "skipped: %s", len(orphaned), orphaned)
     act_span_utc = _act_spans(json.loads(db.get_decision(conn, "act_boundaries") or "[]"))
     prof = effort.profile(place_mod.load_track(conn))
-    tracks = _tracks(conn)
+    tracks = _tracks(conn, excluded=list(cfg.get("music.excluded_tracks") or []))
 
     # -- how long, and how long each act ------------------------------------
     material_s = sum(min(asm.shot_available_s(r), 20.0) for r in rows)
@@ -1148,7 +1191,8 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     attrs = _attrs_for(prof, rows, beats=beats)
     all_slots = list(act0) + [s for a in acts for s in planned[a]]
     planned_natural, _ = _natural_windows(cfg, prof, all_slots, shots_by_id)
-    info_spans = _info_spans(cfg, all_slots, beats, planned_natural, cold_open_end_s=t0)
+    info_spans = _info_spans(cfg, all_slots, beats, planned_natural, cold_open_end_s=t0,
+                             shots_by_id=shots_by_id)
     scenes, mmap, mode, problems = _scenes_and_map(
         cfg, all_slots, attrs, tracks, act_spans=planned_spans, act0_span=(0.0, t0),
         total_s=total_s, info_spans=info_spans)
@@ -1249,6 +1293,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
                 break
             slots = _resolve_overlaps(slots + added)
         _rebalance_phones(slots, act_rows, shots_by_id, act=act, act0=act0, excluded=excluded,
+                          max_drift_s=float(cfg.get("assemble.max_time_drift_h")) * 3600,
                           min_share=float(cfg.get("assemble.source_share_min")),
                           run_cap=int(cfg.get("assemble.max_consecutive_recording")))
         # What the material could not fill is closed, and the cuts re-snapped
@@ -1279,7 +1324,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
             total_s=total_s,
             info_spans=_info_spans(cfg, ordered, beats,
                                    _natural_windows(cfg, prof, ordered, shots_by_id)[0],
-                                   cold_open_end_s=t0))
+                                   cold_open_end_s=t0, shots_by_id=shots_by_id))
         for sc in scenes:
             for i in sc.slot_indices:
                 ordered[i]["scene_id"] = sc.scene_id
@@ -1391,7 +1436,8 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
     cold_open_end = max((float(x["t_out"]) for x in slots if int(x["act"]) == 0), default=0.0)
     mmap = cues_mod.snap_windows_to_cuts(
         cues_mod.map_on_film_time(json.loads(map_path.read_text()), act_spans), slots,
-        blocked=_info_spans(cfg, slots, beats, natural, cold_open_end_s=cold_open_end),
+        blocked=_info_spans(cfg, slots, beats, natural, cold_open_end_s=cold_open_end,
+                            shots_by_id=shots_by_id),
         min_window_s=float(cfg.get("music.placement.min_window_s")))
     # The act the table has can be up to music.min_scene_s longer than the one
     # the map was planned on, and that difference all lands on the act's last
@@ -1611,8 +1657,8 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
     draft, not for a normalisation.
     """
     rows = [dict(r) for r in conn.execute(
-        "SELECT t.*, s.recording_id, s.media_kind, s.start_utc, s.start_s, a.s3_key, "
-        "COALESCE(rc.source, a.source) AS source_name FROM timeline t "
+        "SELECT t.*, s.recording_id, s.media_kind, s.start_utc, s.start_s, s.chosen_yaw, "
+        "a.s3_key, rc.is_360, COALESCE(rc.source, a.source) AS source_name FROM timeline t "
         "LEFT JOIN shots s ON s.shot_id = t.shot_id "
         "LEFT JOIN assets a ON a.asset_id = s.asset_id "
         "LEFT JOIN recordings rc ON rc.recording_id = s.recording_id ORDER BY t.slot_index")]
@@ -1638,7 +1684,8 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
     d = cfg.get("render.draft")
     kw: dict[str, Any] = dict(
         sources=sources, out_path=out, width=int(d["width"]), height=int(d["height"]),
-        crf=int(d["crf"]), fps=int(cfg.get("render.fps", render_mod.DRAFT_FPS)))
+        crf=int(d["crf"]), fps=int(cfg.get("render.fps", render_mod.DRAFT_FPS)),
+        view_h_fov=float(cfg.get("render.view_h_fov", render_mod.VIEW_H_FOV)))
     measured = None
     if cues:
         kw.update(cues=cues, audio_sources=audio_sources, music_sources=music_sources,

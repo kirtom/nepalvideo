@@ -1064,3 +1064,15 @@ def test_the_edge_tolerance_is_the_one_cues_uses(tmp_path):
     thing stopping it drifting is this assertion."""
     from nepal.process import cues
     assert render.EDGE_TOL_S == cues._EDGE_TOL_S
+
+
+def test_a_360_slot_is_viewed_through_a_window_not_shown_as_the_whole_sphere():
+    # Gate 3, 2026-10-07: the 2:1 equirectangular proxy letterboxed into 16:9
+    # was a squashed panorama with both lens seams in view.
+    row = {"shot_id": "camera_x#0000", "t_in": 0.0, "t_out": 2.0, "kind": "video",
+           "is_360": 1, "chosen_yaw": 30.0}
+    chain = render.segment_filters(row, 0, overlay=False)
+    assert "v360=input=e:output=rectilinear:yaw=30:h_fov=100:v_fov=67.67:w=960:h=540" in chain
+    assert chain.index("v360=") < chain.index("scale=")
+    flat = render.segment_filters(dict(row, is_360=0), 0, overlay=False)
+    assert "v360" not in flat

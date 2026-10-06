@@ -883,3 +883,37 @@ def test_the_cues_step_reads_the_windows_the_timeline_step_just_wrote(tmp_path):
     on_disk = json.loads(cfg.work("reports", "s05_cut.json").read_text())
     assert on_disk["cues"]["natural_windows"] == rep["timeline"]["natural_windows"] and on_disk["finished_utc"]
     assert not list(cfg.work_root.joinpath("reports").glob("*.tmp"))
+
+
+def test_an_excluded_title_fragment_strikes_the_track_whatever_its_case():
+    from nepal.stages import s05_cut as s5
+    assert s5._excluded("Lovely Day", ["lovely day"])
+    assert s5._excluded('The Long Song - From "Doctor Who" Series 7', ["The Long Song"])
+    assert not s5._excluded("Send Me on My Way", ["Lovely Day", "The Long Song"])
+    assert not s5._excluded("Send Me on My Way", ["", "  "])
+
+
+def test_a_video_slot_with_someone_speaking_blocks_music_like_a_beat_does():
+    # Gate 3, 2026-10-07: both Act 3 windows sat over people talking to camera.
+    from nepal.stages import s05_cut as s5
+    slots = [{"slot_index": 0, "kind": "video", "shot_id": "a", "t_in": 0.0, "t_out": 3.0},
+             {"slot_index": 1, "kind": "video", "shot_id": "b", "t_in": 3.0, "t_out": 6.0},
+             {"slot_index": 2, "kind": "photo", "shot_id": "c", "t_in": 6.0, "t_out": 9.0},
+             {"slot_index": 3, "kind": "video", "shot_id": "zz", "t_in": 9.0, "t_out": 12.0}]
+    shots = {"a": {"has_speech": 1}, "b": {"has_speech": 0}, "c": {"has_speech": 1}}
+    assert s5._talk_spans(slots, shots) == [(0.0, 3.0)]
+
+
+def test_a_thin_gap_does_not_reach_past_the_drift_bound_for_its_fill():
+    # Gate 3, 2026-10-07: 22 backward jumps of 15-145 h inside an act.
+    from nepal.stages import s05_cut as s5
+    lo, hi = 1_000_000.0, 1_003_600.0
+    rows = [{"shot_id": "in", "start_utc": "2001-09-09T02:00:00+00:00"}]
+    def at(name, epoch):
+        from datetime import datetime, timezone
+        return {"shot_id": name, "start_utc": datetime.fromtimestamp(epoch, timezone.utc).isoformat()}
+    rows = [at("inside", lo + 60), at("near", hi + 3 * 3600), at("far", hi + 40 * 3600)]
+    cands, n_inside = s5._gap_candidates(rows, lo, hi, budget=3, max_drift_s=12 * 3600)
+    assert n_inside == 1 and [r["shot_id"] for r in cands] == ["inside", "near"]
+    cands, _ = s5._gap_candidates(rows, lo, hi, budget=3, max_drift_s=None)
+    assert [r["shot_id"] for r in cands] == ["inside", "near", "far"]

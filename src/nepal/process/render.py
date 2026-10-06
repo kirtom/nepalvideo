@@ -28,6 +28,10 @@ from typing import Any, Mapping, Sequence
 log = logging.getLogger(__name__)
 
 DRAFT_W, DRAFT_H, DRAFT_CRF, DRAFT_FPS = 960, 540, 23, 30
+# The horizontal field of the window cut from a 360 recording's sphere; the
+# stage passes ``render.view_h_fov``, this is the fallback for a caller with
+# no config. 100 degrees is what S03's framing stills are sampled at.
+VIEW_H_FOV = 100.0
 
 # How far SHORT of the timeline the rendered draft may fall before
 # ``run_render`` calls it a failed render. Only short: every leg is resampled
@@ -117,7 +121,8 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
                     width: int = DRAFT_W, height: int = DRAFT_H,
                     overlay: bool = True, fps: int = DRAFT_FPS,
                     secondary_index: int | None = None,
-                    card_text: str | None = None) -> str:
+                    card_text: str | None = None,
+                    view_h_fov: float = VIEW_H_FOV) -> str:
     """The per-slot video chain -- what sits between ``[index:v]`` and the
     leg's output pad: reset timestamps, scale, label.
 
@@ -170,6 +175,21 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
             # fps, the phones 30 or 60, and a concat of mixed rates produced
             # a 120 fps draft.
             chain += [f"fps={fps}"]
+        if row.get("is_360"):
+            # A 360 recording's proxy is the whole sphere as a 2:1
+            # equirectangular panorama. Letterboxed into 16:9 it reads as a
+            # squashed picture with the two lenses' seams standing as vertical
+            # lines through it -- Gate 3, 2026-10-07. The film shows one
+            # view of the sphere: a rectilinear window at the shot's yaw (its
+            # chosen framing, or straight ahead), with the vertical field
+            # derived from the horizontal so the window is the frame's own
+            # shape and nothing is stretched to fit. A 100 degree window
+            # centred on a lens never contains a seam.
+            yaw = float(row.get("yaw") if row.get("yaw") is not None
+                        else (row.get("chosen_yaw") or 0.0))
+            v_fov = math.degrees(2 * math.atan(math.tan(math.radians(view_h_fov / 2)) * height / width))
+            chain += [f"v360=input=e:output=rectilinear:yaw={yaw:g}:h_fov={view_h_fov:g}"
+                      f":v_fov={v_fov:.2f}:w={width}:h={height}"]
         chain += ["setpts=PTS-STARTPTS",
                  f"scale={width}:{height}:force_original_aspect_ratio=decrease"
                  f":force_divisible_by=2",
@@ -434,6 +454,7 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
                   envelopes: Mapping[str, str] | None = None,
                   width: int = DRAFT_W, height: int = DRAFT_H,
                   crf: int = DRAFT_CRF, fps: int = DRAFT_FPS, overlay: bool = True,
+                  view_h_fov: float = VIEW_H_FOV,
                   levels: Mapping[str, float] | None = None,
                   script_path: Path | None = None,
                   loudnorm_measured: Mapping[str, float] | None = None,
@@ -567,7 +588,7 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
     if not measure_only:
         labels: list[str] = []
         for k, (r, i, si) in enumerate(legs):
-            parts.append(f"[{i}:v]{segment_filters(r, i, width=width, height=height, overlay=overlay, fps=fps, secondary_index=si)}[v{k}]")
+            parts.append(f"[{i}:v]{segment_filters(r, i, width=width, height=height, overlay=overlay, fps=fps, secondary_index=si, view_h_fov=view_h_fov)}[v{k}]")
             labels.append(f"[v{k}]")
         parts.append("".join(labels) + f"concat=n={len(legs)}:v=1:a=0[vout]")
     if cues:

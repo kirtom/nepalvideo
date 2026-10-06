@@ -19,6 +19,7 @@ Verified by running the corrected graph: five outputs from one pass.
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -183,6 +184,47 @@ def build_lens_pair_graph(fov_deg: float, *,
             f"[l][r]hstack=inputs=2[df];"
             f"[df]v360=input=dfisheye:output=e:"
             f"ih_fov={fov_deg:g}:iv_fov={fov_deg:g},scale={pw}:{ph}[eqout]"), ["eqout"]
+
+
+def display_size(asset) -> tuple[int, int] | None:
+    """The source picture as a viewer sees it: width x height with the
+    rotation flag applied. A phone writes 960x720 behind ``rotate=90`` and
+    every decoder shows 720x960; the proxy is built from the decoded frame,
+    so this is the shape the proxy must have."""
+    w, h = int(asset.get("width") or 0), int(asset.get("height") or 0)
+    if not (w and h):
+        return None
+    rot = 0
+    try:
+        data = json.loads(asset.get("probe_json") or "{}")
+        for st in data.get("streams", []):
+            if st.get("codec_type") != "video":
+                continue
+            for sd in st.get("side_data_list") or []:
+                if "rotation" in sd:
+                    rot = int(float(sd["rotation"]))
+            rot = rot or int(float((st.get("tags") or {}).get("rotate") or 0))
+            break
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return (h, w) if abs(rot) % 180 == 90 else (w, h)
+
+
+def same_shape(proxy_wh: tuple[int, int] | None, source_wh: tuple[int, int] | None,
+               *, tol: float = 0.03) -> bool:
+    """Whether a proxy has its source's aspect. A proxy that does not is not
+    done, whatever the stage units say: 367 of 453 flat proxies were built
+    by the first flat graph, which set width and height independently, and
+    they stayed on disk through the fix because their units read done --
+    the Gate 3 "disproportional" picture of 2026-10-07. Unknown on either
+    side is accepted: a missing dimension is a probe problem, not a shape."""
+    if not proxy_wh or not source_wh:
+        return True
+    pw, ph = proxy_wh
+    sw, sh = source_wh
+    if not (pw and ph and sw and sh):
+        return True
+    return abs(pw / ph - sw / sh) <= tol
 
 
 def build_flat_graph_clamped(*, proxy_size: tuple[int, int] = (960, 540)

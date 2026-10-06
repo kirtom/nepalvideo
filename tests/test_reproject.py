@@ -535,3 +535,20 @@ def test_ffmpeg_keeps_the_shape_of_real_footage(tmp_path, w, h):
         f"{w}x{h} came back as {got_w}x{got_h}: aspect ratio changed")
     if w <= 960 and h <= 540:
         assert (got_w, got_h) == (w, h), "small input must pass through untouched"
+
+
+def test_display_size_applies_the_rotation_flag_and_same_shape_catches_a_stretched_proxy():
+    # 367 of 453 flat proxies were built with width and height set
+    # independently and survived the graph fix because their units read done.
+    import json
+    from nepal.process import reproject
+    rotated = {"width": 960, "height": 720,
+               "probe_json": json.dumps({"streams": [{"codec_type": "video",
+                                                      "side_data_list": [{"rotation": -90}]}]})}
+    assert reproject.display_size(rotated) == (720, 960)
+    assert reproject.display_size({"width": 960, "height": 720, "probe_json": None}) == (960, 720)
+    assert reproject.display_size({"width": 0, "height": 720}) is None
+    assert not reproject.same_shape((872, 540), (960, 720))     # the stretched one on disk
+    assert reproject.same_shape((720, 540), (960, 720))
+    assert reproject.same_shape((404, 540), (720, 960))
+    assert reproject.same_shape(None, (720, 960))               # unknown is not a verdict
