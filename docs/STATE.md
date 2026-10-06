@@ -1,6 +1,6 @@
 # Where the project stands
 
-**As of 2026-09-16.** Keep this current: it is what a new session reads to
+**As of 2026-10-07.** Keep this current: it is what a new session reads to
 avoid re-deriving a fortnight of findings. When a stage lands or a number
 changes, edit this file in the same commit.
 
@@ -397,6 +397,33 @@ the film or a longest run of 743 s still wants a cap on consecutive scenes
 per track, and — from Part A — the 2.5-second pace, more stills in Acts 1–2,
 Act 3 past its `max_s`. Open: DEM drop for the bridge, six acts in step 7,
 overlays rendered in step 6.
+
+## Film v2 — step 4, part C: the draft with the placement rules (2026-10-07)
+
+**The draft on disk is current.** `nepal cut --redo cues,draft` on the box,
+8 min 15 s end to end: `work/gates/gate3/draft.mp4`, **396.2 MB, 2151.4 s
+(35.9 min), 512 slots, none skipped**, three audio tracks, 16 speech / 510
+location / 7 music cues, 8 overlays, one natural-sound window. Its length
+check passed on the first run: +5.489 s over the 2145.944 s timeline, the
+frame rounding `5fba8fc` measured, not loss. The previous draft at this
+name was the 138.7 s truncation; `draft.rescued.mp4` next to it is the
+2026-09-24 one-track draft.
+
+**Music as the 2026-09-25 rules placed it:** two windows, both in Act 3
+(483–760 s and 892–1054 s), 438.6 s in all, 20.4 % of the film. Acts 1, 2,
+4 and 5 carry no music — including the Act 5 callback window rule (9) asks
+for. Whether that is the rules working (no movement scene long enough
+outside Act 3) or a gap is the first thing to read off the Gate 3 page
+before the operator listens.
+
+**Operations.** `remote down` wrote no ledger entry for this session's
+0.29 h (~0.09 USD, GCE start 22:18:33 Z, stop 22:35:41 Z); `remote status`
+still reads 37.71 of 45. Unbooked, and to be booked by hand. A stale
+`draft.part.mp4` had reached the bucket from the 2026-09-24 kill and came
+back on `pull`; removed from both ends.
+
+**Gate 3 is the operator's watch and listen**, on this draft: everything
+listed under Part B, plus the music placement above.
 
 ## The last full run
 
