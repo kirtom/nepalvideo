@@ -194,10 +194,10 @@ def test_run_wraps_the_command_with_sync_and_branch_reset(env):
     ssh = [c for c in calls(tmp) if c[:2] == ["compute", "ssh"]]
     cmd = [a for a in ssh[-1] if a.startswith("--command=")][0]
     assert "reset -q --hard origin/br" in cmd
-    assert "gcloud storage rsync --recursive gs://b/work /data/projects/nepal_work" in cmd
-    assert "gcloud storage rsync --recursive gs://b/raw /data/projects/nepal_data" in cmd
+    assert f"gcloud storage rsync --recursive --exclude='{sync.EXCLUDE}' gs://b/work /data/projects/nepal_work" in cmd
+    assert f"gcloud storage rsync --recursive --exclude='{sync.EXCLUDE}' gs://b/raw /data/projects/nepal_data" in cmd
     assert ".venv/bin/nepal s03 --redo place" in cmd
-    assert "gcloud storage rsync --recursive /data/projects/nepal_work gs://b/work" in cmd
+    assert f"gcloud storage rsync --recursive --exclude='{sync.EXCLUDE}' /data/projects/nepal_work gs://b/work" in cmd
     assert cmd.index("nepal s03") < cmd.index("/data/projects/nepal_work gs://b/work")
     # the watchdog's stamp, before the command and after it: a detached job
     # leaves the second one hours behind, which is why the watchdog reads
@@ -225,7 +225,7 @@ def test_a_running_job_holds_off_the_work_pull_and_the_gates_push(env):
     assert remote.JOB_PROBE in sh
     assert 'echo "skipping work/ pull: job running ($job)"' in sh
     # raw/ is read-only media and is pulled either way
-    assert "rsync --recursive gs://b/raw /data/projects/nepal_data && " in sh
+    assert f"rsync --recursive --exclude='{sync.EXCLUDE}' gs://b/raw /data/projects/nepal_data && " in sh
     # and the push does not publish a half-written draft over the good one
     assert (f"--exclude='{remote.JOB_PUSH_EXCLUDE}|{sync.EXCLUDE}' /data/projects/nepal_work "
             f"gs://b/work") in sh
