@@ -26,6 +26,28 @@ log = logging.getLogger(__name__)
 STAGE = "S04"
 
 
+def read_photo(path) -> np.ndarray | None:
+    """A photograph as the BGR array ``embed.encode`` takes, or None.
+
+    PIL rather than ``cv2.imread``: 357 of the corpus's 713 surviving
+    stills are iPhone HEIC, which OpenCV cannot open and pillow-heif can.
+    The first corpus run (2026-10-07) lost every one of them to "no
+    readable frame" while the JPEGs went through. Importing ``stills``
+    registers the HEIF opener, the same way S03 decodes them. BGR because
+    the proxies' frames arrive that way and ``encode`` converts once.
+    """
+    from PIL import Image
+    from nepal.process import stills  # noqa: F401  -- registers the HEIF opener
+    try:
+        with Image.open(path) as im:
+            # CLIP sees 224 px; let the JPEG decoder scale in the DCT.
+            im.draft("RGB", (448, 448))
+            return np.ascontiguousarray(np.asarray(im.convert("RGB"))[:, :, ::-1])
+    except Exception as exc:                        # unreadable is a count, not a crash
+        log.debug("S04.1 %s: %s", path, exc)
+        return None
+
+
 def surviving_shots(conn) -> list[dict[str, Any]]:
     """Every shot the gate did not reject, with what it takes to find a frame.
 
@@ -139,13 +161,12 @@ def embed_shots(cfg: Config, conn, *, force: bool = False) -> dict[str, Any]:
             saved[0] = len(ids)
             log.info("S04.1 checkpoint: %d of %d embedded", len(ids), len(todo))
 
-    import cv2
     for r in todo:
         bar.step(note=r["shot_id"][-24:])
         try:
             if r["media_kind"] == "photo":
                 path = cfg.data_root / str(r["s3_key"]).replace("raw/", "")
-                frame = cv2.imread(str(path))
+                frame = read_photo(path)
                 frames = [frame] if frame is not None else []
             else:
                 px = proxies / f"{r['recording_id']}_eq.mp4"

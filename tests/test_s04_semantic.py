@@ -156,3 +156,14 @@ def test_the_checkpoint_is_atomic_so_a_kill_cannot_truncate_it(tmp_path,
     sem = tmp_path / "semantic"
     assert not list(sem.glob("*.tmp")), "temporaries must not survive"
     np.load(sem / "clip.npy")            # raises if truncated
+
+
+def test_a_photo_is_read_as_bgr_and_an_unreadable_one_as_none(tmp_path):
+    # The corpus's HEIC stills went through cv2.imread and came back None;
+    # the reader is PIL now, and encode() expects the BGR the proxies give.
+    from PIL import Image
+    p = tmp_path / "red.png"
+    Image.new("RGB", (8, 8), (255, 0, 0)).save(p)
+    arr = s04.read_photo(p)
+    assert arr.shape == (8, 8, 3) and list(arr[0, 0]) == [0, 0, 255]
+    assert s04.read_photo(tmp_path / "missing.heic") is None
