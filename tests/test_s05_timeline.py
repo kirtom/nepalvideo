@@ -355,8 +355,8 @@ def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path)
             continue
         shot = shots[s["shot_id"]]
         length = s["t_out"] - s["t_in"]
-        if shot["recording_id"] == "rb":      # the take runs past its first shot by design
-            assert length <= recs["rb"]["duration_s"] - s["src_in"] + 1e-6
+        if shot["recording_id"] == "rb" or s.get("take"):   # the long take and a merged take run past their first shot by design
+            assert length <= recs[shot["recording_id"]]["duration_s"] - s["src_in"] + 1e-6, s
         else:
             assert length <= shot["end_s"] - s["src_in"] + 1e-6, s
         assert math.isclose(s["src_out"] - s["src_in"], length, abs_tol=1e-3), s
@@ -488,6 +488,10 @@ def test_a_starved_phone_gets_its_share_of_the_act_not_of_each_gap(tmp_path):
     s05_cut.build_timeline(cfg, conn)
     by_source = {r["source"]: r["n"] for r in conn.execute(
         "SELECT rc.source AS source, COUNT(*) AS n FROM timeline t JOIN shots s ON s.shot_id = t.shot_id "
+        "JOIN recordings rc ON rc.recording_id = s.recording_id WHERE t.act = 5 AND t.kind = 'video' GROUP BY 1")}
+    # by seconds, not slots: a take (a merged run) is one slot and many seconds
+    by_source = {r["source"]: r["s"] for r in conn.execute(
+        "SELECT rc.source AS source, SUM(t.t_out - t.t_in) AS s FROM timeline t JOIN shots s ON s.shot_id = t.shot_id "
         "JOIN recordings rc ON rc.recording_id = s.recording_id WHERE t.act = 5 AND t.kind = 'video' GROUP BY 1")}
     phone = sum(by_source.get(p, 0) for p in PHONES)
     assert phone and by_source.get("phone_kulikov", 0) / phone >= float(cfg.get("assemble.source_share_min")), by_source

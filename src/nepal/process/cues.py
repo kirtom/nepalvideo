@@ -524,7 +524,17 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
                 if duration and src_in + (t1 - t0) > float(duration) + _EDGE_TOL_S:
                     room = float(duration) - src_in
                     if room < loop_min_piece_s:
-                        break                       # nothing worth starting; the window ends here
+                        # Nothing worth starting. The cue before it runs to
+                        # the window's end if its own file allows, else the
+                        # window closes on it with the window fade.
+                        if out and out[-1]["t_out"] >= t0 - _EDGE_TOL_S:
+                            last = out[-1]
+                            prev_room = (track_s or {}).get(last["source"])
+                            end = w1 if not prev_room else min(w1, float(last["t_in"]) + float(prev_room) - float(last["src_in"]))
+                            last["t_out"] = round(end, 3)
+                            last["src_out"] = round(float(last["src_in"]) + (end - float(last["t_in"])), 3)
+                            last["fade_out_s"] = window_fade_s if ends_music else xfade_s
+                        break
                     cuts = [(t0, t0 + room, src_in)]
                     ran_out = True
                 prev_track, prev_src_out = seg["track_id"], src_in + (cuts[0][1] - cuts[0][0])
