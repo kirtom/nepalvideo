@@ -518,7 +518,7 @@ def test_act_five_keeps_its_last_window_not_its_longest():
                     activity=x.activity) for x in scenes]
     assert [x.scene_ids for x in music_windows(
         other, blocked=blocked, min_window_s=60, max_windows_per_act=1,
-        prefer_late_acts=[5])] == [(1, 2)]
+        prefer_late_acts=[5])] == [(0, 1, 2)]
 
 
 def test_an_arrival_is_never_read_across_an_act_boundary():
