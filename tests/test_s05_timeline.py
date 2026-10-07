@@ -836,7 +836,17 @@ def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
             lo = q1 if lo < q1 <= hi else lo
             hi = q0 if lo <= q0 < hi else hi
             assert math.isclose(min(c["t_in"] for c in inside), lo, abs_tol=1e-3), (a["act"], w)
-            assert math.isclose(max(c["t_out"] for c in inside), hi, abs_tol=1e-3), (a["act"], w)
+            # ... to the window's end, or to the end of the file the track
+            # has: a track plays on and never loops (operator, 2026-10-07), so
+            # a window longer than its file ends where the file does, with
+            # the window fade
+            last = max(inside, key=lambda c: c["t_out"])
+            dur = {r["track_id"]: float(r["duration_s"] or 0.0)
+                   for r in conn.execute("SELECT track_id, duration_s FROM music_tracks")}
+            ran_out = math.isclose(last["src_out"], dur.get(last["source"], -1.0), abs_tol=1e-3)
+            assert ran_out or math.isclose(last["t_out"], hi, abs_tol=1e-3), (a["act"], w)
+            if ran_out:
+                assert last["fade_out_s"] == cfg.get("render.window_fade_s")
     # and nowhere else: not in the silence, and not outside a window
     assert not any(c["t_in"] < q1 and c["t_out"] > q0 for c in by_track["music"])
     assert all(any(lo - 1e-3 <= c["t_in"] < hi + 1e-3 for lo, hi in music_spans)
