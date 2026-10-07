@@ -443,6 +443,14 @@ assemble:
                                  # would swap, locked or not -- a run on screen is a run,
                                  # whatever placed the clips either side of it.
   source_alternation_after: 3    # soft: prefer another source after this many in a row
+  # A photograph taken within this many seconds of a video already on screen
+  # in the act is not placed, nor a video beside such a photograph: "you show
+  # the video, then you pause, then you show the photo, which is the end of
+  # the video" (operator, Gate 3, 2026-10-07). The corpus has 308 iPhone Live
+  # Photos whose still and 3 s movie both survive as shots, and the two
+  # phones often shot the same scene seconds apart. One of them carries the
+  # moment.
+  same_moment_s: 90
   source_share_min: 0.25         # of an act's phone slots, to each phone that has material
   long_take_s: [60, 90]
   long_take_keywords: ["мост", "мосту", "моста", "bridge", "suspension"]

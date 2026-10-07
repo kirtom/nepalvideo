@@ -329,9 +329,29 @@ def _gap_candidates(free: Sequence[Mapping[str, Any]], lo: float | None, hi: flo
     return sorted(near, key=lambda r: _utc_distance(r, lo, hi))[:2 * budget], len(inside)
 
 
+def _same_moment(c: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], *,
+                 within_s: float) -> bool:
+    """Whether ``c`` is a photograph of a moment a video in ``rows`` already
+    shows, or the reverse. "You show the video, then you pause, then you
+    show the photo, which is the end of the video" (Gate 3, 2026-10-07):
+    the fill lays a gap chronologically, and a still taken seconds after a
+    clip -- or an iPhone Live Photo, whose still and 3 s movie are both
+    shots -- lands right behind it. One of the two carries the moment."""
+    tc = anchors_mod._epoch(c.get("start_utc"))
+    if tc is None or within_s <= 0:
+        return False
+    for r in rows:
+        if _is_photo(r) == _is_photo(c):
+            continue
+        tr = anchors_mod._epoch(r.get("start_utc"))
+        if tr is not None and abs(tr - tc) <= within_s:
+            return True
+    return False
+
+
 def _select(cands: Sequence[Mapping[str, Any]], *, budget: int, similarity, lam: float,
             existing: Sequence[Mapping[str, Any]], prev_photo: bool, place_cap: int,
-            run_cap: int, after: int) -> tuple[list[Mapping[str, Any]], int]:
+            run_cap: int, after: int, same_moment_s: float = 0.0) -> tuple[list[Mapping[str, Any]], int]:
     """MMR under the hard constraints, in selection order, and how many of
     the picks needed the place cap lifted. The cap holds for a first pass;
     when that leaves the budget short, a second pass takes the rest from
@@ -339,6 +359,8 @@ def _select(cands: Sequence[Mapping[str, Any]], *, budget: int, similarity, lam:
     force, both still counting what the first pass chose."""
     def admissible(c, chosen, *, place):
         if _is_photo(c) and (_is_photo(chosen[-1]) if chosen else prev_photo):
+            return False
+        if _same_moment(c, list(existing) + chosen, within_s=same_moment_s):
             return False
         return ((not place or asm.place_count_ok(c, list(existing) + chosen, limit=place_cap))
                 and asm.recording_run_ok(c, chosen, limit=run_cap))
@@ -400,7 +422,8 @@ def _fill_gap(cfg: Config, free: Sequence[Mapping[str, Any]], *, act: int, t0: f
     chosen, n_relaxed = _select(cands, budget=budget, similarity=similarity,
                                 lam=float(cfg.get("assemble.mmr_lambda")), existing=existing,
                                 prev_photo=prev_photo, place_cap=place_cap, run_cap=run_cap,
-                                after=int(cfg.get("assemble.source_alternation_after")))
+                                after=int(cfg.get("assemble.source_alternation_after")),
+                                same_moment_s=float(cfg.get("assemble.same_moment_s")))
     taken = {c["shot_id"] for c in chosen}
     if log.isEnabledFor(logging.DEBUG):
         left = [c for c in cands if c["shot_id"] not in taken]

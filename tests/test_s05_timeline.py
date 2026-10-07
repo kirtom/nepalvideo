@@ -917,3 +917,17 @@ def test_a_thin_gap_does_not_reach_past_the_drift_bound_for_its_fill():
     assert n_inside == 1 and [r["shot_id"] for r in cands] == ["inside", "near"]
     cands, _ = s5._gap_candidates(rows, lo, hi, budget=3, max_drift_s=None)
     assert [r["shot_id"] for r in cands] == ["inside", "near", "far"]
+
+
+def test_a_photo_of_a_moment_a_video_already_shows_is_the_same_moment():
+    # Gate 3, 2026-10-07: the video, a pause, then the photo of its last frame.
+    from nepal.stages import s05_cut as s5
+    video = {"shot_id": "v", "media_kind": "video", "start_utc": "2024-04-18T06:52:00+00:00"}
+    still = {"shot_id": "p", "media_kind": "photo", "start_utc": "2024-04-18T06:52:20+00:00"}
+    later = {"shot_id": "q", "media_kind": "photo", "start_utc": "2024-04-18T07:10:00+00:00"}
+    other_video = {"shot_id": "w", "media_kind": "video", "start_utc": "2024-04-18T06:52:30+00:00"}
+    assert s5._same_moment(still, [video], within_s=90)
+    assert s5._same_moment(video, [still], within_s=90)
+    assert not s5._same_moment(later, [video], within_s=90)
+    assert not s5._same_moment(other_video, [video], within_s=90)   # two videos are the run rule's business
+    assert not s5._same_moment(still, [video], within_s=0)
