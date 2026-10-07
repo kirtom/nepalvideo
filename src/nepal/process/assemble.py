@@ -123,6 +123,23 @@ def make_similarity(embeddings: Mapping[str, np.ndarray], *,
     return sim
 
 
+def make_duplicate(embeddings: Mapping[str, np.ndarray], *, threshold: float
+                   ) -> Callable[[Mapping[str, Any], Mapping[str, Any]], bool]:
+    """Whether two shots from different recordings show the same thing: CLIP
+    cosine at or above ``threshold``, and only when both are embedded -- the
+    fallback similarity knows place and time, not the picture, and would
+    call every shot of a lunch a duplicate. The operator's "video duplicate
+    of the bridge crossing" at 5:51 (Gate 3, 2026-10-07) was the other
+    phone's take three minutes later; a time rule wide enough to catch it
+    emptied a third of the film, this does not."""
+    def dup(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+        if threshold <= 0 or (a.get("recording_id") and a.get("recording_id") == b.get("recording_id")):
+            return False
+        ea, eb = embeddings.get(a.get("shot_id")), embeddings.get(b.get("shot_id"))
+        return ea is not None and eb is not None and float(np.dot(ea, eb)) >= threshold
+    return dup
+
+
 def mmr_select(candidates: Sequence[Mapping[str, Any]], *, budget: int,
                similarity: Callable[[Mapping[str, Any], Mapping[str, Any]], float],
                lam: float = MMR_LAMBDA,

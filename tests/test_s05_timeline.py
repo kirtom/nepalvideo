@@ -951,3 +951,16 @@ def test_a_photograph_is_held_no_longer_than_the_cap():
         assert asm.shot_available_s({"media_kind": "photo"}) == 2.5
     finally:
         asm.PHOTO_HOLD_MAX_S = old
+
+
+def test_two_recordings_showing_the_same_thing_are_a_duplicate_only_when_both_are_embedded():
+    import numpy as np
+    from nepal.process import assemble as asm
+    e = {"a": np.array([1.0, 0.0]), "b": np.array([0.96, 0.28]), "c": np.array([0.0, 1.0])}
+    dup = asm.make_duplicate(e, threshold=0.9)
+    A = {"shot_id": "a", "recording_id": "r1"}
+    assert dup(A, {"shot_id": "b", "recording_id": "r2"})            # the other phone's take
+    assert not dup(A, {"shot_id": "b", "recording_id": "r1"})        # same recording: the run rule's
+    assert not dup(A, {"shot_id": "c", "recording_id": "r2"})
+    assert not dup(A, {"shot_id": "zz", "recording_id": "r2"})       # unembedded: no verdict
+    assert not asm.make_duplicate(e, threshold=0)(A, {"shot_id": "b", "recording_id": "r2"})

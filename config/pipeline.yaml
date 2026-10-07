@@ -450,12 +450,17 @@ assemble:
   source_alternation_after: 3    # soft: prefer another source after this many in a row
   # A shot within this many seconds of another recording already on screen
   # in the act is not placed: "you show the video, then you pause, then you
-  # show the photo, which is the end of the video", and "a video duplicate of
-  # the bridge crossing" from the other phone three minutes later (operator,
-  # Gate 3, 2026-10-07). The corpus has 308 iPhone Live Photos whose still
-  # and 3 s movie both survive as shots, and the two phones shot the same
-  # scenes minutes apart. One recording carries a moment.
-  same_moment_s: 180
+  # show the photo, which is the end of the video" (operator, Gate 3,
+  # 2026-10-07). The corpus has 308 iPhone Live Photos whose still and 3 s
+  # movie both survive as shots. One recording carries a moment; the
+  # other phone's take of the same thing minutes later is the similarity
+  # rule's job below.
+  same_moment_s: 90
+  # Two shots from different recordings whose CLIP embeddings agree at or
+  # above this are the same thing twice -- the other phone's take of the
+  # bridge crossing (5:51, Gate 3 2026-10-07). A time rule wide enough to
+  # catch it (180 s) emptied a third of the film; this one asks the picture.
+  duplicate_similarity: 0.90
   source_share_min: 0.25         # of an act's phone slots, to each phone that has material
   long_take_s: [60, 90]
   long_take_keywords: ["мост", "мосту", "моста", "bridge", "suspension"]

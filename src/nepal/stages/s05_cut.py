@@ -353,7 +353,8 @@ def _same_moment(c: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], *,
 
 def _select(cands: Sequence[Mapping[str, Any]], *, budget: int, similarity, lam: float,
             existing: Sequence[Mapping[str, Any]], prev_photo: bool, place_cap: int,
-            run_cap: int, after: int, same_moment_s: float = 0.0) -> tuple[list[Mapping[str, Any]], int]:
+            run_cap: int, after: int, same_moment_s: float = 0.0,
+            duplicate=None) -> tuple[list[Mapping[str, Any]], int]:
     """MMR under the hard constraints, in selection order, and how many of
     the picks needed the place cap lifted. The cap holds for a first pass;
     when that leaves the budget short, a second pass takes the rest from
@@ -363,6 +364,8 @@ def _select(cands: Sequence[Mapping[str, Any]], *, budget: int, similarity, lam:
         if _is_photo(c) and (_is_photo(chosen[-1]) if chosen else prev_photo):
             return False
         if _same_moment(c, list(existing) + chosen, within_s=same_moment_s):
+            return False
+        if duplicate is not None and any(duplicate(c, r) for r in list(existing) + chosen):
             return False
         return ((not place or asm.place_count_ok(c, list(existing) + chosen, limit=place_cap))
                 and asm.recording_run_ok(c, chosen, limit=run_cap))
@@ -394,7 +397,7 @@ def _refill_budget(gap_s: float, expected_slot_s: float) -> int:
 
 
 def _fill_gap(cfg: Config, free: Sequence[Mapping[str, Any]], *, act: int, t0: float, t1: float,
-              lo: float | None, hi: float | None, similarity,
+              lo: float | None, hi: float | None, similarity, duplicate=None,
               existing: Sequence[Mapping[str, Any]], prev_photo: bool,
               next_photo: bool, budget: int | None = None) -> list[dict[str, Any]]:
     """The next-best shots for one gap of the act, laid from its start with
@@ -425,7 +428,8 @@ def _fill_gap(cfg: Config, free: Sequence[Mapping[str, Any]], *, act: int, t0: f
                                 lam=float(cfg.get("assemble.mmr_lambda")), existing=existing,
                                 prev_photo=prev_photo, place_cap=place_cap, run_cap=run_cap,
                                 after=int(cfg.get("assemble.source_alternation_after")),
-                                same_moment_s=float(cfg.get("assemble.same_moment_s")))
+                                same_moment_s=float(cfg.get("assemble.same_moment_s")),
+                                duplicate=duplicate)
     taken = {c["shot_id"] for c in chosen}
     if log.isEnabledFor(logging.DEBUG):
         left = [c for c in cands if c["shot_id"] not in taken]
@@ -610,7 +614,7 @@ def _fixed_anchor(kind: str, slot: Mapping[str, Any], shot: Mapping[str, Any]) -
 
 def plan_act(cfg: Config, act: int, act_rows: Sequence[Mapping[str, Any]],
              beats: Sequence[Mapping[str, Any]], *, t0: float, act_len_s: float,
-             act_span_utc: tuple[float | None, float | None], similarity,
+             act_span_utc: tuple[float | None, float | None], similarity, duplicate=None,
              photo_budget: Sequence[str], long_take: Mapping[str, Any] | None,
              pairs: Sequence[Mapping[str, Any]], used: set[str], prev_photo: bool = False
              ) -> tuple[list[dict[str, Any]], list[anchors_mod.Anchor]]:
@@ -656,7 +660,7 @@ def plan_act(cfg: Config, act: int, act_rows: Sequence[Mapping[str, Any]],
         if a.t_in - prev_end > rng[0]:
             filled = _fill_gap(cfg, [r for r in pool if r["shot_id"] not in used], act=act,
                                t0=prev_end, t1=a.t_in, lo=prev_utc, hi=anchors_mod._epoch(a.utc),
-                               similarity=similarity,
+                               similarity=similarity, duplicate=duplicate,
                                existing=[shots_by_id[s["shot_id"]] for s in slots if s.get("shot_id")],
                                prev_photo=prev_photo, next_photo=False)
             slots.extend(filled)
@@ -671,7 +675,7 @@ def plan_act(cfg: Config, act: int, act_rows: Sequence[Mapping[str, Any]],
     if t0 + act_len_s - prev_end > rng[0]:
         filled = _fill_gap(cfg, [r for r in pool if r["shot_id"] not in used], act=act,
                            t0=prev_end, t1=t0 + act_len_s, lo=prev_utc, hi=act_span_utc[1],
-                           similarity=similarity,
+                           similarity=similarity, duplicate=duplicate,
                            existing=[shots_by_id[s["shot_id"]] for s in slots if s.get("shot_id")],
                            prev_photo=prev_photo, next_photo=False)
         slots.extend(filled)
@@ -1174,7 +1178,9 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     act_len = music_mod.allocate_act_durations(specs, total_s - t0)
     log.info("S06 act allocation over %.1fs: %s", total_s - t0, act_len)
     acts = sorted(act_len)
-    similarity = asm.make_similarity(_load_embeddings(cfg),
+    embeddings = _load_embeddings(cfg)
+    duplicate = asm.make_duplicate(embeddings, threshold=float(cfg.get("assemble.duplicate_similarity")))
+    similarity = asm.make_similarity(embeddings,
                                      fallback_weights=cfg.get("assemble.similarity_fallback"))
 
     # -- the fixed pictures: pairs and the bridge ---------------------------
@@ -1210,7 +1216,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         act_rows = [r for r in rows if r.get("act") == act]
         slots, anchors = plan_act(
             cfg, act, act_rows, beats, t0=t, act_len_s=act_len[act],
-            act_span_utc=act_span_utc.get(act, (None, None)), similarity=similarity,
+            act_span_utc=act_span_utc.get(act, (None, None)), similarity=similarity, duplicate=duplicate,
             photo_budget=photo_plan[act].chosen,
             long_take=long_take if long_take and long_take.get("act") == act else None,
             pairs=[p for p in pairs if p.get("act") == act], used=used,
@@ -1316,7 +1322,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
                         and r.get("recording_id") not in excluded
                         and (not _is_photo(r) or r["shot_id"] in allowed_photos)]
                 filled = _fill_gap(cfg, free, act=act, t0=g0, t1=g1, lo=lo, hi=hi,
-                                   similarity=similarity,
+                                   similarity=similarity, duplicate=duplicate,
                                    existing=existing + [shots_by_id[s["shot_id"]] for s in added],
                                    prev_photo=bool(prev and prev.get("kind") == "photo"),
                                    next_photo=bool(nxt and nxt.get("kind") == "photo"),
