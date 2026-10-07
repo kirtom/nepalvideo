@@ -1363,6 +1363,11 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         # retime left shorter than assemble.min_slot_s is dropped, and the
         # act closes up over it.
         min_slot = float(cfg.get("assemble.min_slot_s"))
+        short = [x for x in slots if not x.get("locked") and float(x["t_out"]) - float(x["t_in"]) < min_slot - 1e-6]
+        if short:
+            log.info("S06 act %d: %d slot(s) under %.1fs dropped (%.1fs of picture): %s", act, len(short),
+                     min_slot, sum(float(x["t_out"]) - float(x["t_in"]) for x in short),
+                     [round(float(x["t_out"]) - float(x["t_in"]), 2) for x in short[:12]])
         slots = [x for x in slots if x.get("locked") or float(x["t_out"]) - float(x["t_in"]) >= min_slot - 1e-6]
         slots = _chronological(slots, shots_by_id, act_t0)
         final[act] = slots
