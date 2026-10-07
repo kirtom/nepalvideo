@@ -53,6 +53,8 @@ CARD_COLOR = "black"
 # Read at a glance while the card holds the frame, unlike the small per-shot
 # debug label -- the two are different text at different distances.
 CARD_FONTSIZE = 36
+CREDIT_FONTSIZE = 26        # legible at 540p (spec S09.1)
+CREDIT_LINE_H = 38
 TITLE_FONTSIZE = 56
 SUBTITLE_FONTSIZE = 30
 # How a frame that is not 16:9 fills the 16:9 picture: "blur" puts a blurred,
@@ -262,6 +264,22 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
                       f":force_divisible_by=2",
                       f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black",
                       "setsar=1"]
+    lines = credit_lines(row)
+    if lines and has_drawtext():
+        # The credits: a block of lines centred over the outtake, each on
+        # its own half-black box so the moving picture never eats a word.
+        top = f"(h-{len(lines) * CREDIT_LINE_H})/2"
+        for j, line in enumerate(lines):
+            chain.append(f"drawtext=text='{escape_drawtext(line)}':x=(w-text_w)/2:y={top}+{j * CREDIT_LINE_H}"
+                         f":fontsize={CREDIT_FONTSIZE}:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=8")
+    if lines:
+        try:
+            fade = float(json.loads(row.get("motion") or "{}").get("fade_out_s") or 0.0)
+        except (TypeError, ValueError):
+            fade = 0.0
+        if fade > 0:
+            dur = float(row["t_out"]) - float(row["t_in"])
+            chain.append(f"fade=t=out:st={max(0.0, dur - fade):.3f}:d={fade:g}")
     if overlay and has_drawtext():
         label = escape_drawtext(f"{row['shot_id']}  {timecode(row['t_in'])}")
         chain.append(
@@ -279,6 +297,18 @@ def is_card(row: Mapping[str, Any]) -> bool:
     """Whether this slot is a caption card (the cold-open title) rather than
     footage -- it has no shot and no source file to read."""
     return str(row.get("kind") or "") == "card"
+
+
+def credit_lines(row: Mapping[str, Any]) -> list[str]:
+    """The lines a credits bed slot carries over its picture (``motion``
+    JSON ``{"type": "credit", "lines": [...]}``); empty for any other row."""
+    try:
+        m = json.loads(row.get("motion") or "{}")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(m, dict) or m.get("type") != "credit":
+        return []
+    return [str(x) for x in (m.get("lines") or [])]
 
 
 def card_background(row: Mapping[str, Any]) -> dict[str, Any] | None:

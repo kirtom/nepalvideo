@@ -33,7 +33,7 @@ def _cfg(tmp_path):
     data["project"] = {"data_root": str(tmp_path / "data"), "work_root": str(tmp_path / "work"),
                        "db_path": str(tmp_path / "work" / "db" / "n.sqlite")}
     data["film"] = dict(data["film"], title={})     # the title card has its own test
-    data["music"] = dict(data["music"], lock={})    # the real film's pinned soundtrack names real tracks
+    data["music"] = dict(data["music"], lock={}, credits_track="t2")    # the real film's lock names real tracks
     return Config(data, real.path)
 
 
@@ -339,7 +339,7 @@ def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path)
     segs = [seg for a in mmap["acts"] for seg in a["segments"]]
     assert segs and any(seg["src_in"] != 0 for seg in segs)
     assert rep["n_scenes"] >= 5 and rep["music_assignment"] == "scene"
-    assert all(s["scene_id"] is not None for s in slots)
+    assert all(s["scene_id"] is not None for s in slots if s["act"] != s05_cut.CREDITS_ACT)
     assert {a["act"] for a in mmap["acts"]} == {0, 1, 2, 3, 4, 5}
 
     # never two stills back to back
@@ -374,7 +374,7 @@ def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path)
     for w in rep["natural_windows"]:
         assert 0 <= w["slot_index"] < len(slots) and w["t_out"] > w["t_in"]
     assert (cfg.work_root / "timeline.otio").exists() and (cfg.work_root / "timeline.fcpxml").exists()
-    assert set(rep["per_act"]) == {"0", "1", "2", "3", "4", "5"}
+    assert set(rep["per_act"]) == {"0", "1", "2", "3", "4", "5", str(s05_cut.CREDITS_ACT)}
     conn.close()
 
 
@@ -773,7 +773,7 @@ def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
     # every video slot hears its own recording, the stills hold the one before
     loc = {c["cue_id"]: c for c in by_track["location"]}
     for s in slots:
-        if s["kind"] != "video":
+        if s["kind"] != "video" or s["act"] == s05_cut.CREDITS_ACT:   # the credits hear only their track
             continue
         c = loc[f"lo_{s['slot_index']}"]
         assert c["source"] == shots[s["shot_id"]]["recording_id"]
@@ -829,9 +829,10 @@ def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
         "a window the picture moved a line into must be trimmed clear of it"
     # and the gate reads what was played, not what was planned
     assert rep["music_share"] <= rep_tl["music_share_planned"] + 1e-6
+    # the film's share: the credits and their track are outside the runtime
     assert rep["music_share"] == pytest.approx(
-        sum(c["t_out"] - c["t_in"] for c in by_track["music"]) /
-        max(s["t_out"] for s in slots), abs=1e-3)
+        sum(c["t_out"] - c["t_in"] for c in by_track["music"] if c["cue_id"] != "mu_credits") /
+        max(s["t_out"] for s in slots if s["act"] != s05_cut.CREDITS_ACT), abs=1e-3)
     music_spans = s05_cut.cues_mod.music_spans(on_film)
     assert music_spans, "the seeded film has somewhere music may play"
     for a in on_film["acts"]:
@@ -1055,3 +1056,29 @@ def test_a_scene_shared_by_two_windows_is_locked_by_the_one_holding_more_of_it()
     assert locked[23] == ("4/0", ["A.One"]), "28 s in the first window against 2 s in the second"
     kept, locked = s5._lock_windows(windows, {"4/1": ["Two"]}, tracks, scenes)
     assert [w.t_in for w in kept] == [1747.0] and set(locked) == {23, 24}, "an unnamed window is silent"
+
+
+def test_the_credits_roll_after_the_film_over_unused_shots_with_the_reserved_track(tmp_path):
+    cfg = _cfg(tmp_path)
+    conn = _seed(cfg)
+    rep = s05_cut.build_timeline(cfg, conn)
+    rows = [dict(r) for r in conn.execute("SELECT * FROM timeline ORDER BY slot_index")]
+    credits = [r for r in rows if r["act"] == s05_cut.CREDITS_ACT]
+    film = [r for r in rows if r["act"] != s05_cut.CREDITS_ACT]
+    assert credits and credits[0]["t_in"] == film[-1]["t_out"], "after the last slot of the film"
+    assert rep["credits_s"] == pytest.approx(credits[-1]["t_out"] - credits[0]["t_in"], abs=1e-3)
+    assert rep["film_s"] == pytest.approx(film[-1]["t_out"], abs=1e-3)
+    used = {r["shot_id"] for r in film if r["shot_id"]}
+    assert not used & {r["shot_id"] for r in credits}, "an outtake is a shot the film did not use"
+    recs = [conn.execute("SELECT recording_id FROM shots WHERE shot_id=?", (r["shot_id"],)).fetchone()[0] for r in credits]
+    assert len(recs) == len(set(recs)), "one per recording"
+    lines = [json.loads(r["motion"])["lines"] for r in credits]
+    assert lines[0][0] == "Filmed and walked by" and any("shots considered" in l for ls in lines for l in ls)
+    assert "fade_out_s" in json.loads(credits[-1]["motion"])
+    s05_cut.build_cues(cfg, conn)
+    cues = [dict(r) for r in conn.execute("SELECT * FROM audio_cues ORDER BY t_in")]
+    cc = [c for c in cues if c["cue_id"] == "mu_credits"]
+    assert cc and cc[0]["source"] == "t2" and cc[0]["src_in"] == 0.0 and cc[0]["t_in"] == credits[0]["t_in"]
+    assert not any(c["track"] == "location" and c["t_in"] >= credits[0]["t_in"] - 1e-3 for c in cues), \
+        "nothing but the track plays under the credits"
+    conn.close()

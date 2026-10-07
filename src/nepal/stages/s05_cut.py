@@ -1527,6 +1527,8 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     cfg.work("music", "music_map.json").write_text(json.dumps(mmap, indent=2, ensure_ascii=False))
 
     natural, n_unplaced = _natural_windows(cfg, prof, ordered, shots_by_id)
+    film_end = float(ordered[-1]["t_out"]) if ordered else 0.0
+    ordered += _credits_slots(cfg, conn, mmap, ordered)
 
     # -- the write ---------------------------------------------------------------
     for s in ordered:
@@ -1547,6 +1549,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
              total_s / 60, per_act, n_anchors, len(pairs), long_take_id, len(scenes), len(natural))
     log.info("S06 wrote %s and %s", paths["otio"].name, paths["fcpxml"].name)
     return {"n_slots": len(ordered), "duration_s": round(duration, 3), "planned_s": total_s,
+            "film_s": round(film_end, 3), "credits_s": round(duration - film_end, 3),
             "per_act": per_act, "per_act_sources": db.per_act_sources(conn),
             "act_spans": {str(a): [round(x, 3) for x in final_spans[a]] for a in acts},
             "act_planned_s": {str(a): act_len[a] for a in acts},
@@ -1567,6 +1570,128 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
             "cold_open_beat": act0[0].get("beat_id") if act0 and act0[0]["kind"] == "video" else None,
             "natural_windows": natural, "n_natural_windows_unplaced": n_unplaced,
             "quality": quality}
+
+
+CREDITS_ACT = 6
+
+
+def _credits_cards(cfg: Config, conn, mmap: Mapping[str, Any], n_used: int) -> list[tuple[list[str], float]]:
+    """The credit blocks of spec section 1.8, in order, each with its share
+    of the roll: the people, the machine, the tooling, the numbers (queried,
+    never typed), the music. Returns (lines, weight) pairs."""
+    c = cfg.get("film.credits") or {}
+    one = lambda sql: conn.execute(sql).fetchone()[0]           # noqa: E731
+    n_assets = int(one("SELECT COUNT(*) FROM assets") or 0)
+    hours = float(one("SELECT COALESCE(SUM(duration_s), 0) FROM recordings") or 0.0) / 3600
+    n_shots = int(one("SELECT COUNT(*) FROM shots") or 0)
+    n_single = int(one("SELECT COUNT(*) FROM (SELECT recording_id FROM shots WHERE recording_id IS NOT NULL "
+                       "GROUP BY 1 HAVING COUNT(*) = 1)") or 0)
+    n_heic = int(one("SELECT COUNT(*) FROM assets WHERE lower(container) = 'heic'") or 0)
+    clock = conn.execute("SELECT value FROM decisions WHERE key = 'clock_offset_camera_s'").fetchone()
+    days = abs(float(clock[0])) / 86400 if clock and clock[0] is not None else 0.0
+    people = " · ".join(str(p) for p in (c.get("people") or []))
+    cards: list[tuple[list[str], float]] = [
+        ([t for t in ("Filmed and walked by", people, f"{c.get('place') or ''} · {c.get('when') or ''}") if t.strip(" ·")], 12),
+        (["This film was assembled by software.",
+          "It chose the shots, the order and the music;",
+          "it was not allowed to choose the words.",
+          "Nothing here is generated, re-timed or invented:",
+          "every frame was shot on the trek."], 16),
+        (["Made with",
+          "Python · SQLite · ffmpeg · exiftool · PySceneDetect · OpenCV",
+          "librosa · faster-whisper · pillow-heif · NASA SRTM · GeoNames",
+          "and Claude Code, which wrote the pipeline."], 14),
+        ([f"{n_assets} files ingested · {hours:.1f} hours of footage",
+          f"{n_shots} shots considered · {n_used} used",
+          f"{n_single} recordings the scene detector found no cut in",
+          f"{n_heic} photographs that needed a decoder installed before they could be opened"]
+         + ([f"and the camera's clock was {days:g} days wrong, which nobody on the mountain noticed"]
+            if days >= 1 else []), 18),
+    ]
+    by_id = {r["track_id"]: r for r in conn.execute("SELECT track_id, artist, title FROM music_tracks")}
+    heard: list[str] = []
+    for a in mmap.get("acts", []):
+        for seg in a.get("segments", []):
+            if seg["track_id"] in by_id and seg["track_id"] not in heard:
+                heard.append(seg["track_id"])
+    names = [f"{by_id[t]['artist'] or '?'} – {by_id[t]['title'] or t}" for t in heard]
+    credits_track = music_mod.pick_credits_track(_tracks(conn), cfg.get("music.credits_track"))
+    for k in range(0, max(1, len(names)), 7):
+        cards.append((["Music"] + names[k:k + 7], 12))
+    tail = []
+    if credits_track is not None:
+        tail.append(f"and under these credits, the one track a person chose: "
+                    f"{credits_track.artist or '?'} – {credits_track.title or credits_track.track_id}")
+    if (cfg.get("film.title") or {}).get("background"):
+        tail.append("Opening clip: Pixabay")
+    tail.append(f"{(cfg.get('film.title') or {}).get('text') or 'Manaslu Circuit Trek'} · 2024")
+    cards.append((tail, 10))
+    return cards
+
+
+def _credits_bed(conn, used_recordings: set[str], *, slot_s: float, n: int) -> list[dict[str, Any]]:
+    """The outtakes: shots of recordings the film did not use, one per
+    recording, the rejected ones first (shaky before over-exposed), then
+    the unused candidates by technical score, laid along the route by act."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM shots WHERE media_kind = 'video' AND recording_id IS NOT NULL "
+        "AND end_s - start_s >= ?", (slot_s,))]
+    rows = [r for r in rows if r["recording_id"] not in used_recordings]
+    def rank(r):
+        rejected = r.get("status") == "rejected"
+        return (0 if rejected else 1,
+                (1 if (r.get("exposure_pen") or 0) > 0.6 else 0) if rejected else 0,
+                float(r.get("stability") or 1.0) if rejected else -float(r.get("score_tech") or 0.0))
+    best: dict[str, dict[str, Any]] = {}
+    for r in sorted(rows, key=rank):
+        best.setdefault(r["recording_id"], r)
+    picked = sorted(best.values(), key=rank)[:n]
+    picked.sort(key=lambda r: (int(r.get("act") or 0), str(r.get("start_utc") or ""), r["shot_id"]))
+    return picked
+
+
+def _credits_slots(cfg: Config, conn, mmap: Mapping[str, Any], ordered: Sequence[Mapping[str, Any]]
+                   ) -> list[dict[str, Any]]:
+    """The end credits (spec sections 1.8 and S09.1): 60-120 s after the
+    last slot, not counted against the film, the cards over an outtakes
+    bed, the reserved track under them (laid by the cues step)."""
+    c = cfg.get("film.credits") or {}
+    if not c.get("enabled") or not ordered:
+        return []
+    length = float(c.get("duration_s") or 90.0)
+    slot_s = float(c.get("bed_slot_s") or 2.5)
+    used = {str(s[k]) for s in ordered for k in ("shot_id", "secondary_shot_id") if s.get(k)}
+    used_recordings = {r[0] for r in conn.execute(
+        f"SELECT DISTINCT recording_id FROM shots WHERE shot_id IN ({','.join('?' * len(used))})", sorted(used))
+        if r[0]} if used else set()
+    cards = _credits_cards(cfg, conn, mmap, len(used))
+    bed = _credits_bed(conn, used_recordings, slot_s=slot_s, n=max(1, math.ceil(length / slot_s)))
+    if not bed:
+        log.warning("S06 credits: no unused shot to lay them over; the film ends without credits")
+        return []
+    # fewer outtakes than the roll needs: each holds longer, up to 4 s
+    each = max(slot_s, min(4.0, length / len(bed)))
+    total_w = sum(w for _, w in cards)
+    t = float(ordered[-1]["t_out"])
+    out: list[dict[str, Any]] = []
+    k = 0
+    for ci, (lines, w) in enumerate(cards):
+        take = max(1, round(len(bed) * w / total_w)) if ci < len(cards) - 1 else max(1, len(bed) - k)
+        for shot in bed[k:k + take]:
+            slot = _new_slot(kind="video", act=CREDITS_ACT, shot_id=shot["shot_id"], locked=1,
+                             src_in=float(shot["start_s"]),
+                             motion=json.dumps({"type": "credit", "lines": lines}, ensure_ascii=False))
+            out.append(_set_length(slot, t, t + each))
+            t += each
+        k += take
+        if k >= len(bed):
+            break
+    last = json.loads(out[-1]["motion"])
+    last["fade_out_s"] = float(cfg.get("render.window_fade_s") or 1.5)
+    out[-1]["motion"] = json.dumps(last, ensure_ascii=False)
+    log.info("S06 credits: %d card(s) over %d outtake(s), %.1fs after the film", len(cards), len(out),
+             float(out[-1]["t_out"]) - float(ordered[-1]["t_out"]))
+    return out
 
 
 def _reported_windows(cfg: Config) -> list[dict[str, Any]] | None:
@@ -1611,6 +1736,8 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
     for beat in {a.beat_id for a in anchors} - {p.beat_id for p in placed}:
         log.warning("S05.cues speech beat %s has no slot on the timeline; it gets no cue", beat)
 
+    credits_slots = [s for s in slots if int(s["act"]) == CREDITS_ACT]
+    slots = [s for s in slots if int(s["act"]) != CREDITS_ACT]
     act_spans: dict[int, tuple[float, float]] = {}
     for s in slots:
         lo, hi = act_spans.get(int(s["act"]), (math.inf, -math.inf))
@@ -1659,6 +1786,23 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
                                   loop_min_piece_s=float(cfg.get("music.loop_min_piece_s")),
                                   swell_lufs=float(cfg.get("music.placement.swell_lufs")),
                                   swell_act=music_mod.SUMMIT_ACT))
+    if credits_slots:
+        # The reserved track from its start, ducked under nothing -- there
+        # is no dialogue here -- fading with the last card (spec S09.1).
+        track = music_mod.pick_credits_track(_tracks(conn), cfg.get("music.credits_track"))
+        if track is None:
+            log.warning("S05.cues no credits track matches music.credits_track=%r: the credits run silent",
+                        cfg.get("music.credits_track"))
+        else:
+            t_in, t_out = float(credits_slots[0]["t_in"]), float(credits_slots[-1]["t_out"])
+            room = track_s.get(track.track_id)
+            if room:
+                t_out = min(t_out, t_in + float(room))
+            cues.append(cues_mod._cue(cue_id="mu_credits", track="music", t_in=round(t_in, 3), t_out=round(t_out, 3),
+                                      source=track.track_id, src_in=0.0, src_out=round(t_out - t_in, 3),
+                                      gain_lufs=float(cfg.get("render.music_lufs")),
+                                      fade_in_s=float(cfg.get("render.cue_fade_s")),
+                                      fade_out_s=float(cfg.get("render.window_fade_s")), beat_id=None))
     # The same lettering the beat sheet's prompt gave the authors, from the
     # same rows in the same order, so "A" on a card is the "A" Claude quoted.
     cast = beats_input.Cast.build(
@@ -1678,7 +1822,9 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
     # windows, which are the room the bed was allowed, and not the planned
     # map, whose windows the snap above has since trimmed. This is what the
     # Gate 3 page shows, because it is what the operator hears.
-    music_s = sum(float(c["t_out"]) - float(c["t_in"]) for c in cues if c["track"] == "music")
+    # the film's share, not the credits': they are outside the runtime (spec 1.8)
+    music_s = sum(float(c["t_out"]) - float(c["t_in"]) for c in cues
+                  if c["track"] == "music" and c["cue_id"] != "mu_credits")
     film_s = max((float(x["t_out"]) for x in slots), default=0.0)
     windows = cues_mod.music_spans(mmap)
     log.info("S05.cues %s; %d overlay(s); %d natural-sound window(s); music over %.0fs of %.0fs "

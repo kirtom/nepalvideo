@@ -58,6 +58,18 @@ film:
   # card. Carved off the top, so the acts are allocated over the remainder. This
   # is the one deliberate break in chronology.
   cold_open_s: [15, 25]          # replaces the dead scalar
+  # The end credits (spec sections 1.8 and S09.1): 60-120 s after the film,
+  # not counted against max_duration_s, the four blocks over an outtakes bed
+  # (one unused shot per recording, bed_slot_s each), the reserved
+  # music.credits_track underneath. The names are the chat's authors who
+  # carried the cameras; edit here.
+  credits:
+    enabled: true
+    duration_s: 90
+    bed_slot_s: 2.5
+    people: ["Kirill Keller", "Sasha Kulikov"]
+    place: "Manaslu Circuit, Nepal"
+    when: "April – May 2024"
   # The title card's caption, over the cut from cold open to Act 1 -- "three
   # months earlier".
   cold_open_card: "тремя месяцами ранее"

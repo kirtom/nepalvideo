@@ -1125,3 +1125,15 @@ def test_a_title_card_reads_its_clip_blurred_with_two_lines_of_text(tmp_path):
     plain = render.build_command([dict(row, motion=json.dumps({"type": "card", "text": "x"}))],
                                  sources={}, out_path=tmp_path / "p.mp4")
     assert "lavfi" in plain, "a card without a background is still the black card"
+
+
+def test_a_credits_slot_draws_its_lines_over_the_outtake_and_the_last_one_fades():
+    import json
+    row = {"shot_id": "v", "kind": "video", "t_in": 0.0, "t_out": 2.5,
+           "motion": json.dumps({"type": "credit", "lines": ["Filmed and walked by", "A · B"], "fade_out_s": 1.5})}
+    chain = render.segment_filters(row, 3, overlay=False)
+    if render.has_drawtext():
+        assert chain.count("drawtext=") == 2 and "box=1:boxcolor=black@0.5" in chain and "Filmed and walked by" in chain
+    assert "fade=t=out:st=1.000:d=1.5" in chain
+    plain = render.segment_filters(dict(row, motion=None), 3, overlay=False)
+    assert "drawtext=" not in plain and "fade=" not in plain
