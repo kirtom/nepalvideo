@@ -1146,6 +1146,15 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     """S06 -- the picture track v2: anchors, pairs, the long take, the fill,
     scenes, music, rhythm; then the table, the map and the OTIO/FCPXML."""
     rows = _shot_rows(conn)
+    # Recordings the operator has struck from the film by name
+    # (assemble.excluded_recordings): out of the pool here, so no fill,
+    # anchor or swap can reach them, and a beat on one is dropped with it.
+    struck = {str(x) for x in (cfg.get("assemble.excluded_recordings") or [])}
+    if struck:
+        before = len(rows)
+        rows = [r for r in rows if r.get("recording_id") not in struck]
+        log.info("S06 %d shot(s) of %d excluded recording(s) left out: %s", before - len(rows),
+                 len(struck), sorted(struck))
     if not rows:
         return {"n_slots": 0, "note": "nothing survived the gate"}
     asm.PHOTO_HOLD_MAX_S = float(cfg.get("assemble.photo_max_s"))
