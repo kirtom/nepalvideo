@@ -1292,7 +1292,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
                 current, sections=sections, beats=grid, downbeats=downs, table=rhythm,
                 burst_slots=burst, is_act4=(act == 4),
                 held_shot_s=cfg.get("assemble.act4_held_shot_s"), silence_t=silence_t,
-                shots=shots_by_id))
+                shots=shots_by_id, burst_min_s=float(cfg.get("assemble.rhythm.burst_min_s"))))
             n_dropped_locked += _count_dropped_locked(current, out, act=act)
             return out
 
@@ -1349,6 +1349,12 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         # one goes, and what follows it moves up.
         slots = _close_holes(_no_adjacent_photos(
             slots, prev_photo=_is_photo(_last_slot(final, acts, act, act0)), next_photo=False), act_t0)
+        # "Sometimes you show some parts very, very shortly, like a fraction
+        # of a second" (operator, 2026-10-07): a cut the overlap walk or the
+        # retime left shorter than assemble.min_slot_s is dropped, and the
+        # act closes up over it.
+        min_slot = float(cfg.get("assemble.min_slot_s"))
+        slots = [x for x in slots if x.get("locked") or float(x["t_out"]) - float(x["t_in"]) >= min_slot - 1e-6]
         slots = _chronological(slots, shots_by_id, act_t0)
         final[act] = slots
         end = float(slots[-1]["t_out"]) if slots else act_t0

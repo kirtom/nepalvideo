@@ -127,7 +127,8 @@ def _normal_end(t_in: float, pct: float, table: Mapping[str, Sequence[float]],
     return want_end
 
 
-def _burst_end(t_in: float, beats: Sequence[float], ceiling: float) -> float | None:
+def _burst_end(t_in: float, beats: Sequence[float], ceiling: float,
+               min_s: float = 0.0) -> float | None:
     """The end of one beat starting at or after ``t_in``: the beat at or
     after ``t_in``, to the next beat after that -- clamped to ``ceiling``
     (``t_in`` plus what the shot has left). None when the grid can't supply
@@ -138,8 +139,12 @@ def _burst_end(t_in: float, beats: Sequence[float], ceiling: float) -> float | N
     after = sorted(b for b in beats if b >= t_in)
     if len(after) < 2:
         return None
-    end = after[1]
-    return end if end <= ceiling else None
+    # ``min_s``: the first beat after the start that leaves the cut at least
+    # this long. One beat at 120 bpm is half a second, and "sometimes you
+    # show some parts very, very shortly, like a fraction of a second"
+    # (operator, Gate 3, 2026-10-07) -- the burst stays, two beats long.
+    end = next((b for b in after[1:] if b - after[0] >= min_s), None)
+    return end if end is not None and end <= ceiling else None
 
 
 def _slot_avail_s(slot: Mapping[str, Any], shots: Mapping[str, Mapping[str, Any]]) -> float:
@@ -227,7 +232,7 @@ def retime(slots: Sequence[Mapping[str, Any]], *, sections: Sequence[Mapping[str
           beats: Sequence[float], downbeats: Sequence[float],
           table: Mapping[str, Sequence[float]], burst_slots: Sequence[int],
           is_act4: bool, held_shot_s: Sequence[float], silence_t: float | None,
-          shots: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+          shots: Mapping[str, Mapping[str, Any]], burst_min_s: float = 0.0) -> list[dict[str, Any]]:
     """Walk an act's slots in order and give each an end that fits its
     section's energy, its shot's footage and the beat grid.
 
@@ -305,7 +310,7 @@ def retime(slots: Sequence[Mapping[str, Any]], *, sections: Sequence[Mapping[str
             burst_started = True
 
         if burst_started and burst_remaining > 0:
-            t_out = _burst_end(t_in, beats, t_in + avail)
+            t_out = _burst_end(t_in, beats, t_in + avail, burst_min_s)
             if t_out is None:
                 # Inside the swell the burst budget counts cuts attempted,
                 # not successful snaps -- a starved grid still spends one,

@@ -251,41 +251,42 @@ def test_a_segment_that_begins_past_the_acts_real_end_is_dropped():
     assert [(r["cue_id"], r["t_in"], r["t_out"], r["src_out"]) for r in rows] == [("mu_3_0", 100.0, 125.0, 25.0)]
 
 
-def test_the_last_cue_loops_rather_than_ask_for_a_track_that_has_run_out():
-    """The stretch to the table's act end is unbounded -- up to
-    music.min_scene_s (45 s) can land on one cue -- and ffmpeg delivers what
-    the file holds and stops, so an unbounded stretch is dead bed under the
-    act's closing shots. Here the table's act is 40 s longer than the map
-    planned and the track has 10 s left past where the cue already plays."""
+def test_a_window_longer_than_its_file_ends_where_the_file_does_and_never_loops():
+    """"If the track is played it should just go on, maybe with a fade out,
+    but not jump to the same track, a different time" (operator, Gate 3,
+    2026-10-07). The window is 100 s on film, the file 90 s: the cue starts
+    the file from the top so as much as possible plays, runs to the file's
+    end, and the window closes there with the window fade."""
     mmap = {"acts": [{"act": 3, "t_start": 0.0, "t_end": 60.0,
                       "music_windows": _whole(0.0, 60.0),
                       "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 60.0,
                                     "src_in": 20.0, "src_out": 80.0}]}],
             "silence_window": {}}
     on_film = cues.map_on_film_time(mmap, {3: (0.0, 100.0)})
-
     rows = cues.music_cues(on_film, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0,
                            track_s={"t1": 90.0})
     assert [(r["cue_id"], r["t_in"], r["t_out"], r["src_in"], r["src_out"]) for r in rows] == [
-        ("mu_3_0", 0.0, 70.0, 20.0, 90.0),        # 60s of map + the 10s the track had left
-        ("mu_3_0c1", 70.0, 100.0, 20.0, 50.0)]    # the rest, from the segment's own section cue
-    assert all(r["source"] == "t1" for r in rows)
+        ("mu_3_0", 0.0, 90.0, 0.0, 90.0)]
+    assert rows[0]["fade_out_s"] == 1.0
 
-    # without the durations nothing knows where the file ends: today's
-    # behaviour, one cue asking 30s past it
+    # without the durations nothing knows where the file ends: one cue
     plain = cues.music_cues(on_film, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0)
     assert [(r["t_in"], r["t_out"], r["src_out"]) for r in plain] == [(0.0, 100.0, 120.0)]
 
 
-def test_a_cue_will_not_loop_from_an_origin_with_no_room_to_play():
-    """The mirror of ``spine.music._loop_spans``'s floor, and it has to be:
-    the map builder and the cue builder both stretch, and a floor in only one
-    of them leaves the other fragmenting. A segment cue 0.3s from the end of
-    its file would lay 67 sub-second cues, each with its own pair of fades."""
-    assert cues._loop_cuts(0.0, 20.0, 99.7, 100.0, 8.0) == [(0.0, 20.0, 0.0)]
-    assert cues._loop_cuts(0.0, 20.0, 11.7, 12.0, 8.0) == [(0.0, 12.0, 0.0), (12.0, 20.0, 0.0)]
-    # 10s behind the cue is a piece worth hearing, so the cue is kept
-    assert cues._loop_cuts(0.0, 20.0, 90.0, 100.0, 8.0) == [(0.0, 10.0, 90.0), (10.0, 20.0, 90.0)]
+def test_the_same_track_in_the_next_segment_continues_rather_than_jumping():
+    mmap = {"acts": [{"act": 3, "t_start": 0.0, "t_end": 60.0,
+                      "music_windows": _whole(0.0, 60.0),
+                      "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 30.0,
+                                    "src_in": 10.0, "src_out": 40.0},
+                                   {"track_id": "t1", "t_in": 30.0, "t_end": 60.0,
+                                    "src_in": 100.0, "src_out": 130.0}]}],
+            "silence_window": {}}
+    on_film = cues.map_on_film_time(mmap, {3: (0.0, 60.0)})
+    rows = cues.music_cues(on_film, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0,
+                           track_s={"t1": 300.0})
+    assert [(r["t_in"], r["t_out"], r["src_in"], r["src_out"]) for r in rows] == [
+        (0.0, 30.0, 10.0, 40.0), (30.0, 60.0, 40.0, 70.0)]
 
 
 def test_a_track_with_no_measured_duration_keeps_its_one_unbounded_cue():

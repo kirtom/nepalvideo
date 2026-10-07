@@ -303,41 +303,6 @@ def music_spans(mmap: Mapping[str, Any]) -> list[tuple[float, float]]:
     return [w for entry in mmap.get("acts", []) for w in _entry_windows(entry)]
 
 
-def _loop_cuts(t0: float, t1: float, src_in: float, duration: float | None,
-               min_piece: float) -> list[tuple[float, float, float]]:
-    """``t0``..``t1`` played from ``src_in``, as (t_in, t_out, src_in) pieces
-    that each fit inside ``duration``.
-
-    The same arithmetic as ``spine.music._loop_spans``, kept mirrored rather
-    than imported: this module is pure rows-in/rows-out and does not reach
-    into the spine package, the same line rhythm.py draws. ffmpeg delivers
-    what the file holds and stops, so a cue asking past the end is silence
-    under the picture; an editor restarts the bed instead, and the renderer's
-    own crossfade between contiguous cues makes the seam.
-
-    ``min_piece`` is the floor the loop origin must clear, for the reason
-    ``_loop_spans`` gives at length: a cue a fraction of a second from the
-    end of its file would cut the need into dozens of sub-second cues, each
-    carrying a pair of fades clamped to nothing. Under it the loop runs from
-    the top of the track, which bounds the count at ``ceil(need /
-    min_piece)``. A track with no measured duration has nothing to loop
-    against and keeps its one cue, which ``build_cues`` reports.
-    """
-    if not duration:
-        return [(t0, t1, src_in)]
-    room = float(duration) - src_in
-    if room > 0 and (t1 - t0) <= room + _EDGE_TOL_S:
-        return [(t0, t1, src_in)]
-    if room < min_piece:
-        src_in, room = 0.0, float(duration)
-    cuts, cursor = [], t0
-    while t1 - cursor > _EDGE_TOL_S:
-        take = min(t1 - cursor, room)
-        cuts.append((cursor, cursor + take, src_in))
-        cursor += take
-    return cuts
-
-
 def _subtract(span: tuple[float, float],
               blocked: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
     """``span`` with every blocked span cut out of it."""
@@ -505,7 +470,11 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
             ends_music = not any(math.isclose(w1, a, abs_tol=_EDGE_TOL_S) for a in all_starts)
             kept = [i for i, seg in enumerate(segments)
                     if w0 - _EDGE_TOL_S <= t_start + float(seg["t_in"]) < w1 - _EDGE_TOL_S]
+            prev_track, prev_src_out = None, 0.0
+            ran_out = False
             for i in kept:
+                if ran_out:
+                    break
                 seg = segments[i]
                 t0, t1 = t_start + float(seg["t_in"]), t_start + float(seg["t_end"])
                 src_in = float(seg["src_in"])
@@ -521,8 +490,29 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
                     t0 = w0
                 if i == kept[-1]:
                     t1 = w1
-                cuts = _loop_cuts(t0, min(t1, w1), src_in, (track_s or {}).get(seg["track_id"]),
-                                  loop_min_piece_s)
+                t1 = min(t1, w1)
+                duration = (track_s or {}).get(seg["track_id"])
+                # Within a window a track plays on: the next segment of the
+                # same track continues from where the last cue got to, never
+                # from its own section cue -- "it cuts and jumps to the same
+                # track, a different time; if the track is played it should
+                # just go on" (operator, Gate 3, 2026-10-07 05:07). A window
+                # that would outrun its file starts earlier in it, so the
+                # track ends where the window ends; a window longer than the
+                # whole file ends, with the window fade, where the file does.
+                # Nothing loops.
+                if seg["track_id"] == prev_track:
+                    src_in = prev_src_out
+                elif duration:
+                    src_in = min(src_in, max(0.0, float(duration) - (w1 - t0)))
+                cuts = [(t0, t1, src_in)]
+                if duration and src_in + (t1 - t0) > float(duration) + _EDGE_TOL_S:
+                    room = float(duration) - src_in
+                    if room < loop_min_piece_s:
+                        break                       # nothing worth starting; the window ends here
+                    cuts = [(t0, t0 + room, src_in)]
+                    ran_out = True
+                prev_track, prev_src_out = seg["track_id"], src_in + (cuts[0][1] - cuts[0][0])
                 for k, (t0, t1, src_in) in enumerate(cuts):
                     src_out = src_in + (t1 - t0)
                     if t0 < q1 and t1 > q0:
@@ -533,7 +523,7 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
                         else:
                             src_in, t0 = src_in + (q1 - t0), q1
                     opens = starts_music and i == kept[0] and k == 0
-                    closes = ends_music and i == kept[-1] and k == len(cuts) - 1
+                    closes = (ends_music and i == kept[-1] and k == len(cuts) - 1) or ran_out
                     fade_out = (window_fade_s if closes or
                                 math.isclose(t1, q0, abs_tol=_EDGE_TOL_S) else xfade_s)
                     cue_id = f"mu_{entry['act']}_{i}" if k == 0 else f"mu_{entry['act']}_{i}c{k}"
