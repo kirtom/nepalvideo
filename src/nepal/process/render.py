@@ -116,21 +116,22 @@ def timecode(seconds: float) -> str:
 
 
 def escape_drawtext(text: str) -> str:
-    """ffmpeg's drawtext eats colons, backslashes and quotes.
+    """A caption's text, ready to sit inside ``text='...'`` in a filtergraph.
 
-    A shot_id contains a '#', and a place name can contain an apostrophe;
-    both arrive here from the database rather than from a literal, so the
-    escaping is not optional.
+    ffmpeg reads the value twice (measured on the box, 2026-10-07): the
+    graph parser, where a quote always toggles quoting and a backslash
+    inside quotes is literal, then the option parser, where ``\\:`` and
+    ``\\'`` are the escapes, then drawtext's own expansion, where ``%``
+    opens ``%{...}``. So a colon is ``\\:`` (verbatim through the quotes,
+    unescaped by the option parser); a quote leaves the quotes, is written
+    ``\\\\\\'`` (the graph parser makes that ``\\'`` for the option parser)
+    and re-enters them; a percent is ``%%``. A shot_id's '#' is safe.
     """
     out = str(text)
-    for a, b in (("\\", r"\\"), (":", r"\:"), ("%", r"\%")):
+    for a, b in (("\\", r"\\"), (":", r"\:"), ("%", "%%")):
         out = out.replace(a, b)
-    # Every caller wraps the result in single quotes, and a quoted string
-    # cannot hold a quote, escaped or not: the quote is closed, an escaped
-    # quote emitted, the quote reopened -- ffmpeg's own idiom. The
-    # credits' "camera's clock" and "She's A Rainbow" were the first
-    # apostrophes to reach a render (2026-10-07).
-    return out.replace("'", "'\\''")
+    return out.replace("'", "'\\\\\\''")
+
 
 
 def leg_frames(row: Mapping[str, Any], fps: int = DRAFT_FPS) -> int:

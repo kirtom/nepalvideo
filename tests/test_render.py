@@ -40,8 +40,8 @@ def test_drawtext_escapes_what_ffmpeg_would_eat():
     """A shot_id contains '#', a place name can contain an apostrophe, and a
     colon ends a drawtext option -- all of these arrive from the database."""
     got = render.escape_drawtext("camera_1#0002 4:12 O'Hara 50%")
-    assert r"\:" in got and r"\%" in got
-    assert "O'\\''Hara" in got, "inside the caller's quotes an apostrophe closes, escapes and reopens them"
+    assert r"\:" in got and "50%%" in got
+    assert "O'\\\\\\''Hara" in got, "the quote leaves the quotes as backslash-backslash-backslash-quote (measured, 2026-10-07)"
     assert "#" in got, "a hash is safe and must not be mangled"
 
 
