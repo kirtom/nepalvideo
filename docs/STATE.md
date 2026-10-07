@@ -425,6 +425,87 @@ back on `pull`; removed from both ends.
 **Gate 3 is the operator's watch and listen**, on this draft: everything
 listed under Part B, plus the music placement above.
 
+## Film v2 — step 4, part D: Gate 3 round one, the fix round (2026-10-07, night)
+
+The operator watched the 01:28 draft and listed five faults and one cut.
+Each fault was traced to its mechanism in the data before anything was
+changed; all of it is measured on that draft.
+
+**"Person speaks, I don't hear it."** Both of Act 3's music windows
+(483–760 s, 892–1054 s) sat over **38 video slots of people talking to the
+camera**, their location sound ducked to −28 LUFS under the bed, because the
+only speech the mix knew was the sixteen beats. A talk span (a video slot
+whose shot `has_speech`) now plays its location sound full and the music
+ducks under it, exactly as under a beat. Blocking the windows on talk was
+tried first and placed **zero windows over 25 scenes** — the film went
+silent — which is not what the ruling meant.
+
+**"Disproportional."** `work/proxies/phone_kulikov_IMG_3163_eq.mp4` is
+872×540 from a 960×720 source: stretched 1.21×. **367 of 453 flat proxies**
+(221 of them in the film) were built on 2026-09-14 by the first flat graph,
+which set width and height independently, and stayed on disk through the
+graph fix because their stage units read done. S03.1 now rebuilds a flat
+proxy whose shape is not its source's (rotation flag applied); `nepal s03
+--redo proxies` walks them, `--force` alone rebuilds all 480.
+
+**"Vertical lines" in the 360 footage.** The screenshot was the whole
+sphere laid flat: the 1024×512 equirectangular proxy letterboxed into
+16:9, the two lens seams standing at ±90°, the ground on each side from a
+different lens. A 360 slot is now a rectilinear 100° window at the shot's
+yaw (straight ahead when none was chosen), vertical field from the frame's
+shape, so neither seam is in the picture (`render.view_h_fov`). The seam
+itself is still the 193° fallback FOV (Gate 1, open).
+
+**"From completely different parts of our trip."** 22 backward jumps of
+15–145 h inside an act (Act 3 slot 334→335: 21 April to 15 April). The
+fill between two anchors widened to the nearest footage by time with no
+bound when its hour was thin, and the phone-share swap took the nearest
+clip from any day. Both are bounded by `assemble.max_time_drift_h` (48: at
+12 the sparse acts collapsed, Act 5 to 27 slots and the film to 29 min).
+
+**"The video, then the photo of its last frame."** The fill lays a gap in
+capture order, and the corpus holds 308 iPhone Live Photos whose still and
+3 s movie are both shots, plus two phones shooting the same scene seconds
+apart. A photograph within `assemble.same_moment_s` (90) of a video on
+screen in the act is not admissible, nor the reverse.
+
+**Music:** *Lovely Day* and *The Long Song* are struck
+(`music.excluded_tracks`); *Send Me on My Way* was "quite good". **Act 1**
+halved: 42/25/90 s.
+
+**Also tonight, before the feedback:** CLIP ran for the first time —
+1,550 embeddings, ViT-L-14-quickgelu (the plain config loaded the openai
+weights into the wrong tower with only a warning); 357 of the 713 stills
+are HEIC and `cv2.imread` returned None for every one, so S04 reads
+photographs through PIL/pillow-heif like S03. A stale `nepal.sqlite-wal`
+pushed from the box at boot was pulled beside a newer database and applied
+— "database disk image is malformed" — and a timeline was cut from the
+result; the database was restored from the local copy and WAL/shm files no
+longer travel in any rsync (CLAUDE.md has the trap).
+
+**The draft from this round** (03:24, `work/gates/gate3/draft.mp4`,
+323.6 MB, 2045.7 s = 34.1 min): 474 slots — Act 1 52 s, Act 2 154 s, Act 3
+1320 s, Act 4 150 s, Act 5 339 s (55 s short under the drift bound). All 42
+slots from 360 recordings go through the window; 346 proxies were rebuilt
+on the box in 3 min 17 s; 67 talking slots inside music windows play at
+−18 LUFS with the music ducked. Music: *Home* 436–605 s, *Mind Heist*
+605–665 s, *Send Me on My Way* 1333–1546 s, *M83 Outro* 1877–1943 s — the
+first draft with a window in Act 5. Chronology: 20 backward jumps of 7–47 h
+remain inside acts (9 over a day), none over two; one video/photo pair
+within 90 s of each other survived the same-moment rule at a gap boundary.
+Act 2 carries 6 stills of 36 (17 %), under the 30 % ruling, because the
+rule removed stills shot beside the clips already on screen. Three drafts
+were rendered on the way (`draft.round1.mp4` is the 02:55 one, before the
+Act 1 ceiling and the same-moment rule). Box time tonight 2.1 h, ledger
+38.31 of 45 USD; the box is down.
+
+**Open for the operator:** the residual 17–28 h jumps (a day's drift,
+or a shorter film); Act 2's stills share; whether *We Didn't Start the
+Fire* should be pinned (`music.preferred_tracks`) — the assignment chose
+it in one cut and not the next; the Act 3 loop warning (one track laid
+7× over 1320 s) wants a longer or a building track in the library.
+
+
 ## The last full run
 
 S01 + S03.0/.1/.2 on the real corpus, 4.5 hours wall clock. These numbers are
