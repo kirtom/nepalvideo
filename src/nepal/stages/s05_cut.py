@@ -331,20 +331,20 @@ def _gap_candidates(free: Sequence[Mapping[str, Any]], lo: float | None, hi: flo
 
 def _same_moment(c: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], *,
                  within_s: float) -> bool:
-    """Whether ``c`` shows a moment another recording in ``rows`` already
-    shows. "You show the video, then you pause, then you show the photo,
-    which is the end of the video", and at 5:51 "a video duplicate of the
-    bridge crossing" from the other phone (Gate 3, 2026-10-07): the fill
-    lays a gap chronologically, and a still taken seconds after a clip, an
-    iPhone Live Photo (still and 3 s movie both shots), or the second
-    phone's take of the same crossing lands right behind the first. One
-    recording carries a moment."""
+    """Whether ``c`` is a photograph of a moment a video in ``rows`` already
+    shows, or the reverse. "You show the video, then you pause, then you
+    show the photo, which is the end of the video" (Gate 3, 2026-10-07):
+    the fill lays a gap chronologically, and a still taken seconds after a
+    clip -- or an iPhone Live Photo, whose still and 3 s movie are both
+    shots -- lands right behind it. The operator's rule is exactly that
+    narrow: "you can use different videos from different phones for the
+    same moment" (04:28), so two videos never block each other here."""
     tc = anchors_mod._epoch(c.get("start_utc"))
     if tc is None or within_s <= 0:
         return False
     for r in rows:
-        if r.get("recording_id") and r.get("recording_id") == c.get("recording_id"):
-            continue                    # the same recording is the run rule's business
+        if _is_photo(r) == _is_photo(c):
+            continue                    # two videos of one moment from two phones are wanted
         tr = anchors_mod._epoch(r.get("start_utc"))
         if tr is not None and abs(tr - tc) <= within_s:
             return True

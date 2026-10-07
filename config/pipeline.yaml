@@ -452,14 +452,13 @@ assemble:
   # in the act is not placed: "you show the video, then you pause, then you
   # show the photo, which is the end of the video" (operator, Gate 3,
   # 2026-10-07). The corpus has 308 iPhone Live Photos whose still and 3 s
-  # movie both survive as shots. One recording carries a moment; the
-  # other phone's take of the same thing minutes later is the similarity
-  # rule's job below.
+  # movie both survive as shots. Only a still against a video: two videos of
+  # one moment from two phones are wanted (operator, 2026-10-07 04:28).
   same_moment_s: 90
-  # Two shots from different recordings whose CLIP embeddings agree at or
-  # above this are the same thing twice -- the other phone's take of the
-  # bridge crossing (5:51, Gate 3 2026-10-07). A time rule wide enough to
-  # catch it (180 s) emptied a third of the film; this one asks the picture.
+  # A still and a clip whose CLIP embeddings agree at or above this are the
+  # photo that is a frame of the video, wherever the still came from. Two
+  # videos are never duplicates: "you can use different videos from
+  # different phones for the same moment" (operator, 2026-10-07 04:28).
   duplicate_similarity: 0.90
   source_share_min: 0.25         # of an act's phone slots, to each phone that has material
   long_take_s: [60, 90]

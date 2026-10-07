@@ -922,8 +922,7 @@ def test_a_photo_of_a_moment_a_video_already_shows_is_the_same_moment():
     assert s5._same_moment(still, [video], within_s=90)
     assert s5._same_moment(video, [still], within_s=90)
     assert not s5._same_moment(later, [video], within_s=90)
-    assert s5._same_moment(other_video, [video], within_s=90)       # the other phone's take of it
-    assert not s5._same_moment(dict(other_video, recording_id="r"), [dict(video, recording_id="r")], within_s=90)
+    assert not s5._same_moment(other_video, [video], within_s=90)   # two phones, one moment: wanted
     assert not s5._same_moment(still, [video], within_s=0)
 
 
@@ -953,14 +952,14 @@ def test_a_photograph_is_held_no_longer_than_the_cap():
         asm.PHOTO_HOLD_MAX_S = old
 
 
-def test_two_recordings_showing_the_same_thing_are_a_duplicate_only_when_both_are_embedded():
+def test_a_still_that_is_a_frame_of_a_video_is_the_duplicate_two_videos_never_are():
     import numpy as np
     from nepal.process import assemble as asm
     e = {"a": np.array([1.0, 0.0]), "b": np.array([0.96, 0.28]), "c": np.array([0.0, 1.0])}
     dup = asm.make_duplicate(e, threshold=0.9)
-    A = {"shot_id": "a", "recording_id": "r1"}
-    assert dup(A, {"shot_id": "b", "recording_id": "r2"})            # the other phone's take
-    assert not dup(A, {"shot_id": "b", "recording_id": "r1"})        # same recording: the run rule's
-    assert not dup(A, {"shot_id": "c", "recording_id": "r2"})
-    assert not dup(A, {"shot_id": "zz", "recording_id": "r2"})       # unembedded: no verdict
-    assert not asm.make_duplicate(e, threshold=0)(A, {"shot_id": "b", "recording_id": "r2"})
+    A = {"shot_id": "a", "media_kind": "video"}
+    assert dup(A, {"shot_id": "b", "media_kind": "photo"})           # the still that is a frame of it
+    assert not dup(A, {"shot_id": "b", "media_kind": "video"})       # two videos of one moment: wanted
+    assert not dup(A, {"shot_id": "c", "media_kind": "photo"})
+    assert not dup(A, {"shot_id": "zz", "media_kind": "photo"})      # unembedded: no verdict
+    assert not asm.make_duplicate(e, threshold=0)(A, {"shot_id": "b", "media_kind": "photo"})
