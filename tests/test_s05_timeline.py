@@ -864,7 +864,7 @@ def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
     # and nowhere else: not in the silence, and not outside a window
     assert not any(c["t_in"] < q1 and c["t_out"] > q0 for c in by_track["music"])
     assert all(any(lo - 1e-3 <= c["t_in"] < hi + 1e-3 for lo, hi in music_spans)
-               for c in by_track["music"])
+               for c in by_track["music"] if c["cue_id"] != "mu_credits"), "the credits' track has no window"
     # the location track is the mix wherever no window covers it
     assert all(c["gain_lufs"] != cfg.get("render.duck_lufs")
                for c in loc.values()
