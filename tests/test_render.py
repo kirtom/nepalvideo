@@ -50,11 +50,11 @@ def test_each_shot_is_trimmed_at_the_input_not_after_the_decoder(tmp_path):
     """A trim filter runs after decoding, so a shot twenty minutes into a
     recording costs twenty minutes of decode. Measured: no output frames at
     all in three minutes over this timeline. Seek at the input instead."""
-    assert "trim=" not in render.segment_filters(ROWS[0], 0)
+    assert "trim=start" not in render.segment_filters(ROWS[0], 0)   # the cut is by frame count, after the input seek
     cmd = render.build_command(ROWS, sources=SRC, out_path=tmp_path / "o.mp4")
     i = cmd.index("-i")
     assert cmd[i - 4] == "-ss" and cmd[i - 3] == "5.000"
-    assert cmd[i - 2] == "-t" and cmd[i - 1] == "3.000"
+    assert cmd[i - 2] == "-t" and cmd[i - 1] == "3.500"            # a bound on decoding; the trim is the cut
 
 
 def test_timestamps_are_reset_after_every_trim():
@@ -354,7 +354,7 @@ def test_a_split_slot_puts_both_phones_side_by_side(tmp_path):
                                width=960, height=540)
     assert _inputs(cmd) == ["/m/a.mp4", "/m/z.mp4"]
     j = [k for k, c in enumerate(cmd) if c == "-i"][1]
-    assert cmd[j - 4:j] == ["-ss", "1.000", "-t", "3.000"]
+    assert cmd[j - 4:j] == ["-ss", "1.000", "-t", "3.500"]
     fc = _graph(cmd)
     assert "[0:v]" in fc and "[1:v]" in fc and "hstack=inputs=2" in fc
     assert fc.count("scale=480:540") == 2 and fc.count("crop=480:540") == 2
@@ -640,8 +640,8 @@ def test_without_cues_the_command_is_the_silent_draft_byte_for_byte(monkeypatch,
     out = tmp_path / "o.mp4"
     cmd = render.build_command(ROWS, sources=SRC, out_path=out, cues=(), levels=LEVELS)
     assert cmd == ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-                   "-ss", "5.000", "-t", "3.000", "-i", "/m/a.mp4",
-                   "-ss", "0.000", "-t", "4.000", "-i", "/m/b.mp4",
+                   "-ss", "5.000", "-t", "3.500", "-i", "/m/a.mp4",
+                   "-ss", "0.000", "-t", "4.500", "-i", "/m/b.mp4",
                    "-filter_complex_script", str(tmp_path / "o.filters"), "-map", "[vout]",
                    "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                    # the render publishes itself by renaming this on exit 0

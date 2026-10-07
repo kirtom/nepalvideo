@@ -300,8 +300,9 @@ def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path)
         assert any(s["beat_id"] == beat and s["act"] >= 1 for s in slots), beat
     walk = [s for s in slots if s["beat_id"] == "b_walk"]
     assert all(shots[s["shot_id"]]["recording_id"] == "w3" for s in walk)
-    assert any(shots[s["shot_id"]]["recording_id"] != "c2" for s in slots if s["beat_id"] == "b_arrive"), \
-        "the speaking beat cuts to B-roll after the face hold"
+    arrive = [s for s in slots if s["beat_id"] == "b_arrive"]
+    assert shots[arrive[0]["shot_id"]]["recording_id"] == "c2", \
+        "the speaking beat opens on the speaker's own shot, which now holds through the line (2026-10-07)"
 
     # the two phones at the same minute become one split slot
     splits = [s for s in slots if s["secondary_shot_id"]]
@@ -422,6 +423,9 @@ def test_a_refill_is_laid_at_what_a_slot_runs_and_stays_inside_its_gap(tmp_path)
     the line it was chosen to precede. With a budget given, the refill is
     laid at expected_slot_s and ends within one slot of its gap."""
     cfg = _cfg(tmp_path)
+    # The seed's recordings are seconds apart; this test is about the refill
+    # budget, not the one-recording-per-moment rule.
+    cfg._data["assemble"]["same_moment_s"] = 0
     per = float(cfg.get("assemble.expected_slot_s"))
     day = datetime(2024, 5, 8, 8, tzinfo=timezone.utc)
     free = [{"shot_id": f"s{i}", "recording_id": f"r{i}", "act": 5, "media_kind": "video", "source": "camera",
@@ -934,8 +938,9 @@ def test_an_act_is_laid_in_capture_order_with_every_length_kept():
              {"shot_id": None, "kind": "card", "t_in": 15.0, "t_out": 16.0, "src_in": 0.0},
              {"shot_id": "c", "kind": "video", "t_in": 16.0, "t_out": 18.0, "src_in": 0.0}]
     out = s5._chronological(slots, shots, 10.0)
-    assert [s["shot_id"] for s in out] == ["b", "a", None, "c"]
-    assert [(s["t_in"], s["t_out"]) for s in out] == [(10.0, 13.0), (13.0, 15.0), (15.0, 16.0), (16.0, 18.0)]
+    # the card keeps the time of the slot it followed (b), so it follows b
+    assert [s["shot_id"] for s in out] == ["b", None, "a", "c"]
+    assert [(s["t_in"], s["t_out"]) for s in out] == [(10.0, 13.0), (13.0, 14.0), (14.0, 16.0), (16.0, 18.0)]
 
 
 def test_a_photograph_is_held_no_longer_than_the_cap():
