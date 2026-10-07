@@ -993,17 +993,21 @@ def test_a_talking_slot_runs_to_the_end_of_its_sentence():
     assert capped[0]["src_out"] == 4.5                                                # the cap holds
 
 
-def test_consecutive_slots_of_one_recording_become_one_take_and_the_run_cap_holds():
+def test_a_run_of_one_recording_becomes_one_take_capped_in_length():
     # Critic's review, 2026-10-07: twelve slots of the jeep, fourteen of the ghat at 1.5 s each.
     from nepal.stages import s05_cut as s5
     rec = {"a1": "A", "a2": "A", "a3": "A", "a4": "A", "b1": "B"}
     def v(sid, t0, t1, s0, s1, **k):
         return dict({"kind": "video", "shot_id": sid, "t_in": t0, "t_out": t1, "src_in": s0, "src_out": s1, "locked": 0}, **k)
-    slots = [v("a1", 0, 2, 10, 12), v("a2", 2, 4, 12, 14), v("a3", 4, 6, 14.2, 16.2),   # contiguous: one take
-             v("b1", 6, 8, 0, 2),
-             v("a4", 8, 10, 40, 42), v("a1", 10, 12, 50, 52), v("a2", 12, 14, 60, 62)]      # a run of 3, not contiguous
-    out, merged, dropped = s5._merge_runs(slots, rec, run_cap=2)
-    assert merged == 2 and out[0]["src_out"] == 16.2 and out[0]["t_out"] == 6.0
-    assert dropped == 1 and [x["shot_id"] for x in out] == ["a1", "b1", "a4", "a1"]
-    locked = [v("a1", 0, 2, 0, 2, locked=1), v("a2", 2, 4, 2, 4, locked=1)]
-    assert s5._merge_runs(locked, rec, run_cap=1)[1:] == (0, 0), "a locked slot is never merged or dropped"
+    slots = [v("a1", 0, 2, 10, 12), v("a2", 2, 4, 20, 22), v("a3", 4, 6, 30, 32), v("a4", 6, 8, 40, 42),
+             v("b1", 8, 10, 0, 2), v("a1", 10, 12, 50, 52), v("a2", 12, 14, 60, 62)]
+    out, runs, absorbed = s5._merge_runs(slots, rec, {"A": 100.0, "B": 100.0}, run_cap=2, take_max_s=12.0)
+    assert (runs, absorbed) == (1, 3)
+    assert [x["shot_id"] for x in out] == ["a1", "b1", "a1", "a2"]
+    assert out[0]["take"] == 1 and (out[0]["src_in"], out[0]["src_out"]) == (10, 18.0), "8 s on from the first cut"
+    capped, _, _ = s5._merge_runs(slots[:4], rec, {"A": 100.0}, run_cap=1, take_max_s=5.0)
+    assert len(capped) == 1 and capped[0]["t_out"] - capped[0]["t_in"] == pytest.approx(5.0)
+    short, _, _ = s5._merge_runs(slots[:4], rec, {"A": 13.0}, run_cap=1, take_max_s=12.0)
+    assert short[0]["src_out"] == 13.0, "never past the recording's end"
+    locked = [v("a1", 0, 2, 0, 2, locked=1), v("a2", 2, 4, 2, 4, locked=1), v("a3", 4, 6, 4, 6, locked=1)]
+    assert s5._merge_runs(locked, rec, {"A": 100.0}, run_cap=1, take_max_s=12.0)[1:] == (0, 0)

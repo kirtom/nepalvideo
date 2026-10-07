@@ -554,47 +554,51 @@ def _finish_sentences(slots: Sequence[dict[str, Any]], shots_by_id: Mapping[str,
     return grown
 
 
-def _merge_runs(slots: Sequence[dict[str, Any]], rec_of: Mapping[str, str], *,
-                run_cap: int) -> tuple[list[dict[str, Any]], int, int]:
-    """Consecutive unlocked slots of one recording whose source spans run
-    on from each other become one slot; what is still a run longer than
-    ``run_cap`` loses its surplus. Returns (slots, merged, dropped).
+def _merge_runs(slots: Sequence[dict[str, Any]], rec_of: Mapping[str, str],
+                rec_len: Mapping[str, float], *, run_cap: int, take_max_s: float
+                ) -> tuple[list[dict[str, Any]], int, int]:
+    """A run of consecutive unlocked slots from one recording longer than
+    ``run_cap`` becomes one take: the first slot, playing the recording on
+    from its own ``src_in`` for the run's summed length, capped at
+    ``take_max_s`` and at what the recording holds. Returns (slots, runs
+    merged, slots absorbed).
 
     The run rule holds while a gap is filled, not across the refill rounds
     or the capture-order re-lay: the 05:43 draft had thirty runs of three
     or more, twelve slots of the jeep, fourteen of the cremation ghat at
     1.5 s each, which reads as flicker (critic's review, 2026-10-07,
     enhancement 2). One take of twelve seconds is one cut; twelve cuts of
-    one second each are twelve cuts and no new information."""
+    one second each are twelve cuts and no new information. Dropping the
+    surplus instead emptied the acts (act 5 to 192 s); a take keeps the
+    time and loses the cuts."""
     def rec(x):
         return rec_of.get(x.get("shot_id") or "")
+    def mergeable(x):
+        return (x.get("kind") == "video" and not x.get("locked") and not x.get("secondary_shot_id")
+                and x.get("shot_id") and rec(x))
     out: list[dict[str, Any]] = []
-    merged = 0
-    for s in slots:
-        prev = out[-1] if out else None
-        if (prev is not None and s.get("kind") == "video" and prev.get("kind") == "video"
-                and not s.get("locked") and not prev.get("locked")
-                and not s.get("secondary_shot_id") and not prev.get("secondary_shot_id")
-                and rec(s) and rec(s) == rec(prev)
-                and abs(float(s["src_in"]) - float(prev.get("src_out") or -1e9)) <= 0.75):
-            length = float(s["t_out"]) - float(s["t_in"])
-            prev["src_out"] = s.get("src_out")
-            _set_length(prev, float(prev["t_in"]), float(prev["t_out"]) + length)
-            merged += 1
-            continue
-        out.append(s)
-    kept: list[dict[str, Any]] = []
-    dropped = 0
-    run = 0
-    for s in out:
-        same = bool(kept) and rec(s) is not None and rec(s) == rec(kept[-1])
-        run = run + 1 if same else 1
-        if run > run_cap and not s.get("locked"):
-            dropped += 1
-            run -= 1
-            continue
-        kept.append(s)
-    return kept, merged, dropped
+    runs = absorbed = 0
+    k = 0
+    while k < len(slots):
+        s = slots[k]
+        run = [s]
+        while (k + len(run) < len(slots) and mergeable(s) and mergeable(slots[k + len(run)])
+               and rec(slots[k + len(run)]) == rec(s)):
+            run.append(slots[k + len(run)])
+        if len(run) > run_cap:
+            total = sum(float(x["t_out"]) - float(x["t_in"]) for x in run)
+            src_in = float(s["src_in"])
+            room = float(rec_len.get(rec(s), math.inf)) - src_in
+            length = max(float(s["t_out"]) - float(s["t_in"]), min(total, take_max_s, room))
+            take = dict(s, src_out=round(src_in + length, 3), take=1)
+            _set_length(take, float(s["t_in"]), float(s["t_in"]) + length)
+            out.append(take)
+            runs += 1
+            absorbed += len(run) - 1
+        else:
+            out.extend(run)
+        k += len(run)
+    return out, runs, absorbed
 
 
 def _chronological(slots: Sequence[dict[str, Any]],
@@ -903,7 +907,8 @@ def _check_material(slot: Mapping[str, Any], shots_by_id: Mapping[str, Mapping[s
     shot = shots_by_id[slot["shot_id"]]
     length = float(slot["t_out"]) - float(slot["t_in"])
     src_in = float(slot["src_in"] if slot.get("src_in") is not None else shot["start_s"])
-    if slot["shot_id"] == long_take_id and shot.get("recording_id") in recordings_by_id:
+    if (slot["shot_id"] == long_take_id or slot.get("take")) and shot.get("recording_id") in recordings_by_id:
+        # the long take and a merged take play the recording on past the shot
         avail = float(recordings_by_id[shot["recording_id"]].get("duration_s") or 0.0) - src_in
     else:
         avail = min(asm.shot_available_s(shot), float(shot["end_s"]) - src_in)
@@ -1468,11 +1473,13 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
             log.info("S06 act %d: %d talking slot(s) extended to the end of their sentence", act, grown)
         slots = _chronological(slots, shots_by_id, act_t0)
         rec_of = {sid: r.get("recording_id") for sid, r in shots_by_id.items() if r.get("recording_id")}
-        slots, merged, dropped = _merge_runs(slots, rec_of,
-                                             run_cap=int(cfg.get("assemble.max_consecutive_recording")))
-        if merged or dropped:
-            log.info("S06 act %d: %d consecutive slot(s) of one recording merged into the one before, "
-                     "%d dropped over the run cap", act, merged, dropped)
+        rec_len = {rid: float(r.get("duration_s") or 0.0) for rid, r in recordings_by_id.items()}
+        slots, runs, absorbed = _merge_runs(slots, rec_of, rec_len,
+                                            run_cap=int(cfg.get("assemble.max_consecutive_recording")),
+                                            take_max_s=float(cfg.get("assemble.take_max_s")))
+        if runs:
+            log.info("S06 act %d: %d run(s) of one recording became one take each, %d slot(s) absorbed",
+                     act, runs, absorbed)
             slots = _chronological(slots, shots_by_id, act_t0)
         # A 360 slot looks away from the holder unless the holder is
         # speaking: every one of the 38 was the selfie-stick view at yaw 0

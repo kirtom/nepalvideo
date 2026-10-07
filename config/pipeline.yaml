@@ -442,6 +442,10 @@ assemble:
   # speaker): on a selfie stick yaw 0 is the holder's face, 180 the way the
   # party is going (critic's review, 2026-10-07). Remove the key to keep 0.
   yaw_away_when_silent: 180
+  # A run of consecutive slots from one recording longer than the run cap is
+  # one take of at most this many seconds (critic's review, 2026-10-07): the
+  # jeep's twelve cuts become twelve seconds of one shot.
+  take_max_s: 12.0
   # A talking shot runs to the end of the sentence it is in: the retime cut
   # lines mid-word ("sometimes the video with the voice track ends abruptly
   # ... the sentences should be continued to the end", operator, 2026-10-07

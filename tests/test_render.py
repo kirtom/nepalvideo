@@ -65,9 +65,11 @@ def test_timestamps_are_reset_after_every_trim():
 
 def test_the_frame_is_fitted_not_stretched():
     """The same lesson as the S03.1 proxies: this corpus is not all 16:9."""
-    f = render.segment_filters(ROWS[0], 0, width=960, height=540)
+    f = render.segment_filters(ROWS[0], 0, width=960, height=540, fill="black")
     assert "force_original_aspect_ratio=decrease" in f
     assert "pad=960:540" in f, "letterbox rather than distort"
+    assert "force_original_aspect_ratio=decrease" in render.segment_filters(ROWS[0], 0), \
+        "and the blur fill fits the frame the same way, over its own blur"
 
 
 @pytest.mark.skipif(not render.has_drawtext(), reason="ffmpeg has no drawtext")
@@ -638,7 +640,7 @@ def test_a_track_without_cues_is_silence_for_the_length_of_the_film(tmp_path):
 def test_without_cues_the_command_is_the_silent_draft_byte_for_byte(monkeypatch, tmp_path):
     monkeypatch.setattr(render, "has_drawtext", lambda **kw: False)
     out = tmp_path / "o.mp4"
-    cmd = render.build_command(ROWS, sources=SRC, out_path=out, cues=(), levels=LEVELS)
+    cmd = render.build_command(ROWS, sources=SRC, out_path=out, cues=(), levels=LEVELS, fill="black")
     assert cmd == ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
                    "-ss", "5.000", "-t", "3.500", "-i", "/m/a.mp4",
                    "-ss", "0.000", "-t", "4.500", "-i", "/m/b.mp4",
