@@ -1528,7 +1528,10 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
 
     natural, n_unplaced = _natural_windows(cfg, prof, ordered, shots_by_id)
     film_end = float(ordered[-1]["t_out"]) if ordered else 0.0
-    ordered += _credits_slots(cfg, conn, mmap, ordered)
+    credits, outtakes = _credits_slots(cfg, conn, mmap, ordered)
+    ordered += credits
+    for r in outtakes:
+        shots_by_id.setdefault(r["shot_id"], r)       # the material check reads them too
 
     # -- the write ---------------------------------------------------------------
     for s in ordered:
@@ -1651,13 +1654,15 @@ def _credits_bed(conn, used_recordings: set[str], *, slot_s: float, n: int) -> l
 
 
 def _credits_slots(cfg: Config, conn, mmap: Mapping[str, Any], ordered: Sequence[Mapping[str, Any]]
-                   ) -> list[dict[str, Any]]:
+                   ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The end credits (spec sections 1.8 and S09.1): 60-120 s after the
     last slot, not counted against the film, the cards over an outtakes
-    bed, the reserved track under them (laid by the cues step)."""
+    bed, the reserved track under them (laid by the cues step). Returns
+    the slots and the bed's shot rows: outtakes are shots the gate
+    rejected, which the cut's own shot map never held."""
     c = cfg.get("film.credits") or {}
     if not c.get("enabled") or not ordered:
-        return []
+        return [], []
     length = float(c.get("duration_s") or 90.0)
     slot_s = float(c.get("bed_slot_s") or 2.5)
     used = {str(s[k]) for s in ordered for k in ("shot_id", "secondary_shot_id") if s.get(k)}
@@ -1668,7 +1673,7 @@ def _credits_slots(cfg: Config, conn, mmap: Mapping[str, Any], ordered: Sequence
     bed = _credits_bed(conn, used_recordings, slot_s=slot_s, n=max(1, math.ceil(length / slot_s)))
     if not bed:
         log.warning("S06 credits: no unused shot to lay them over; the film ends without credits")
-        return []
+        return [], []
     # fewer outtakes than the roll needs: each holds longer, up to 4 s
     each = max(slot_s, min(4.0, length / len(bed)))
     total_w = sum(w for _, w in cards)
@@ -1691,7 +1696,7 @@ def _credits_slots(cfg: Config, conn, mmap: Mapping[str, Any], ordered: Sequence
     out[-1]["motion"] = json.dumps(last, ensure_ascii=False)
     log.info("S06 credits: %d card(s) over %d outtake(s), %.1fs after the film", len(cards), len(out),
              float(out[-1]["t_out"]) - float(ordered[-1]["t_out"]))
-    return out
+    return out, bed
 
 
 def _reported_windows(cfg: Config) -> list[dict[str, Any]] | None:
