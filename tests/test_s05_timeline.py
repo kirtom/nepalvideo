@@ -1038,3 +1038,20 @@ def test_the_title_card_opens_the_film_when_configured(tmp_path):
     assert m["type"] == "title" and m["text"] == "Manaslu Circuit Trek" and m["background"].endswith("title/bg.mp4")
     assert second["t_in"] == 6.0 and second["beat_id"] == "b_pass", "the cold open follows the title"
     conn.close()
+
+
+def test_a_scene_shared_by_two_windows_is_locked_by_the_one_holding_more_of_it():
+    from types import SimpleNamespace as NS
+    from nepal.stages import s05_cut as s5
+    tracks = [s5.music_mod.Track(track_id="A.One", s3_key="", title="One"),
+              s5.music_mod.Track(track_id="B.Two", s3_key="", title="Two")]
+    scenes = [NS(scene_id=22, t_in=1645.0, t_out=1697.0), NS(scene_id=23, t_in=1697.0, t_out=1749.0),
+              NS(scene_id=24, t_in=1749.0, t_out=1841.0)]
+    windows = [NS(act=4, t_in=1649.0, t_out=1725.0, scene_ids=(22, 23)),
+               NS(act=4, t_in=1747.0, t_out=1841.0, scene_ids=(23, 24))]
+    kept, locked = s5._lock_windows(windows, {"4/0": ["One"], "4/1": ["Two"]}, tracks, scenes)
+    assert len(kept) == 2
+    assert locked[22] == ("4/0", ["A.One"]) and locked[24] == ("4/1", ["B.Two"])
+    assert locked[23] == ("4/0", ["A.One"]), "28 s in the first window against 2 s in the second"
+    kept, locked = s5._lock_windows(windows, {"4/1": ["Two"]}, tracks, scenes)
+    assert [w.t_in for w in kept] == [1747.0] and set(locked) == {23, 24}, "an unnamed window is silent"

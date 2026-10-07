@@ -625,6 +625,72 @@ should extend the previous cue instead (not yet done). Box time tonight
 3.6 h; ledger 38.71 of 45 USD; the box is down. One window test
 expectation was corrected after the last box run and has not been run.
 
+## Film v2 — step 4, part G: Gate 3 rounds four to six (2026-10-07, 07:24–09:15)
+
+**Round four (07:24, on the 05:43 draft).** One play per track
+(`reuse_gap_s` 100000, `repeat_penalty` 5.0); a talking slot runs to the
+end of its sentence (`_finish_sentences`, up to 8 s, splits excluded);
+the operator liked the 05:43 soundtrack placement. The 07:42 draft:
+1984.4 s, 436 slots, 14 tracks each once, Act 1 86 s (the extensions).
+
+**The critic's review** (`docs/reviews/2026-10-07-critic-review.md`, one
+to three frames a slot, contact sheets) ranked: black bars behind a third
+of the picture; runs of one recording cut into 1.5 s slivers; every 360
+shot at the holder's face; the summit windows at −8/−9 LUFS; no title or
+credits. The operator asked for items 1–4 and a title card (07:39).
+
+**Round five (07:39 → the 08:33 draft).** Blur fill behind any frame
+that is not 16:9 (`render.fill: blur`); a run of consecutive slots from
+one recording longer than the run cap becomes takes of at most
+`assemble.take_max_s` (12 s) that keep the run's time (dropping the
+surplus had cost Act 5 three minutes); a title card before the cold open
+(`film.title`: "Manaslu Circuit Trek / April – May 2024" over Pixabay clip
+258656 in `nepal_data/title/`, blurred, 6 s). The draft: 2065 s, 34.4
+min, 380 slots, 118 slivers folded into 29 takes, 8 windows, 60 % scored.
+Three things went wrong in it, all found in the verification or by the
+operator (08:53):
+
+1. **The soundtrack changed.** `switch_cost` 0.6 (the critic's "one track
+   per window") re-ran the assignment into a different placement and
+   gave Mind Heist two windows, the second restarting at 0:49 after the
+   first had played the file to its end.
+2. **Every portrait clip was squeezed again.** My `nepal remote push` at
+   07:54, run for the title clip, also pushed the local September
+   `work/proxies` (all 960×540) over the box's rebuilt ones in the bucket;
+   the box pulled them and rendered with them. `sync.PUSH` now carries raw
+   data only; the box heals with `s03 --redo proxies`.
+3. **The title was white on white.** `colorlevels=rimax=0.75` clips the
+   highlights to white instead of dimming.
+
+Also measured: the music cue's `gain_lufs` was never applied to the file
+(the music chain had no volume filter), so every track played as
+mastered; the 360 "look away unless speaking" rule touched 1 slot of 26
+(the holder narrates in 25).
+
+**Round six (08:53, operator asleep after).** Rulings: the soundtrack of
+the previous draft, unchanged; proportions; the 360 idea withdrawn (yaw 0
+again); the title legible. Done in db917f4:
+
+- `music.lock` pins the 07:42 placement: `"<act>/<n>"` names the n-th
+  window of an act and lists its tracks in order; `assign_scenes` takes
+  only a locked window's tracks, in that order; an unnamed window is
+  silent. Mind Heist plays once, in 4/1 (07:42 had 16 s of it closing 4/0
+  with a jump back). `switch_cost` back to 0.05.
+- A track heard in an earlier window goes on from where it got to
+  (`played_to` in `music_cues`), never from an earlier time of itself.
+- Title: `colorlevels=romax=0.45` plus a drop shadow on both lines.
+- `yaw_away_when_silent` removed, with its code.
+- Critic item 4 properly: S02.7 measures each track's integrated loudness
+  (`music_tracks.lufs`); the mix brings a music cue from it to its
+  `gain_lufs` (−17 bed). Unmeasured tracks play as before.
+- 1262 tests pass locally; four stale expectations (photo hold, bootstrap
+  rsync text, face_hold_s, reuse_gap_s) brought to the current rules.
+
+The box run for this round: `pytest`, `s03 --redo proxies` (rebuilds the
+wrong-shaped proxies), `s02 --redo music` (the loudness column), `cut
+--redo timeline,cues,draft`. Results in the next part. Still open for the
+operator: Act 1 at 86 s (the sentence extensions), the film at 34 min.
+
 ## The last full run
 
 S01 + S03.0/.1/.2 on the real corpus, 4.5 hours wall clock. These numbers are

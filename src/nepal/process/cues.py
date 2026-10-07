@@ -478,6 +478,10 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
             kept = [i for i, seg in enumerate(segments)
                     if t_start + float(seg["t_end"]) > w0 + _EDGE_TOL_S
                     and t_start + float(seg["t_in"]) < w1 - _EDGE_TOL_S]
+            while len(kept) > 1 and t_start + float(segments[kept[0]]["t_end"]) - w0 < loop_min_piece_s:
+                # The scene before the window reaches a sliver into it; the
+                # next track opens the window instead of a two-second cue.
+                kept.pop(0)
             prev_track, prev_src_out = None, 0.0
             ran_out = False
             for i in kept:

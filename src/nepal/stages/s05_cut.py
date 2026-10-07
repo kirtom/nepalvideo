@@ -1018,7 +1018,7 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
         climb_gain_m_per_h=float(cfg.get("music.placement.climb_gain_m_per_h")))
     locked: dict[int, tuple[str, list[str]]] = {}
     if cfg.get("music.lock"):
-        windows, locked = _lock_windows(windows, cfg.get("music.lock"), tracks)
+        windows, locked = _lock_windows(windows, cfg.get("music.lock"), tracks, scenes)
     in_window = {sid for w in windows for sid in w.scene_ids}
     eligible = [sc for sc in scenes if sc.scene_id in in_window]
     window_starts = {w.scene_ids[0] for w in windows}
@@ -1779,15 +1779,22 @@ def _track_named(name: str, tracks: Sequence[music_mod.Track]) -> str:
     return hits[0]
 
 
-def _lock_windows(windows, lock: Mapping[str, Sequence[str]], tracks: Sequence[music_mod.Track]):
+def _lock_windows(windows, lock: Mapping[str, Sequence[str]], tracks: Sequence[music_mod.Track],
+                  scenes: Sequence[Any] = ()):
     """``music.lock`` pins the soundtrack: ``"<act>/<n>"`` names the n-th
     music window of an act (in film order, from 0) and lists its tracks in
     order. A window the lock does not name gets no music, so the film
     carries the tracks the operator approved and no others; a locked
-    window the cut no longer has is logged and lost."""
+    window the cut no longer has is logged and lost. A scene two windows
+    share (the gap between them lies inside it) is locked by the window
+    holding more of it: locked by the later one, scene 23 of the 09:50
+    draft played Mind Heist to the file's end in act 4's first window and
+    left the second silent."""
     ordered = sorted(windows, key=lambda w: (w.act, w.t_in))
+    span = {sc.scene_id: (float(sc.t_in), float(sc.t_out)) for sc in scenes}
     seen: dict[int, int] = {}
-    kept, locked, dropped = [], {}, []
+    kept, dropped = [], []
+    best: dict[int, tuple[float, str, list[str]]] = {}
     for w in ordered:
         k = seen.get(w.act, 0)
         seen[w.act] = k + 1
@@ -1798,8 +1805,12 @@ def _lock_windows(windows, lock: Mapping[str, Sequence[str]], tracks: Sequence[m
             continue
         ids = [_track_named(str(n), tracks) for n in names]
         for sid in w.scene_ids:
-            locked[sid] = (key, ids)
+            s0, s1 = span.get(sid, (w.t_in, w.t_out))
+            overlap = min(s1, float(w.t_out)) - max(s0, float(w.t_in))
+            if sid not in best or overlap > best[sid][0]:
+                best[sid] = (overlap, key, ids)
         kept.append(w)
+    locked = {sid: (key, ids) for sid, (_, key, ids) in best.items()}
     missing = sorted(set(lock) - {f"{w.act}/{k}" for w in kept for k in range(seen.get(w.act, 0))})
     log.info("S06 music.lock: %d window(s) pinned, %d unnamed window(s) silenced %s, %d locked window(s) "
              "absent from this cut %s", len(kept), len(dropped), dropped, len(missing), missing)

@@ -607,3 +607,17 @@ def test_a_track_switch_with_no_room_left_extends_the_previous_cue():
                            track_s={"t1": 300.0, "t2": 300.0}, loop_min_piece_s=8.0)
     assert [(r["source"], r["t_in"], r["t_out"], r["src_out"], r["fade_out_s"]) for r in rows] == [
         ("t1", 0.0, 60.0, 70.0, 1.0)]
+
+
+def test_a_sliver_of_the_scene_before_a_window_does_not_open_it():
+    # The 09:50 draft: scene 23 reached 2 s into act 4's second window, so its
+    # track opened the window for 2 s before the window's own track began.
+    mmap = {"acts": [{"act": 4, "t_start": 0.0, "t_end": 200.0,
+                      "music_windows": [{"t_start": 0.0, "t_end": 80.0}, {"t_start": 100.0, "t_end": 200.0}],
+                      "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 50.0, "src_in": 0.0, "src_out": 50.0},
+                                   {"track_id": "t1", "t_in": 50.0, "t_end": 102.0, "src_in": 50.0, "src_out": 102.0},
+                                   {"track_id": "t2", "t_in": 102.0, "t_end": 200.0, "src_in": 40.0, "src_out": 138.0}]}]}
+    rows = cues.music_cues(mmap, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0, track_s={"t1": 300.0, "t2": 300.0})
+    second = [r for r in rows if r["t_in"] >= 100.0 - 1e-6]
+    assert second and second[0]["source"] == "t2" and second[0]["t_in"] == 100.0, [(r["source"], r["t_in"]) for r in rows]
+    assert second[0]["src_in"] == 38.0, "t2 opens on the window, picked up 2 s earlier in its file"
