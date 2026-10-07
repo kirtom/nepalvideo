@@ -499,8 +499,8 @@ def music_windows(scenes: Sequence[Scene], *, blocked: Sequence[tuple[float, flo
                   prefer_late_acts: Sequence[int] = (),
                   arrival_gain_m_per_h: float = 0.0,
                   climb_gain_m_per_h: float = math.inf) -> list[MusicWindow]:
-    """The stretches that may carry music: runs of consecutive scenes that no
-    blocking span touches, opening on movement, each at least
+    """The stretches that may carry music: the free pieces of each act
+    between the blocking spans, opening on movement, each at least
     ``min_window_s`` long, and at most ``max_windows_per_act`` to an act.
 
     A run breaks at an act boundary as well as at a blocked scene, because
@@ -531,34 +531,49 @@ def music_windows(scenes: Sequence[Scene], *, blocked: Sequence[tuple[float, flo
     into the credits. Ranking arrival first there would hand the slot to the
     first window of the descent and end the film in silence.
     """
-    spans = [(float(a), float(b)) for a, b in blocked if b > a]
-    runs: list[list[Scene]] = []
-    broken = True
+    spans = sorted((float(a), float(b)) for a, b in blocked if b > a)
+    # Windows are the free pieces of an act -- its scenes' extent with every
+    # blocking span cut out -- not whole scenes that nothing touches. A scene
+    # runs up to music.max_segment_s (150 s), and one line anywhere in it
+    # used to make the whole scene ineligible: act 2's 105 s of free trail,
+    # act 4's 53 and 62 s and act 5's 130 and 71 s never carried music. The
+    # piece that opens four seconds after a line ends is exactly the cut the
+    # operator asked for more of -- "the part when we speak, then you cut to
+    # a dynamic part with the soundtrack" (Gate 3, 2026-10-07 05:07).
+    by_act: dict[int, list[Scene]] = {}
     for sc in scenes:
-        if sc.act < 1 or any(_overlaps(sc.t_in, sc.t_out, a, b) for a, b in spans):
-            broken = True
-            continue
-        if broken or not runs or runs[-1][-1].act != sc.act:
-            runs.append([sc])
-        else:
-            runs[-1].append(sc)
-        broken = False
-
+        if sc.act >= 1:
+            by_act.setdefault(sc.act, []).append(sc)
     windows: list[MusicWindow] = []
-    for run in runs:
-        if enter_on:
-            opens = next((k for k, sc in enumerate(run) if sc.activity in enter_on), None)
-            if opens is None:
-                continue                        # nothing here to enter on
-            run = run[opens:]
-        if run[-1].t_out - run[0].t_in < min_window_s:
-            continue
-        windows.append(MusicWindow(
-            act=run[0].act, t_in=run[0].t_in, t_out=run[-1].t_out,
-            scene_ids=tuple(sc.scene_id for sc in run),
-            arrival=_is_arrival(run[0], scenes, arrival_gain_m_per_h=arrival_gain_m_per_h,
-                                climb_gain_m_per_h=climb_gain_m_per_h)))
-
+    for act, mine in by_act.items():
+        pieces = [(mine[0].t_in, mine[-1].t_out)]
+        for b0, b1 in spans:
+            cut: list[tuple[float, float]] = []
+            for a0, a1 in pieces:
+                if b1 <= a0 or b0 >= a1:
+                    cut.append((a0, a1))
+                    continue
+                if b0 > a0:
+                    cut.append((a0, b0))
+                if b1 < a1:
+                    cut.append((b1, a1))
+            pieces = cut
+        for p0, p1 in pieces:
+            inside = [sc for sc in mine if sc.t_out > p0 and sc.t_in < p1]
+            if not inside:
+                continue
+            if enter_on:
+                k = next((n for n, sc in enumerate(inside) if sc.activity in enter_on), None)
+                if k is None:
+                    continue                    # nothing here to enter on
+                if k > 0:
+                    p0, inside = max(p0, inside[k].t_in), inside[k:]
+            if p1 - p0 < min_window_s:
+                continue
+            windows.append(MusicWindow(
+                act=act, t_in=p0, t_out=p1, scene_ids=tuple(sc.scene_id for sc in inside),
+                arrival=_is_arrival(inside[0], scenes, arrival_gain_m_per_h=arrival_gain_m_per_h,
+                                    climb_gain_m_per_h=climb_gain_m_per_h)))
     caps = dict(max_windows_by_act or {})
     kept: list[MusicWindow] = []
     for act in {w.act for w in windows}:
