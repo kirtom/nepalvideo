@@ -531,6 +531,8 @@ def _finish_sentences(slots: Sequence[dict[str, Any]], shots_by_id: Mapping[str,
         shot = shots_by_id.get(s.get("shot_id") or "")
         if s.get("kind") != "video" or not shot or not shot.get("has_speech"):
             continue
+        if s.get("secondary_shot_id"):
+            continue                    # a split is bounded by the other phone's clip too
         try:
             segments = json.loads(shot.get("transcript_json") or "{}").get("segments") or []
         except (ValueError, TypeError):
