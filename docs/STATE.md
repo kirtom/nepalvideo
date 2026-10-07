@@ -731,6 +731,19 @@ planned tasks … be autonomous". Done in that stretch:
   The 11:11 draft had drawn every apostrophe line as its own filter
   options in small type at the top of the frame.
 
+**The conform does not work as one ffmpeg (16:15).** The draft's graph
+opens every slot as its own input, 773 of them, and that is fine at
+540p from proxies. From the originals, 326 open decoders of 1080p and
+4K files hold their frame pools at once: after 90 minutes Cloud
+Monitoring showed the box at 22–32 % CPU with 33 MB/s of sustained disk
+reads and ssh could not get a session — swapping, not encoding. The
+box was reset (its boot pushes `work/` to the bucket) and
+`nepal_20min.mp4` does not exist. Next: render the conform in chunks —
+one ffmpeg per act (or per N slots) writing video-only pieces, the audio
+mix once from the proxies' wavs as today, then a concat and a mux —
+`render.conform.chunk_slots`, so no more than a few dozen decoders live
+at a time. The draft keeps its one-pass render.
+
 Not done, deliberately: the 3-minute cut (spec S09; the act minimums sum
 to 655 s, so it needs a scaled constraint profile and a second timeline,
 not a config switch), the route-map overlay and the grade (S08.4–5),
