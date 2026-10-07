@@ -123,9 +123,14 @@ def escape_drawtext(text: str) -> str:
     escaping is not optional.
     """
     out = str(text)
-    for a, b in (("\\", r"\\"), (":", r"\:"), ("'", r"\'"), ("%", r"\%")):
+    for a, b in (("\\", r"\\"), (":", r"\:"), ("%", r"\%")):
         out = out.replace(a, b)
-    return out
+    # Every caller wraps the result in single quotes, and a quoted string
+    # cannot hold a quote, escaped or not: the quote is closed, an escaped
+    # quote emitted, the quote reopened -- ffmpeg's own idiom. The
+    # credits' "camera's clock" and "She's A Rainbow" were the first
+    # apostrophes to reach a render (2026-10-07).
+    return out.replace("'", "'\\''")
 
 
 def leg_frames(row: Mapping[str, Any], fps: int = DRAFT_FPS) -> int:
