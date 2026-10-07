@@ -468,8 +468,14 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
         for w0, w1 in by_act.get(int(entry["act"]), []):
             starts_music = not any(math.isclose(w0, e, abs_tol=_EDGE_TOL_S) for e in all_ends)
             ends_music = not any(math.isclose(w1, a, abs_tol=_EDGE_TOL_S) for a in all_starts)
+            # Every segment the window reaches, not only those that begin in
+            # it: a window now opens in the middle of a scene (the piece after
+            # a line), and that scene's segment begins before it. The first
+            # kept segment is clipped to the window below, its track advanced
+            # by the same amount; without this such a window played silent.
             kept = [i for i, seg in enumerate(segments)
-                    if w0 - _EDGE_TOL_S <= t_start + float(seg["t_in"]) < w1 - _EDGE_TOL_S]
+                    if t_start + float(seg["t_end"]) > w0 + _EDGE_TOL_S
+                    and t_start + float(seg["t_in"]) < w1 - _EDGE_TOL_S]
             prev_track, prev_src_out = None, 0.0
             ran_out = False
             for i in kept:

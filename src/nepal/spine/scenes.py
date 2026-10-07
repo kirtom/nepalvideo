@@ -570,9 +570,13 @@ def music_windows(scenes: Sequence[Scene], *, blocked: Sequence[tuple[float, flo
                     p0, inside = max(p0, inside[k].t_in), inside[k:]
             if p1 - p0 < min_window_s:
                 continue
+            # The arrival is read on the first scene that *begins* inside the
+            # piece: a window opening in the tail of the climb, four seconds
+            # after its line, is still the window that reaches the top.
+            opening = next((sc for sc in inside if sc.t_in >= p0 - 1e-6), inside[0])
             windows.append(MusicWindow(
                 act=act, t_in=p0, t_out=p1, scene_ids=tuple(sc.scene_id for sc in inside),
-                arrival=_is_arrival(inside[0], scenes, arrival_gain_m_per_h=arrival_gain_m_per_h,
+                arrival=_is_arrival(opening, scenes, arrival_gain_m_per_h=arrival_gain_m_per_h,
                                     climb_gain_m_per_h=climb_gain_m_per_h)))
     caps = dict(max_windows_by_act or {})
     kept: list[MusicWindow] = []
