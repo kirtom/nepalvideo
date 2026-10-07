@@ -130,7 +130,7 @@ def test_a_photograph_is_held_for_its_slot_not_shown_for_one_frame(tmp_path):
     assert "-loop" not in cmd
     assert "-ss" not in cmd, "a still has nowhere to seek to"
     fc = _graph(cmd)
-    assert "loop=loop=-1:size=1" in fc and "trim=duration=3.000" in fc
+    assert "loop=loop=-1:size=1" in fc and "trim=end_frame=90" in fc    # 3 s on the 30 fps grid
 
 
 def test_video_and_stills_can_share_one_timeline(tmp_path):
@@ -646,9 +646,11 @@ def test_without_cues_the_command_is_the_silent_draft_byte_for_byte(monkeypatch,
                    "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                    # the render publishes itself by renaming this on exit 0
                    "-pix_fmt", "yuv420p", str(render.part_path(out))]
-    leg = ("fps=30,setpts=PTS-STARTPTS,scale=960:540:force_original_aspect_ratio=decrease"
-           ":force_divisible_by=2,pad=960:540:(ow-iw)/2:(oh-ih)/2:black,setsar=1")
-    assert _graph(cmd) == f"[0:v]{leg}[v0];[1:v]{leg}[v1];[v0][v1]concat=n=2:v=1:a=0[vout]"
+    def leg(frames):
+        return (f"fps=30,setpts=PTS-STARTPTS,trim=end_frame={frames},"
+                "scale=960:540:force_original_aspect_ratio=decrease"
+                ":force_divisible_by=2,pad=960:540:(ow-iw)/2:(oh-ih)/2:black,setsar=1")
+    assert _graph(cmd) == f"[0:v]{leg(90)}[v0];[1:v]{leg(120)}[v1];[v0][v1]concat=n=2:v=1:a=0[vout]"
 
 
 def test_the_graph_can_be_written_where_the_caller_says(tmp_path):
@@ -1087,5 +1089,5 @@ def test_every_leg_is_cut_to_the_frame_grid_so_the_picture_cannot_drift():
     assert abs(total / 30 - 100 * 2.3337) < 1 / 30
     chain = render.segment_filters(rows[1], 1, overlay=False)
     assert "trim=end_frame=70" in chain and chain.index("setpts=PTS-STARTPTS") < chain.index("trim=end_frame")
-    still = render.segment_filters({"shot_id": "p", "kind": "photo", "t_in": 0.0, "t_out": 2.5}, 0, overlay=False)
+    still = render.segment_filters({"shot_id": "p", "media_kind": "photo", "t_in": 0.0, "t_out": 2.5}, 0, overlay=False)
     assert "loop=loop=-1" in still and "trim=end_frame=75" in still and "trim=duration" not in still

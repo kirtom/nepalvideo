@@ -506,6 +506,81 @@ it in one cut and not the next; the Act 3 loop warning (one track laid
 7× over 1320 s) wants a longer or a building track in the library.
 
 
+## Film v2 — step 4, part E: Gate 3 round two (2026-10-07, 03:51–04:45)
+
+The operator's second list, on the 03:24 draft, and what each turned out
+to be.
+
+**"Audio not synchronous with video in many, many places."** Real, and
+measured rather than argued. The draft's sound cross-correlated against
+the source clips at five slots: **5 ms off** — the right clip at the right
+offset. The draft's *frames* matched against the source at slots 24 and
+28: **0.35–0.45 s late**, the same at every probe inside a slot. Cause:
+every video leg was cut by seconds (`-t`, `trim=duration`) and rounded up
+to a whole frame, while every audio cue is placed at exact timeline
+seconds; the picture fell **10.7 ms a slot** behind the sound — 0.35 s by
+slot 24, **10 s by the end** of the 474-slot draft (2045.7 s rendered
+against 2035 s of timeline). Every leg is now cut to a frame count taken
+from its two boundaries on the frame grid (`leg_frames`), so the concat
+is within one frame of the timeline everywhere. Proof: the next render
+came out **1488.267 s against 1488.253 s** of timeline, 14 ms over 362
+slots. (The previous "longer is arithmetic, not loss" reading of the
++5.5 s overshoot was wrong: it was this.)
+
+**"Distorted proportions at 2:11, 10:24, 12:48, 16:38."** All four are
+keller 1920×1080 clips with a rotation flag, the 21 the proxy walk had
+not rebuilt: the walk read assets without `probe_json`, so it had no
+rotation, judged those proxies right and 218 rotated kulikov ones wrong
+(rebuilding them on every pass). With the column in the query the walk
+rebuilt exactly 21 and kept 457.
+
+**"All videos should be purely chronological."** Each act's slots are
+now re-laid in capture order after the retime, lengths kept
+(`_chronological`); a card keeps the time of the slot it followed. The
+beat grid the cuts were snapped to is given up for this.
+
+**"Photos a couple of seconds."** A still used to have no limit on its
+hold ("held for as long as the slot asks"): the B-roll tail of a line
+stretched one photograph to 56 s and the low-energy band gave 5–8 s.
+`assemble.photo_max_s` 2.5 caps it everywhere; the nominal still is 2 s.
+
+**"The video, the pause, the photo of its last frame" and "no rule one
+recording per moment … you can use different videos from different
+phones for the same moment" (04:28).** A still within 90 s of a video on
+screen, or whose CLIP embedding agrees with a video's at ≥ 0.90, is not
+placed; two videos never block each other. A wider time rule (180 s, all
+kinds) was tried and emptied a third of the film (362 slots, 24.8 min).
+
+**"Mute videos when music is playing (keep the subtitles)."** Location
+sound under a music window is at −70 LUFS now; the speech beats stay.
+There are no subtitles in the film; the sixteen lines are voice.
+
+**"A bit more music", "the outro piece earlier than the end."** Three
+windows an act (two in Act 5), 45 s minimum, transport and city scenes
+may open one; *Outro* is excluded from Act 5 (`excluded_tracks_by_act`).
+*We Didn't Start the Fire* was never excluded — the assignment chose it
+in one cut and not the next.
+
+**The voice stays on its own picture.** `beats.face_hold_s` 2.5 → 600: a
+line is no longer laid over B-roll, which the operator read as sound
+that did not belong to the picture.
+
+**The draft from this round** (04:41, `work/gates/gate3/draft.mp4`,
+288.7 MB, **1743.148 s rendered against 1743.148 s of timeline**, 29.1
+min): 424 slots — Act 1 53 s, Act 2 157 s, Act 3 1095 s, Act 4 142 s, Act
+5 276 s (99 s short under the drift bound; the planned total fell to 31.2
+min because a still now counts 2.5 s of material, not 20). Zero backward
+steps in capture order inside any act. All 33 stills at or under 2.5 s.
+All 38 slots from 360 recordings through the window; the 21 portrait
+keller clips rebuilt. Each of the 15 speech beats is one slot on its own
+shot. Location sound at −70 LUFS under every music window (151 cues).
+Music, 5 windows, 573 s (33 %): *Send Me on My Way* 404–499 s, *Home*
+677–872 s, *Albatross* 872–922 s, *Send Me on My Way* 1093–1258 s, *Sita
+Ram* 1566–1634 s. Box time tonight 3.0 h; ledger 38.54 of 45 USD; the box
+is down. Three render tests still assert the old `-t`/`trim=duration`
+strings and were corrected after the last box run; they have not been run
+since (next box session).
+
 ## The last full run
 
 S01 + S03.0/.1/.2 on the real corpus, 4.5 hours wall clock. These numbers are
