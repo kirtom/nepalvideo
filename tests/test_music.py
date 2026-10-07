@@ -1347,3 +1347,16 @@ def test_the_run_cap_is_given_up_rather_than_return_no_assignment():
                       preferred=[], preferred_bonus=0.0, exclude=[], act4_swell=False,
                       max_track_run_s=60.0)
     assert len(a.by_scene) == 4 and "track-run cap" in a.note
+
+
+def test_a_locked_window_takes_only_its_tracks_in_their_order():
+    # Operator, 2026-10-07 08:53: the previous draft's soundtrack, kept on a changed cut.
+    _, _, free = assign_four_scenes()
+    assert free.by_scene[2][0] == "driving" and free.by_scene[3][0] == "driving"
+    lock = {sid: ("3/0", ["calm"]) for sid in (1, 2, 3, 4)}
+    _, _, a = assign_four_scenes(locked=lock)
+    assert all(a.by_scene[sid][0] == "calm" for sid in (1, 2, 3, 4)), "the climb takes the locked calm track"
+    both = {sid: ("3/0", ["driving", "calm"]) for sid in (1, 2, 3, 4)}
+    _, _, b = assign_four_scenes(locked=both)
+    order = [["driving", "calm"].index(b.by_scene[sid][0]) for sid in (1, 2, 3, 4)]
+    assert order == sorted(order), f"never back from calm to driving inside one window: {order}"

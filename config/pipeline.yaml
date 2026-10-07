@@ -438,10 +438,6 @@ assemble:
   # the overlap walk and the retime left cuts of 0.14-0.5 s (operator,
   # 2026-10-07: "very, very shortly ... at least a little bit longer").
   min_slot_s: 1.0
-  # A 360 slot is viewed at this yaw unless its shot has speech (then 0, the
-  # speaker): on a selfie stick yaw 0 is the holder's face, 180 the way the
-  # party is going (critic's review, 2026-10-07). Remove the key to keep 0.
-  yaw_away_when_silent: 180
   # A run of consecutive slots from one recording longer than the run cap is
   # one take of at most this many seconds (critic's review, 2026-10-07): the
   # jeep's twelve cuts become twelve seconds of one shot.
@@ -582,7 +578,25 @@ music:
   # that margin; at 0.05 / 0.01 the same corpus uses 7 tracks with a longest
   # run of 743 s. Re-measure (music-assignment-diagnosis.md) if the targets
   # or the library change.
-  switch_cost: 0.6                # 0.05 -> 0.6: one track per window, not three in 77 s (critic's review, 2026-10-07)
+  switch_cost: 0.05               # penalty for changing track between adjacent scenes
+  # The soundtrack of the 07:42 draft of 2026-10-07, pinned: "<act>/<n>" is
+  # the n-th music window of the act (film order, from 0) and lists its
+  # tracks in order; a window not named here is silent (operator, 08:53:
+  # "the soundtrack that was applied to the previous video ... stay as it
+  # was"). Names match a track_id or title; the sections and the exact cut
+  # points come from the assignment as before.
+  lock:
+    "2/0": ["M83.Outro"]
+    "3/0": ["Home (featuring the Gulu Widows Choir)", "We Didn't Start the Fire"]
+    "3/1": ["Send Me on My Way", "Albatross", "Thunder"]
+    "3/2": ["Start Me Up", "Hans Zimmer.Time"]
+    # 07:42 had 16 s of Mind Heist closing 4/0 and 81 s of it in 4/1 from an
+    # earlier point in the file; a track never jumps back, so 4/0 is She
+    # Loves alone and Mind Heist plays once, in 4/1.
+    "4/0": ["She Loves"]
+    "4/1": ["Mind Heist"]
+    "5/0": ["Imagine the Fire", "Empire State Of Mind"]
+    "5/1": ["She's A Rainbow", "Born Slippy"]
   continuity_bonus: 0.01          # reward for keeping the same track across a cut
   repeat_penalty: 5.0             # a refusal, not a nudge: one play per track (operator, 2026-10-07)
   scene_targets:                  # weights of the distance terms

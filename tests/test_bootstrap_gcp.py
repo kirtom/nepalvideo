@@ -63,7 +63,7 @@ def test_every_boot_installs_the_idle_watchdog_and_stamps_the_boot():
     # watchdog reads is spelled out here to drift from it
     assert f"-m {watchdog.__name__} install | bash" in s
     assert f"-m {watchdog.__name__} touch" in s
-    assert s.index("rsync --recursive \"$BUCKET/work\" $ROOT/nepal_work") < \
+    assert s.index("\"$BUCKET/work\" $ROOT/nepal_work") < \
         s.index(f"-m {watchdog.__name__} touch")
 
 
@@ -72,6 +72,6 @@ def test_a_box_with_state_pushes_work_on_boot_rather_than_pulling():
     only when it ends, and a preempted run never did."""
     s = SCRIPT.read_text()
     assert 'if [ -f $ROOT/nepal_work/db/nepal.sqlite ]; then' in s
-    push = s.index("rsync --recursive $ROOT/nepal_work \"$BUCKET/work\"")
-    pull = s.index("rsync --recursive \"$BUCKET/work\" $ROOT/nepal_work")
+    push = s.index("$ROOT/nepal_work \"$BUCKET/work\"")
+    pull = s.index("\"$BUCKET/work\" $ROOT/nepal_work")
     assert push < pull

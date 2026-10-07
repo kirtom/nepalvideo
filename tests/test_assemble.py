@@ -385,7 +385,8 @@ def test_a_shot_near_the_end_of_its_recording_is_clamped_too():
 def test_a_photograph_is_not_clamped_because_a_still_has_no_end():
     shots = [{"shot_id": "p", "media_kind": "photo", "score_total": 1.0}]
     row = assemble.lay_out(shots, start_s=0.0, duration_range=[5.0, 8.0], beats=[])[0]
-    assert row["t_out"] - row["t_in"] == pytest.approx(8.0)
+    # not the clip's end but the photo hold: "a couple of seconds" (operator, 2026-10-07)
+    assert row["t_out"] - row["t_in"] == pytest.approx(assemble.PHOTO_HOLD_MAX_S)
 
 
 def test_clamping_still_prefers_a_beat_when_one_fits():

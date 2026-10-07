@@ -199,7 +199,7 @@ def _tracks(conn, excluded: Sequence[str] = ()) -> list[music_mod.Track]:
             key_est=r["key_est"], energy_mean=float(r["energy_mean"] or 0.0),
             energy_p95=float(r["energy_p95"] or 0.0), energy_p10=float(r["energy_p10"] or 0.0),
             centroid=float(r["centroid"] or 0.0), onset_rate=float(r["onset_rate"] or 0.0),
-            artist=r["artist"], assigned_act=r["assigned_act"])
+            artist=r["artist"], assigned_act=r["assigned_act"], lufs=r["lufs"])
     for r in conn.execute("SELECT * FROM music_sections ORDER BY track_id, start_s"):
         if r["track_id"] in by_id:
             by_id[r["track_id"]].sections.append(
@@ -1016,6 +1016,9 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
         prefer_late_acts=[int(a) for a in (cfg.get("music.placement.prefer_late_acts") or [])],
         arrival_gain_m_per_h=float(cfg.get("music.placement.arrival_gain_m_per_h")),
         climb_gain_m_per_h=float(cfg.get("music.placement.climb_gain_m_per_h")))
+    locked: dict[int, tuple[str, list[str]]] = {}
+    if cfg.get("music.lock"):
+        windows, locked = _lock_windows(windows, cfg.get("music.lock"), tracks)
     in_window = {sid for w in windows for sid in w.scene_ids}
     eligible = [sc for sc in scenes if sc.scene_id in in_window]
     window_starts = {w.scene_ids[0] for w in windows}
@@ -1054,7 +1057,8 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
             preferred_bonus=float(cfg.get("music.preferred_bonus")),
             exclude=[credits] if credits else [],
             window_starts=window_starts,
-            max_track_run_s=float(cfg.get("music.placement.max_track_run_s")))
+            max_track_run_s=float(cfg.get("music.placement.max_track_run_s")),
+            locked=locked or None)
     # The eligible scenes, not all of them: the callback bonus the map
     # reports is the one the assignment actually paid, and the assignment
     # never saw the rest.
@@ -1491,16 +1495,6 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
             log.info("S06 act %d: %d run(s) of one recording became one take each, %d slot(s) absorbed",
                      act, runs, absorbed)
             slots = _chronological(slots, shots_by_id, act_t0)
-        # A 360 slot looks away from the holder unless the holder is
-        # speaking: every one of the 38 was the selfie-stick view at yaw 0
-        # (critic's review, 2026-10-07, enhancement 3).
-        away = cfg.get("assemble.yaw_away_when_silent")
-        if away is not None:
-            for x in slots:
-                shot = shots_by_id.get(x.get("shot_id") or "")
-                rec = recordings_by_id.get(shot.get("recording_id")) if shot else None
-                if rec and rec.get("is_360") and x.get("kind") == "video":
-                    x["yaw"] = 0.0 if shot.get("has_speech") else float(away)
         final[act] = slots
         end = float(slots[-1]["t_out"]) if slots else act_t0
         final_spans[act] = (act_t0, end)
@@ -1772,6 +1766,46 @@ def _cue_sources(cfg: Config, conn, cues: Sequence[dict[str, Any]]
     return kept, audio_sources, music_sources, sum(dropped.values())
 
 
+def _track_named(name: str, tracks: Sequence[music_mod.Track]) -> str:
+    """The one track_id ``name`` names: itself, or the only track_id or
+    title containing it (case-insensitive)."""
+    ids = [t.track_id for t in tracks]
+    if name in ids:
+        return name
+    hits = [t.track_id for t in tracks
+            if name.casefold() in t.track_id.casefold() or name.casefold() in (t.title or "").casefold()]
+    if len(hits) != 1:
+        raise ValueError(f"music.lock names {name!r}, which matches {len(hits)} track(s): {hits}")
+    return hits[0]
+
+
+def _lock_windows(windows, lock: Mapping[str, Sequence[str]], tracks: Sequence[music_mod.Track]):
+    """``music.lock`` pins the soundtrack: ``"<act>/<n>"`` names the n-th
+    music window of an act (in film order, from 0) and lists its tracks in
+    order. A window the lock does not name gets no music, so the film
+    carries the tracks the operator approved and no others; a locked
+    window the cut no longer has is logged and lost."""
+    ordered = sorted(windows, key=lambda w: (w.act, w.t_in))
+    seen: dict[int, int] = {}
+    kept, locked, dropped = [], {}, []
+    for w in ordered:
+        k = seen.get(w.act, 0)
+        seen[w.act] = k + 1
+        key = f"{w.act}/{k}"
+        names = lock.get(key)
+        if not names:
+            dropped.append(key)
+            continue
+        ids = [_track_named(str(n), tracks) for n in names]
+        for sid in w.scene_ids:
+            locked[sid] = (key, ids)
+        kept.append(w)
+    missing = sorted(set(lock) - {f"{w.act}/{k}" for w in kept for k in range(seen.get(w.act, 0))})
+    log.info("S06 music.lock: %d window(s) pinned, %d unnamed window(s) silenced %s, %d locked window(s) "
+             "absent from this cut %s", len(kept), len(dropped), dropped, len(missing), missing)
+    return kept, locked
+
+
 def _envelopes(cfg: Config, conn, rows: Sequence[Mapping[str, Any]],
                cues: Sequence[Mapping[str, Any]]) -> dict[str, str]:
     """The mix's two ``volume`` expressions. Timing comes from what the cues
@@ -1888,6 +1922,8 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
     if cues:
         kw.update(cues=cues, audio_sources=audio_sources, music_sources=music_sources,
                   envelopes=_envelopes(cfg, conn, usable, cues),
+                  track_lufs={r["track_id"]: float(r["lufs"]) for r in conn.execute(
+                      "SELECT track_id, lufs FROM music_tracks WHERE lufs IS NOT NULL")},
                   levels={k: float(cfg.get(f"render.{k}")) for k in (
                       "speech_lufs", "location_full_lufs", "final_lufs", "true_peak_db",
                       "music_xfade_s", "cue_fade_s", "audio_bitrate_k")})

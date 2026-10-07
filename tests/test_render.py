@@ -1117,6 +1117,9 @@ def test_a_title_card_reads_its_clip_blurred_with_two_lines_of_text(tmp_path):
     assert cmd[i - 4:i + 2] == ["-ss", "1.000", "-t", "6.500", "-i", "/m/bg.mp4"]
     fc = _graph(cmd)
     assert "boxblur=12:4" in fc and "trim=end_frame=180" in fc and "fade=t=out:st=5.000:d=1" in fc
+    assert "colorlevels=romax=0.45" in fc and "rimax" not in fc, "dimmed, not clipped to white"
+    if render.has_drawtext():
+        assert "shadowcolor=black@0.8" in fc
     if render.has_drawtext():
         assert "Manaslu Circuit Trek" in fc and "April - May 2024" in fc
     plain = render.build_command([dict(row, motion=json.dumps({"type": "card", "text": "x"}))],

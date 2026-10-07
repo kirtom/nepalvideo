@@ -81,6 +81,7 @@ class Track:
     centroid: float = 0.0
     onset_rate: float = 0.0
     artist: str | None = None
+    lufs: float | None = None        # EBU R128 integrated loudness of the file (S02.7)
     licence: str = "personal"
     sections: list[dict[str, Any]] = field(default_factory=list)
     beats: list[float] = field(default_factory=list)
@@ -1064,7 +1065,8 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
                   act4_swell: bool = True,
                   exclude_by_act: Mapping[int, Sequence[str]] | None = None,
                   window_starts: Collection[int] = (),
-                  max_track_run_s: float = math.inf) -> SceneAssignment:
+                  max_track_run_s: float = math.inf,
+                  locked: Mapping[int, tuple[str, Sequence[str]]] | None = None) -> SceneAssignment:
     """A Viterbi pass over ``scenes`` with (track, section) pairs as states.
 
     ``scenes`` must already be in chronological order (as ``group_scenes``
@@ -1150,6 +1152,16 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
         banned = banned_by_act.get(scene.act) or set()
         if banned:
             candidates = [c for c in candidates if c[0] not in banned] or candidates
+        # A locked scene (``locked``: scene_id -> (window key, track ids in
+        # order)) may only take its window's tracks, and never a track
+        # listed before the one its predecessor in the same window holds:
+        # the soundtrack the operator approved, re-laid on a changed cut
+        # (2026-10-07 08:53, "stay as it was in the previous version").
+        lock = (locked or {}).get(scene.scene_id)
+        lock_order = {tid: k for k, tid in enumerate(lock[1])} if lock else {}
+        if lock:
+            candidates = [c for c in candidates if c[0] in lock_order] or candidates
+        prev_lock = (locked or {}).get(scenes[i - 1].scene_id) if i else None
         wants_callback = last_act_first_idx is not None and i == last_act_first_idx \
             and act1_idx is not None and act1_idx < i
 
@@ -1190,6 +1202,9 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
 
                 best_cost, best_prev = math.inf, None
                 for prev, prev_cost in dp.items():
+                    if (lock and prev_lock and prev_lock[0] == lock[0]
+                            and lock_order.get(cand[0], 0) < lock_order.get(prev[0], 0)):
+                        continue        # the lock lists the window's tracks in order
                     if (enforce and run_by_prev and not fresh and cand[0] == prev[0]
                             and run_by_prev[prev] + scene_s > max_track_run_s):
                         continue        # this path may not hold the piece any longer

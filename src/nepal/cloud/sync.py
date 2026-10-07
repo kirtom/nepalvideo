@@ -25,16 +25,10 @@ PUSH = (
     ("data", "music", "raw/music"),
     ("data", "strava", "raw/strava"),
     ("data", "title", "raw/title"),
-    ("work", "db", "work/db"),
-    ("work", "reports", "work/reports"),
-    ("work", "proxies", "work/proxies"),
-    ("work", "audio", "work/audio"),
-    ("work", "transcripts", "work/transcripts"),
-    ("work", "faces", "work/faces"),
-    ("work", "music", "work/music"),
-    ("work", "gpx", "work/gpx"),
-    ("work", "vocab", "work/vocab"),
-    ("work", "semantic", "work/semantic"),
+    # No work/ entry: the local work/ is a pull mirror and the box owns the
+    # bucket's. A `nepal remote push` for the title clip (2026-10-07 07:54)
+    # also pushed the September proxies over the rebuilt ones, and the next
+    # draft had its portrait clips squeezed again.
     ("ref", "data", "ref/data"),
 )
 

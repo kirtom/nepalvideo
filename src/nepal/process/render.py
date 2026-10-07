@@ -180,16 +180,21 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
             chain = [f"fps={fps}", "setpts=PTS-STARTPTS", f"trim=end_frame={n}",
                      f"scale={width}:{height}:force_original_aspect_ratio=increase:force_divisible_by=2",
                      f"crop={width}:{height}", f"boxblur={blur}:{max(1, blur // 3)}",
-                     "colorlevels=rimax=0.75:gimax=0.75:bimax=0.75",
+                     # Output levels, not input: rimax clips the highlights
+                     # to white, which put white text on a white sky
+                     # (operator, 2026-10-07 08:53). romax scales down.
+                     "colorlevels=romax=0.45:gomax=0.45:bomax=0.45",
                      "fade=t=in:st=0:d=1", f"fade=t=out:st={max(0.0, dur - 1.0):.3f}:d=1", "setsar=1"]
             if has_drawtext():
                 title, sub = str(bg.get("text") or ""), str(bg.get("subtitle") or "")
                 if title:
                     chain.append(f"drawtext=text='{escape_drawtext(title)}':x=(w-text_w)/2"
-                                 f":y=(h-text_h)/2-{SUBTITLE_FONTSIZE}:fontsize={TITLE_FONTSIZE}:fontcolor=white")
+                                 f":y=(h-text_h)/2-{SUBTITLE_FONTSIZE}:fontsize={TITLE_FONTSIZE}:fontcolor=white"
+                                 f":shadowcolor=black@0.8:shadowx=3:shadowy=3")
                 if sub:
                     chain.append(f"drawtext=text='{escape_drawtext(sub)}':x=(w-text_w)/2"
-                                 f":y=(h-text_h)/2+{TITLE_FONTSIZE // 2 + 12}:fontsize={SUBTITLE_FONTSIZE}:fontcolor=white")
+                                 f":y=(h-text_h)/2+{TITLE_FONTSIZE // 2 + 12}:fontsize={SUBTITLE_FONTSIZE}:fontcolor=white"
+                                 f":shadowcolor=black@0.8:shadowx=2:shadowy=2")
             return ",".join(chain)
         # The lavfi ``color`` input build_command gives this row is already
         # exactly width x height at ``fps``, so there is no scale/pad step --
@@ -396,7 +401,8 @@ def _location_pieces(location: Sequence[tuple[int, Mapping[str, Any], float]], *
 def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any], float]]], *,
                   envelopes: Mapping[str, str], levels: Mapping[str, float],
                   film_len: float, measured: Mapping[str, float] | None = None,
-                  measure_only: bool = False) -> list[str]:
+                  measure_only: bool = False,
+                  track_lufs: Mapping[str, float] | None = None) -> list[str]:
     """The three tracks and their mix, as graph parts ending in ``[aout]``.
 
     ``tracks`` maps each track to its cues in time order, each with the
@@ -491,8 +497,16 @@ def audio_filters(tracks: Mapping[str, Sequence[tuple[int, Mapping[str, Any], fl
     music = tracks.get("music") or ()
     for k, (i, c, length) in enumerate(music):
         ms, src_in = _ms(c["t_in"]), float(c["src_in"])
-        chain = [f"atrim=start={src_in:.3f}:end={src_in + length:.3f}", "asetpts=PTS-STARTPTS",
-                 *_afades(*_fades(c, levels), end=length), f"adelay={ms}|{ms}"]
+        chain = [f"atrim=start={src_in:.3f}:end={src_in + length:.3f}", "asetpts=PTS-STARTPTS"]
+        # The cue's gain_lufs is the bed the placement asked for; a file
+        # whose loudness S02.7 measured is brought to it. One left
+        # unmeasured plays as mastered, as every track did before (the
+        # summit windows sat at -8 LUFS against -14 for the film; critic's
+        # review, 2026-10-07, enhancement 4).
+        own = (track_lufs or {}).get(str(c["source"]))
+        if own is not None and c.get("gain_lufs") is not None:
+            chain.append(f"volume={float(c['gain_lufs']) - float(own):g}dB")
+        chain += [*_afades(*_fades(c, levels), end=length), f"adelay={ms}|{ms}"]
         parts.append(f"[{i}:a]" + ",".join(chain) + f"[mu{k}]")
     parts.append(summed("mu", len(music),
                         f",volume='{envelopes['music']}':eval=frame" if music else "", "[mus]"))
@@ -531,7 +545,8 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
                   levels: Mapping[str, float] | None = None,
                   script_path: Path | None = None,
                   loudnorm_measured: Mapping[str, float] | None = None,
-                  measure_only: bool = False) -> list[str]:
+                  measure_only: bool = False,
+                  track_lufs: Mapping[str, float] | None = None) -> list[str]:
     """One ffmpeg invocation that renders the whole draft.
 
     Every shot is an input; the filter graph trims each, concatenates, and
@@ -673,7 +688,8 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
         parts.append("".join(labels) + f"concat=n={len(legs)}:v=1:a=0[vout]")
     if cues:
         parts += audio_filters(tracks, envelopes=envelopes or {}, levels=levels, film_len=film_len,
-                               measured=loudnorm_measured, measure_only=measure_only)
+                               measured=loudnorm_measured, measure_only=measure_only,
+                               track_lufs=track_lufs)
 
     # A 564-slot draft put this whole graph past Linux's MAX_ARG_STRLEN
     # (128 KiB) as a single -filter_complex argument, and subprocess.run

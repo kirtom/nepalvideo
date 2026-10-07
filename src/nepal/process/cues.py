@@ -462,6 +462,8 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
     all_starts = [w0 for wins in by_act.values() for w0, _ in wins]
     all_ends = [w1 for wins in by_act.values() for _, w1 in wins]
     out: list[dict[str, Any]] = []
+    played_to: dict[str, float] = {}      # track_id -> how far into its file it has been heard
+
     for entry in mmap.get("acts", []):
         t_start, t_end = float(entry["t_start"]), float(entry["t_end"])
         segments = entry.get("segments") or []
@@ -520,6 +522,12 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
                     break
                 elif duration:
                     src_in = min(src_in, max(0.0, float(duration) - (w1 - t0)))
+                if seg["track_id"] != prev_track and seg["track_id"] in played_to:
+                    # Heard in an earlier window: it goes on from where it
+                    # got to, never from an earlier time of itself (Mind
+                    # Heist restarted at 0:49 after playing to its end,
+                    # 2026-10-07 08:33 draft).
+                    src_in = max(src_in, played_to[seg["track_id"]])
                 cuts = [(t0, t1, src_in)]
                 if duration and src_in + (t1 - t0) > float(duration) + _EDGE_TOL_S:
                     room = float(duration) - src_in
@@ -538,6 +546,7 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
                     cuts = [(t0, t0 + room, src_in)]
                     ran_out = True
                 prev_track, prev_src_out = seg["track_id"], src_in + (cuts[0][1] - cuts[0][0])
+                played_to[seg["track_id"]] = max(played_to.get(seg["track_id"], 0.0), prev_src_out)
                 for k, (t0, t1, src_in) in enumerate(cuts):
                     src_out = src_in + (t1 - t0)
                     if t0 < q1 and t1 > q0:

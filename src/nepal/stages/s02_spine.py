@@ -20,6 +20,7 @@ from typing import Any, Sequence
 from nepal import db, freshness
 from nepal.config import Config
 from nepal.probe import manifest
+from nepal.process import audio as audio_mod
 from nepal.util import proc as proc_util
 from nepal.util.progress import Progress
 from nepal.spine import acts as acts_mod
@@ -463,10 +464,12 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
             except Exception as exc:                      # noqa: BLE001
                 log.warning("S02.7 could not analyse %s: %s", f.name, exc)
                 continue
+            t.lufs = audio_mod.lufs_of(f, 0.0, t.duration_s) if t.duration_s else None
             tracks.append(t)
-            log.info("S02.7 [%d/%d] %s - %s: %.0f bpm, %d beats, dyn %.3f, key %s",
+            log.info("S02.7 [%d/%d] %s - %s: %.0f bpm, %d beats, dyn %.3f, key %s, %s LUFS",
                      i, len(audio), t.artist or "?", t.title or f.stem,
-                     t.tempo_bpm, len(t.beats), t.dyn_range, t.key_est)
+                     t.tempo_bpm, len(t.beats), t.dyn_range, t.key_est,
+                     f"{t.lufs:.1f}" if t.lufs is not None else "?")
         report["n_audio_files"] = len(audio)
         report["n_excluded"] = len(excluded)
         report["excluded"] = excluded
@@ -516,7 +519,7 @@ def analyse_music(cfg: Config, conn) -> dict[str, Any]:
         "tempo_bpm": t.tempo_bpm, "key_est": t.key_est,
         "energy_mean": t.energy_mean, "energy_p95": t.energy_p95,
         "energy_p10": t.energy_p10, "centroid": t.centroid,
-        "onset_rate": t.onset_rate, "assigned_act": None,
+        "onset_rate": t.onset_rate, "assigned_act": None, "lufs": t.lufs,
     } for t in tracks])
     db.upsert(conn, "music_sections", ["section_id"],
               [{"section_id": s["section_id"], "track_id": s["track_id"],

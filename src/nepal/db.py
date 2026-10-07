@@ -307,6 +307,9 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # artist=None and the strongest half of that bonus scored 0.0 on the
     # real film.
     ("music_tracks", "artist", "TEXT"),
+    # EBU R128 integrated loudness of the file, so the mix can bring every
+    # track to the bed level instead of playing it as mastered.
+    ("music_tracks", "lufs", "REAL"),
 )
 
 

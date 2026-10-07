@@ -25,7 +25,8 @@ def test_push_plan_covers_the_working_set_and_not_the_originals(tmp_path):
     plan = sync.push_plan(_cfg(tmp_path))
     dsts = {d for _, d in plan}
     assert "gs://b/raw/media_from_phones" in dsts and "gs://b/raw/strava" in dsts
-    assert "gs://b/work/proxies" in dsts and "gs://b/work/db" in dsts
+    assert "gs://b/raw/title" in dsts
+    assert not any("/work/" in d for d in dsts), "local work/ is a mirror of the box's; it is never pushed"
     assert "gs://b/ref/data" in dsts
     assert not any("media_from_camera" in d for d in dsts)
     ref = [s for s, d in plan if d == "gs://b/ref/data"][0]

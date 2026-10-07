@@ -253,7 +253,7 @@ def test_push_and_pull_issue_one_rsync_per_plan_entry(env):
     r.push()
     rs = [c for c in calls(tmp) if c[:2] == ["storage", "rsync"]]
     assert any(c[-1] == "gs://b/raw/media_from_phones" for c in rs)
-    assert any(c[-1] == "gs://b/work/db" for c in rs)
+    assert not any("/work/" in c[-1] for c in rs), "the local work/ mirror is never pushed over the box's"
     assert not any("media_from_camera" in c[-1] for c in rs)
     (tmp / "log").write_text("")
     r.pull()

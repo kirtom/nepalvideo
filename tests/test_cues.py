@@ -201,7 +201,9 @@ def test_music_cues_cover_every_act_end_to_end_on_film_time():
     # the map's last segment stops at its last scene, 1.3 s short of the act:
     # the bed runs on to the act's end rather than dropping out before the cut
     assert (by_id["mu_1_1"]["t_in"], by_id["mu_1_1"]["t_out"]) == (63.0, 83.0)
-    assert (by_id["mu_1_1"]["src_in"], by_id["mu_1_1"]["src_out"]) == (10.0, 30.0)
+    # t2 was heard to 113 s in act 0: it goes on from there, not from the map's
+    # 10 s (a track never jumps to an earlier time of itself, 2026-10-07)
+    assert (by_id["mu_1_1"]["src_in"], by_id["mu_1_1"]["src_out"]) == (113.0, 133.0)
     assert by_id["mu_1_1"]["fade_in_s"] == 2.0
     for a in _mmap()["acts"]:
         if not a["segments"] or a["act"] == 5:
@@ -220,7 +222,7 @@ def test_the_silence_gets_no_music_and_the_cue_before_it_fades_over_the_window()
     # the track picked up by the same amount so the map's grid still holds
     after = by_id["mu_5_0"]
     assert (after["t_in"], after["t_out"]) == (162.0, 200.0)
-    assert (after["src_in"], after["src_out"]) == (12.0, 50.0)
+    assert (after["src_in"], after["src_out"]) == (145.0, 183.0), "t2 goes on from where act 1 left it (133) plus the 12 s of silence"
     assert not any(r["t_in"] < 162.0 < r["t_out"] or 150.0 < r["t_in"] < 162.0 for r in rows)
 
 
@@ -231,13 +233,13 @@ def test_the_map_is_laid_on_the_acts_the_table_actually_has():
     rows = cues.music_cues(cues.map_on_film_time(_mmap(), spans), lufs=-14.0, xfade_s=2.0, window_fade_s=1.0)
     by_id = {r["cue_id"]: r for r in rows}
     assert (by_id["mu_1_1"]["t_in"], by_id["mu_1_1"]["t_out"]) == (63.0, 85.0)
-    assert (by_id["mu_1_1"]["src_in"], by_id["mu_1_1"]["src_out"]) == (10.0, 32.0)
+    assert (by_id["mu_1_1"]["src_in"], by_id["mu_1_1"]["src_out"]) == (113.0, 135.0)
     # act 4's segment ran to the map's 150: cut at the act's real end, and
     # the silence moves with it, its length kept, so the fade before it holds
     assert (by_id["mu_4_0"]["t_in"], by_id["mu_4_0"]["t_out"]) == (92.0, 147.0)
     assert by_id["mu_4_0"]["src_out"] == 95.0 and by_id["mu_4_0"]["fade_out_s"] == 1.0
     assert (by_id["mu_5_0"]["t_in"], by_id["mu_5_0"]["t_out"]) == (159.0, 200.0)
-    assert (by_id["mu_5_0"]["src_in"], by_id["mu_5_0"]["src_out"]) == (12.0, 53.0)
+    assert (by_id["mu_5_0"]["src_in"], by_id["mu_5_0"]["src_out"]) == (147.0, 188.0), "t2 goes on from 135 plus the silence"
 
 
 def test_a_segment_that_begins_past_the_acts_real_end_is_dropped():

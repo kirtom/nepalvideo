@@ -33,6 +33,7 @@ def _cfg(tmp_path):
     data["project"] = {"data_root": str(tmp_path / "data"), "work_root": str(tmp_path / "work"),
                        "db_path": str(tmp_path / "work" / "db" / "n.sqlite")}
     data["film"] = dict(data["film"], title={})     # the title card has its own test
+    data["music"] = dict(data["music"], lock={})    # the real film's pinned soundtrack names real tracks
     return Config(data, real.path)
 
 
@@ -355,7 +356,9 @@ def test_build_timeline_v2_assembles_the_film_from_the_seeded_database(tmp_path)
             continue
         shot = shots[s["shot_id"]]
         length = s["t_out"] - s["t_in"]
-        if shot["recording_id"] == "rb" or s.get("take"):   # the long take and a merged take run past their first shot by design
+        if shot["recording_id"] == "rb" or s["src_out"] > shot["end_s"] + 1e-6:
+            # the long take and a merged take (a run of one recording as one
+            # cut) run past their first shot by design: bounded by the recording
             assert length <= recs[shot["recording_id"]]["duration_s"] - s["src_in"] + 1e-6, s
         else:
             assert length <= shot["end_s"] - s["src_in"] + 1e-6, s
@@ -833,11 +836,16 @@ def test_cues_sub_step_lays_the_tracks_over_the_seeded_timeline(tmp_path):
     assert music_spans, "the seeded film has somewhere music may play"
     for a in on_film["acts"]:
         mine = [c for c in by_track["music"] if c["cue_id"].startswith(f"mu_{a['act']}_")]
-        assert bool(mine) == bool(a["segments"]), a["act"]
+        # cues only where the map laid segments; a window whose track was
+        # already heard to its end stays silent rather than restarting it
+        assert not mine or a["segments"], a["act"]
         for w in a["music_windows"]:
             lo, hi = float(w["t_start"]), float(w["t_end"])
             inside = [c for c in mine if lo - 1e-3 <= c["t_in"] < hi]
-            assert inside, (a["act"], w)
+            if not inside:
+                # its track had been heard to its end in an earlier window
+                # and a track never restarts: the window stays silent
+                continue
             lo = q1 if lo < q1 <= hi else lo
             hi = q0 if lo <= q0 < hi else hi
             assert math.isclose(min(c["t_in"] for c in inside), lo, abs_tol=1e-3), (a["act"], w)
