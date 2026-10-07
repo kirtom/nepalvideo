@@ -581,6 +581,50 @@ is down. Three render tests still assert the old `-t`/`trim=duration`
 strings and were corrected after the last box run; they have not been run
 since (next box session).
 
+## Film v2 — step 4, part F: Gate 3 round three (2026-10-07, 05:07–05:46)
+
+"Much, much better", and four more rulings, plus one found on the way.
+
+**A track never jumps to another time of itself.** Within a window the
+next segment of the same track continues from where the last cue got to;
+a window that would outrun its file starts earlier in it; a window
+longer than the whole file ends where the file does, with the window
+fade. Nothing loops any more (`_loop_cuts` is gone).
+
+**No cut under a second.** A burst cut is at least two beats
+(`rhythm.burst_min_s` 1.0) and no unlocked slot under `assemble.min_slot_s`
+(1.0) reaches the table; the floor dropped 8 slots, 3.7 s, in this cut.
+
+**Outro in the middle.** Preferred (bonus 0.15), Act 5 excluded: it plays
+124–213 s (Act 2) and 710–914 s (Act 3).
+
+**"Use the cut from talk into a scored run more."** The real limiter was
+eligibility: a scene (up to 150 s) with one line anywhere in it was wholly
+ineligible, so Act 2's 105 s of free trail, Act 4's 53 and 62 s and Act
+5's 130 and 71 s never had music. A window is now the free piece of an
+act between blocking spans, opening on movement, four seconds after a
+line. With that, a cue segment that begins before a window is clipped to
+it (it used to be skipped, and such a window played silent). Result: **8
+windows in Acts 2–5, 54 % of the film** (was 4 windows, 29 %).
+
+**The wife video notes** (`telegram_video`, `(6)`, `(11)`) are struck by
+name (`assemble.excluded_recordings`).
+
+**The draft** (05:43, 264.8 MB, 1556.7 s rendered against 1556.9 s of
+timeline, **25.9 min**, 440 slots): Act 1 53 s, Act 2 140 s, Act 3 984 s,
+Act 4 141 s, Act 5 219 s. The film lost four minutes against the 04:41
+draft, and the cause is measured: inside a music window the rhythm cuts
+at the music bands' pace (1.5–2.5 s a slot in the high band), so the same
+Act 3 slots that reached 1328 s with four windows reach 1186 s with eight,
+and the acts run out of admissible footage. The operator decides between
+pace and length (`assemble.rhythm` bands, or more footage via the drift
+bound). One blemish seen in the cues: a 1.6 s *Start Me Up* sliver closes
+Act 5's first window where the assignment switched track just before the
+window's end — a segment shorter than the loop floor at a window's end
+should extend the previous cue instead (not yet done). Box time tonight
+3.6 h; ledger 38.71 of 45 USD; the box is down. One window test
+expectation was corrected after the last box run and has not been run.
+
 ## The last full run
 
 S01 + S03.0/.1/.2 on the real corpus, 4.5 hours wall clock. These numbers are
