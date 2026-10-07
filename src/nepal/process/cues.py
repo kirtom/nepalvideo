@@ -509,6 +509,15 @@ def music_cues(mmap: Mapping[str, Any], *, lufs: float, xfade_s: float,
                 # Nothing loops.
                 if seg["track_id"] == prev_track:
                     src_in = prev_src_out
+                elif prev_track is not None and (w1 - t0) < loop_min_piece_s and out:
+                    # A new track with less than a piece left in the window
+                    # is a sting; the previous cue runs to the window's end
+                    # instead (a 1.6 s Start Me Up closed act 5, 2026-10-07).
+                    last = out[-1]
+                    last["t_out"] = round(w1, 3)
+                    last["src_out"] = round(float(last["src_in"]) + (w1 - float(last["t_in"])), 3)
+                    last["fade_out_s"] = window_fade_s if ends_music else xfade_s
+                    break
                 elif duration:
                     src_in = min(src_in, max(0.0, float(duration) - (w1 - t0)))
                 cuts = [(t0, t1, src_in)]

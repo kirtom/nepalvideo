@@ -973,3 +973,21 @@ def test_a_still_that_is_a_frame_of_a_video_is_the_duplicate_two_videos_never_ar
     assert not dup(A, {"shot_id": "c", "media_kind": "photo"})
     assert not dup(A, {"shot_id": "zz", "media_kind": "photo"})      # unembedded: no verdict
     assert not asm.make_duplicate(e, threshold=0)(A, {"shot_id": "b", "media_kind": "photo"})
+
+
+def test_a_talking_slot_runs_to_the_end_of_its_sentence():
+    # "the video with the voice track ends abruptly, in the middle of the sentence"
+    import json
+    from nepal.stages import s05_cut as s5
+    shot = {"has_speech": 1, "end_s": 30.0,
+            "transcript_json": json.dumps({"segments": [{"start_s": 2.0, "end_s": 6.0},
+                                                        {"start_s": 6.5, "end_s": 12.0}]})}
+    slots = [{"kind": "video", "shot_id": "a", "t_in": 100.0, "t_out": 102.5, "src_in": 1.5, "src_out": 4.0},
+             {"kind": "video", "shot_id": "a", "t_in": 102.5, "t_out": 104.0, "src_in": 12.5, "src_out": 14.0}]
+    grown = s5._finish_sentences(slots, {"a": shot}, max_extend_s=8.0)
+    assert grown == 1
+    assert slots[0]["src_out"] == 6.3 and slots[0]["t_out"] == pytest.approx(104.8)   # to the sentence's end plus a breath
+    assert slots[1]["t_out"] == 104.0                                                 # between sentences: untouched
+    capped = [{"kind": "video", "shot_id": "a", "t_in": 0.0, "t_out": 2.0, "src_in": 1.5, "src_out": 3.5}]
+    s5._finish_sentences(capped, {"a": shot}, max_extend_s=1.0)
+    assert capped[0]["src_out"] == 4.5                                                # the cap holds

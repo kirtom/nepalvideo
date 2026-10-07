@@ -589,3 +589,19 @@ def test_a_talking_shot_inside_a_music_window_keeps_its_own_sound_full():
     assert [c["gain_lufs"] for c in plain] == [-28.0, -28.0]
     talk = cues.location_cues(slots, talk_spans=[(4.0, 8.0)], **kw)
     assert [c["gain_lufs"] for c in talk] == [-28.0, -14.0]
+
+
+def test_a_track_switch_with_no_room_left_extends_the_previous_cue():
+    # A 1.6 s Start Me Up closed act 5's first window (2026-10-07).
+    mmap = {"acts": [{"act": 5, "t_start": 0.0, "t_end": 60.0,
+                      "music_windows": _whole(0.0, 60.0),
+                      "segments": [{"track_id": "t1", "t_in": 0.0, "t_end": 56.0,
+                                    "src_in": 10.0, "src_out": 66.0},
+                                   {"track_id": "t2", "t_in": 56.0, "t_end": 60.0,
+                                    "src_in": 0.0, "src_out": 4.0}]}],
+            "silence_window": {}}
+    on_film = cues.map_on_film_time(mmap, {5: (0.0, 60.0)})
+    rows = cues.music_cues(on_film, lufs=-14.0, xfade_s=2.0, window_fade_s=1.0,
+                           track_s={"t1": 300.0, "t2": 300.0}, loop_min_piece_s=8.0)
+    assert [(r["source"], r["t_in"], r["t_out"], r["src_out"], r["fade_out_s"]) for r in rows] == [
+        ("t1", 0.0, 60.0, 70.0, 1.0)]

@@ -517,6 +517,41 @@ def _drop_empty(slots: Sequence[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
             sum(1 for s in empty if s.get("locked")))
 
 
+def _finish_sentences(slots: Sequence[dict[str, Any]], shots_by_id: Mapping[str, Mapping[str, Any]],
+                      *, max_extend_s: float) -> int:
+    """A video slot that ends inside a spoken sentence is extended to that
+    sentence's end (plus a breath), bounded by the shot and by
+    ``max_extend_s``. "Sometimes the video with the voice track ends
+    abruptly ... in the middle of the sentence" (operator, 2026-10-07):
+    the retime cuts a talking shot at the band's length, not at the
+    utterance's. Segment times come from ``shots.transcript_json``, on the
+    recording's clock like ``src_in``. Returns how many slots grew."""
+    grown = 0
+    for s in slots:
+        shot = shots_by_id.get(s.get("shot_id") or "")
+        if s.get("kind") != "video" or not shot or not shot.get("has_speech"):
+            continue
+        try:
+            segments = json.loads(shot.get("transcript_json") or "{}").get("segments") or []
+        except (ValueError, TypeError):
+            continue
+        src_in, src_out = float(s["src_in"]), float(s.get("src_out") or 0.0)
+        length = float(s["t_out"]) - float(s["t_in"])
+        if src_out <= src_in:
+            src_out = src_in + length
+        end_cap = min(float(shot.get("end_s") or math.inf), src_out + max_extend_s)
+        for seg in segments:
+            a, b = float(seg.get("start_s", 0.0)), float(seg.get("end_s", 0.0))
+            if a < src_out < b - 0.25:
+                new_out = min(b + 0.3, end_cap)
+                if new_out > src_out + 0.05:
+                    s["src_out"] = round(new_out, 3)
+                    _set_length(s, float(s["t_in"]), float(s["t_in"]) + (new_out - src_in))
+                    grown += 1
+                break
+    return grown
+
+
 def _chronological(slots: Sequence[dict[str, Any]],
                    shots_by_id: Mapping[str, Mapping[str, Any]], t0: float) -> list[dict[str, Any]]:
     """The act's slots in capture order, each keeping its length, laid end
@@ -1369,6 +1404,10 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
                      min_slot, sum(float(x["t_out"]) - float(x["t_in"]) for x in short),
                      [round(float(x["t_out"]) - float(x["t_in"]), 2) for x in short[:12]])
         slots = [x for x in slots if x.get("locked") or float(x["t_out"]) - float(x["t_in"]) >= min_slot - 1e-6]
+        grown = _finish_sentences(slots, shots_by_id,
+                                  max_extend_s=float(cfg.get("assemble.finish_sentence_max_s")))
+        if grown:
+            log.info("S06 act %d: %d talking slot(s) extended to the end of their sentence", act, grown)
         slots = _chronological(slots, shots_by_id, act_t0)
         final[act] = slots
         end = float(slots[-1]["t_out"]) if slots else act_t0

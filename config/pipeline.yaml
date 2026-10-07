@@ -427,6 +427,11 @@ assemble:
   # the overlap walk and the retime left cuts of 0.14-0.5 s (operator,
   # 2026-10-07: "very, very shortly ... at least a little bit longer").
   min_slot_s: 1.0
+  # A talking shot runs to the end of the sentence it is in: the retime cut
+  # lines mid-word ("sometimes the video with the voice track ends abruptly
+  # ... the sentences should be continued to the end", operator, 2026-10-07
+  # 07:24). The slot may grow by at most this many seconds for it.
+  finish_sentence_max_s: 8.0
   # Struck by name. "Remove videos in the preparation act when I'm talking
   # with my wife" (operator, 2026-10-07 05:18): the Telegram video notes in
   # which she is in the room or speaking.
@@ -544,7 +549,9 @@ music:
   # won the act's average.
   assignment: scene              # scene | act
   min_scene_s: 45                # a scene shorter than this is folded into a neighbour
-  reuse_gap_s: 300                # a track cannot repeat within this many seconds of itself
+  # "One song should be used only one time" (operator, 2026-10-07 07:24):
+  # longer than any film, so a track heard once is a repeat anywhere after.
+  reuse_gap_s: 100000
   # Measured on the real corpus (2026-09-24, 31 scenes, 23 tracks): the most
   # any scene could gain by leaving the incumbent track was 0.36 and the
   # median 0.016, so a switch cost of 0.6 (plus 0.3 continuity) was never paid
@@ -554,7 +561,7 @@ music:
   # or the library change.
   switch_cost: 0.05               # penalty for changing track between adjacent scenes
   continuity_bonus: 0.01          # reward for keeping the same track across a cut
-  repeat_penalty: 0.5             # extra cost for a track already used elsewhere in the film
+  repeat_penalty: 5.0             # a refusal, not a nudge: one play per track (operator, 2026-10-07)
   scene_targets:                  # weights of the distance terms
     energy: 1.0
     tempo: 0.6
