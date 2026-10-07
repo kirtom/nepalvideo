@@ -98,7 +98,8 @@ def main(argv: list[str] | None = None) -> int:
     pcut = sub.add_parser("cut", help="S05-S07 -- score, assemble and render the draft")
     pcut.add_argument("--force", action="store_true")
     pcut.add_argument("--redo", metavar="STEPS", default="score,timeline,cues,draft",
-                      help="comma-separated: score,timeline,cues,draft (default: all)")
+                      help="comma-separated: score,timeline,cues,draft (default: all); "
+                           "conform renders work/deliver/nepal_20min.mp4 at delivery size")
 
     pfc = sub.add_parser("fov-check",
                          help="render the Gate 1 FOV comparison sheets")

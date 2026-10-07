@@ -1852,16 +1852,37 @@ def photo_source(cfg: Config, row: Mapping[str, Any]) -> Path | None:
     return cfg.data_root / str(key).replace("raw/", "") if key else None
 
 
-def _draft_sources(cfg: Config, conn, rows: Sequence[dict[str, Any]]
+def _original_videos(cfg: Config, conn) -> dict[str, Path]:
+    """recording_id -> the flat original under data_root. A phone or chat
+    recording is ``{source}_{stem}`` of its one file; a flat camera
+    recording is ``camera_{timestamp}`` of its ``VID_<timestamp>_..mp4``
+    (its ``LRV_`` twin is the low-resolution copy, never the original).
+    Every 360 recording keeps its proxy: no stitcher is available."""
+    out: dict[str, Path] = {}
+    for r in conn.execute("SELECT source, s3_key, container FROM assets "
+                          "WHERE kind = 'video_flat' AND s3_key IS NOT NULL"):
+        stem = Path(str(r["s3_key"])).stem
+        if str(r["container"] or "").lower() == "lrv":
+            continue
+        key = f"camera_{stem[4:19]}" if r["source"] == "camera" and stem.startswith("VID_") \
+            else f"{r['source']}_{stem}"
+        out[key] = cfg.data_root / str(r["s3_key"]).removeprefix("raw/")
+    return out
+
+
+def _draft_sources(cfg: Config, conn, rows: Sequence[dict[str, Any]], *, originals: bool = False
                    ) -> tuple[dict[str, Path], list[dict[str, Any]], dict[str, int]]:
     """What the renderer reads for every slot: the proxy for a clip, the
     still for a photograph, nothing for a card. A split's other clip is
     mapped too, so both phones render; ``build_command`` shows the primary
-    alone, loudly, when its file is missing."""
+    alone, loudly, when its file is missing. ``originals`` (the conform)
+    reads a flat clip from its original file where that exists."""
     proxies = cfg.work_root / "proxies"
+    full = _original_videos(cfg, conn) if originals else {}
     sources: dict[str, Path] = {}
     usable: list[dict[str, Any]] = []
     missing: dict[str, int] = {}
+    n_full = 0
     for r in rows:
         if r["kind"] == "card":
             # A card slot has no shot -- the inner join used to drop it
@@ -1870,11 +1891,18 @@ def _draft_sources(cfg: Config, conn, rows: Sequence[dict[str, Any]]
             usable.append(r)
             continue
         p = photo_source(cfg, r) if r["media_kind"] == "photo" else proxies / f"{r['recording_id']}_eq.mp4"
+        o = full.get(str(r.get("recording_id") or "")) if r["media_kind"] != "photo" and not r.get("is_360") else None
+        if o is not None and o.exists():
+            p = o
+            n_full += 1
         if p is not None and p.exists():
             sources[r["shot_id"]] = p
             usable.append(r)
         else:
             missing[r["media_kind"] or "?"] = missing.get(r["media_kind"] or "?", 0) + 1
+    if originals:
+        log.info("S08 %d of %d clip slot(s) read their original file; the rest their proxy",
+                 n_full, sum(1 for r in usable if r["kind"] != "card" and r["media_kind"] != "photo"))
     others = [r["secondary_shot_id"] for r in usable if r.get("secondary_shot_id")]
     if others:
         for sid, rid in conn.execute(
@@ -2035,8 +2063,22 @@ def _draft_seconds(path: Path) -> float | None:
 
 
 def render_draft(cfg: Config, conn) -> dict[str, Any]:
-    """S07 -- render the cut to a watchable file, with its three audio
-    tracks, and write the Gate 3 page beside it.
+    """S07 -- the 540p draft with the Gate 3 page beside it."""
+    return _render(cfg, conn, profile="draft")
+
+
+def render_conform(cfg: Config, conn) -> dict[str, Any]:
+    """S08 (step 3 of it) -- the same timeline and mix at delivery size
+    from the original flat files, to work/deliver/nepal_20min.mp4. No
+    stitcher is available for the 360 recordings (spec S08.2: the v360
+    path), so those keep their proxies; no grade, no route-map overlay
+    (S08.4-5 are not built)."""
+    return _render(cfg, conn, profile="conform")
+
+
+def _render(cfg: Config, conn, *, profile: str) -> dict[str, Any]:
+    """Render the cut to a watchable file, with its three audio tracks;
+    the draft profile also writes the Gate 3 page beside it.
 
     Two ffmpeg passes when there is sound: the measurement pass hears the
     mix audio-only and the render applies its numbers as one static gain
@@ -2052,7 +2094,8 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
         "LEFT JOIN recordings rc ON rc.recording_id = s.recording_id ORDER BY t.slot_index")]
     if not rows:
         return {"skipped": "no timeline"}
-    sources, usable, missing = _draft_sources(cfg, conn, rows)
+    conform = profile == "conform"
+    sources, usable, missing = _draft_sources(cfg, conn, rows, originals=conform)
     if not usable:
         return {"skipped": "no source media for any slot"}
     if missing:
@@ -2068,13 +2111,14 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
     n_cues = {t: sum(1 for c in cues if c["track"] == t) for t in timeline_io.AUDIO_TRACKS}
 
     gate = cfg.workdir("gates", "gate3")
-    out = gate / "draft.mp4"
-    d = cfg.get("render.draft")
+    out = cfg.workdir("deliver") / "nepal_20min.mp4" if conform else gate / "draft.mp4"
+    d = cfg.get("render.conform") if conform else cfg.get("render.draft")
     kw: dict[str, Any] = dict(
         sources=sources, out_path=out, width=int(d["width"]), height=int(d["height"]),
         crf=int(d["crf"]), fps=int(cfg.get("render.fps", render_mod.DRAFT_FPS)),
         view_h_fov=float(cfg.get("render.view_h_fov", render_mod.VIEW_H_FOV)),
-        fill=str(cfg.get("render.fill", render_mod.FILL_DEFAULT)))
+        fill=str(cfg.get("render.fill", render_mod.FILL_DEFAULT)),
+        overlay=not conform, progress_path=out.with_suffix(".progress"))
     measured = None
     if cues:
         kw.update(cues=cues, audio_sources=audio_sources, music_sources=music_sources,
@@ -2095,7 +2139,7 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
             log.info("S07 the mix measures %s", measured)
         except ValueError as e:
             log.warning("S07 the measurement pass failed, rendering single-pass: %s", e)
-    cmd = render_mod.build_command(usable, loudnorm_measured=measured, script_path=gate / "draft.filters", **kw)
+    cmd = render_mod.build_command(usable, loudnorm_measured=measured, script_path=out.with_suffix(".filters"), **kw)
     log.info("S07 rendering %d of %d slot(s) to %s", len(usable), len(rows), out)
     log.debug("S07 %s", render_mod.describe(cmd))
     _raise_fd_limit(cmd.count("-i"))
@@ -2113,7 +2157,7 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
         log.error("S07 render failed: %s", tail)
         raise RuntimeError(f"S07 draft render failed: {tail}")
     size = out.stat().st_size if out.exists() else 0
-    log.info("S07 draft written: %s (%.1f MB)", out, size / 1e6)
+    log.info("S07 %s written: %s (%.1f MB)", "conform" if conform else "draft", out, size / 1e6)
     report = {"path": str(out), "bytes": size, "n_slots": len(usable), "n_skipped": len(rows) - len(usable),
               "audio_tracks": len(n_cues) if cues else 0, "n_cues": n_cues, "n_dropped_cues": n_dropped,
               "two_pass": measured is not None, "draft_s": _draft_seconds(out) if out.exists() else None,
@@ -2123,6 +2167,8 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
 
     # The editor's files again, now with the tracks the cues step laid --
     # the timeline step wrote them before any cue existed.
+    if conform:
+        return report
     timeline_io.write(rows, cfg.workdir("."), media_dir=str(cfg.work_root / "proxies"),
                       fps=int(cfg.get("render.fps")), cues=cues, overlays=overlays)
     # The same lettering the beat sheet's prompt gave the authors, from the
@@ -2164,9 +2210,12 @@ def run(cfg: Config, *, force: bool = False,
     for name, fn in (("score", lambda: score_shots(cfg, conn)),
                      ("timeline", lambda: build_timeline(cfg, conn)),
                      ("cues", lambda: build_cues(cfg, conn)),
-                     ("draft", lambda: render_draft(cfg, conn))):
+                     ("draft", lambda: render_draft(cfg, conn)),
+                     ("conform", lambda: render_conform(cfg, conn))):
         if redo and name not in redo:
             continue
+        if name == "conform" and not (redo and "conform" in redo):
+            continue        # the delivery render is asked for by name, never by default
         report[name] = fn()
         db.mark_unit(conn, STAGE, name, detail=json.dumps(report[name], default=str)[:2000])
         _write_report(cfg, report)

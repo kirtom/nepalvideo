@@ -1137,3 +1137,10 @@ def test_a_credits_slot_draws_its_lines_over_the_outtake_and_the_last_one_fades(
     assert "fade=t=out:st=1.000:d=1.5" in chain
     plain = render.segment_filters(dict(row, motion=None), 3, overlay=False)
     assert "drawtext=" not in plain and "fade=" not in plain
+
+
+def test_the_render_pass_writes_a_progress_file_and_the_measure_pass_does_not(tmp_path):
+    cmd = render.build_command(ROWS, sources=SRC, out_path=tmp_path / "o.mp4", progress_path=tmp_path / "o.progress")
+    i = cmd.index("-progress")
+    assert cmd[i + 1] == str(tmp_path / "o.progress") and cmd[i + 2:i + 4] == ["-stats_period", "10"]
+    assert "-progress" not in render.build_command(ROWS, sources=SRC, out_path=tmp_path / "o.mp4")

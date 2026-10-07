@@ -33,7 +33,7 @@ PUSH = (
 )
 
 # work/ subdirs a run may change and local wants back
-PULL = ("db", "reports", "semantic", "faces", "transcripts", "gates", "overlays", "beats",
+PULL = ("db", "reports", "semantic", "faces", "transcripts", "gates", "overlays", "beats", "deliver",
         "status")
 
 

@@ -529,6 +529,9 @@ assemble:
 
 render:
   draft: {width: 960, height: 540, crf: 23}
+  # `nepal cut --redo conform`: the delivery render (work/deliver/nepal_20min.mp4)
+  # from the original flat files where one exists, no debug overlay.
+  conform: {width: 1920, height: 1080, crf: 20}
   # A 360 recording is shown through a rectilinear window this wide, cut from
   # its equirectangular proxy at the shot's yaw. The whole sphere letterboxed
   # into 16:9 was the "disproportional" picture with "vertical lines" of Gate 3

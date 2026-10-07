@@ -1082,3 +1082,30 @@ def test_the_credits_roll_after_the_film_over_unused_shots_with_the_reserved_tra
     assert not any(c["track"] == "location" and c["t_in"] >= credits[0]["t_in"] - 1e-3 for c in cues), \
         "nothing but the track plays under the credits"
     conn.close()
+
+
+def test_the_conform_reads_a_flat_clips_original_and_falls_back_to_the_proxy(tmp_path):
+    cfg = _cfg(tmp_path)
+    conn = _seed(cfg)
+    for aid, key, src, cont in (("a1", "raw/media_from_phones/keller/f1_01.MOV", "phone_keller", "mov"),
+                                ("a2", "raw/media_from_phones/keller/f1_02.MOV", "phone_keller", "mov"),
+                                ("a3", "raw/media_from_camera/VID_20240413_112734_00_001.mp4", "camera", "mp4"),
+                                ("a4", "raw/media_from_camera/LRV_20240413_112734_00_001.lrv", "camera", "lrv")):
+        conn.execute("INSERT INTO assets(asset_id, s3_key, source, kind, container) VALUES (?,?,?,?,?)",
+                     (aid, key, src, "video_flat", cont))
+    conn.commit()
+    full = s05_cut._original_videos(cfg, conn)
+    assert full["phone_keller_f1_01"] == cfg.data_root / "media_from_phones/keller/f1_01.MOV"
+    assert full["camera_20240413_112734"].name == "VID_20240413_112734_00_001.mp4", "the 4K file, not its LRV twin"
+    (cfg.data_root / "media_from_phones/keller").mkdir(parents=True)
+    (cfg.data_root / "media_from_phones/keller/f1_01.MOV").touch()
+    cfg.work("proxies", "phone_keller_f1_01_eq.mp4").touch()
+    cfg.work("proxies", "phone_keller_f1_02_eq.mp4").touch()
+    rows = [{"kind": "video", "shot_id": "x1", "recording_id": "phone_keller_f1_01", "media_kind": "video", "is_360": 0},
+            {"kind": "video", "shot_id": "x2", "recording_id": "phone_keller_f1_02", "media_kind": "video", "is_360": 0}]
+    sources, usable, missing = s05_cut._draft_sources(cfg, conn, rows, originals=True)
+    assert sources["x1"].name == "f1_01.MOV", "the original, when it exists"
+    assert sources["x2"].name == "phone_keller_f1_02_eq.mp4", "the proxy when it does not"
+    sources, _, _ = s05_cut._draft_sources(cfg, conn, rows)
+    assert sources["x1"].name == "phone_keller_f1_01_eq.mp4", "the draft never reads originals"
+    conn.close()

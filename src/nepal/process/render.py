@@ -576,7 +576,8 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
                   script_path: Path | None = None,
                   loudnorm_measured: Mapping[str, float] | None = None,
                   measure_only: bool = False,
-                  track_lufs: Mapping[str, float] | None = None) -> list[str]:
+                  track_lufs: Mapping[str, float] | None = None,
+                  progress_path: Path | None = None) -> list[str]:
     """One ffmpeg invocation that renders the whole draft.
 
     Every shot is an input; the filter graph trims each, concatenates, and
@@ -619,6 +620,10 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
     # swallow; -nostats keeps the progress line out of what gets parsed.
     cmd: list[str] = ["ffmpeg", "-hide_banner", "-loglevel", "info" if measure_only else "error",
                       "-nostdin", "-y"] + (["-nostats"] if measure_only else [])
+    if progress_path is not None and not measure_only:
+        # out_time_us=... every ten seconds, to a file anyone can tail: the
+        # operator used to infer the render's progress from the file's size.
+        cmd += ["-progress", str(progress_path), "-stats_period", "10"]
     legs: list[tuple[Mapping[str, Any], int, int | None]] = []  # row, its input, its secondary's
     n = 0
     if not measure_only:
