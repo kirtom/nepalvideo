@@ -32,6 +32,7 @@ def _cfg(tmp_path):
     data = dict(real._data)
     data["project"] = {"data_root": str(tmp_path / "data"), "work_root": str(tmp_path / "work"),
                        "db_path": str(tmp_path / "work" / "db" / "n.sqlite")}
+    data["film"] = dict(data["film"], title={})     # the title card has its own test
     return Config(data, real.path)
 
 
@@ -1005,9 +1006,23 @@ def test_a_run_of_one_recording_becomes_one_take_capped_in_length():
     assert (runs, absorbed) == (1, 3)
     assert [x["shot_id"] for x in out] == ["a1", "b1", "a1", "a2"]
     assert out[0]["take"] == 1 and (out[0]["src_in"], out[0]["src_out"]) == (10, 18.0), "8 s on from the first cut"
-    capped, _, _ = s5._merge_runs(slots[:4], rec, {"A": 100.0}, run_cap=1, take_max_s=5.0)
-    assert len(capped) == 1 and capped[0]["t_out"] - capped[0]["t_in"] == pytest.approx(5.0)
+    split, _, _ = s5._merge_runs(slots[:4], rec, {"A": 100.0}, run_cap=1, take_max_s=5.0)
+    assert [(x["src_in"], x["src_out"]) for x in split] == [(10, 14.0), (14.0, 18.0)], "8 s as two takes of 4, the time kept"
     short, _, _ = s5._merge_runs(slots[:4], rec, {"A": 13.0}, run_cap=1, take_max_s=12.0)
     assert short[0]["src_out"] == 13.0, "never past the recording's end"
     locked = [v("a1", 0, 2, 0, 2, locked=1), v("a2", 2, 4, 2, 4, locked=1), v("a3", 4, 6, 4, 6, locked=1)]
     assert s5._merge_runs(locked, rec, {"A": 100.0}, run_cap=1, take_max_s=12.0)[1:] == (0, 0)
+
+
+def test_the_title_card_opens_the_film_when_configured(tmp_path):
+    cfg = _cfg(tmp_path)
+    cfg._data["film"]["title"] = {"text": "Manaslu Circuit Trek", "subtitle": "April - May 2024",
+                                  "background": "title/bg.mp4", "duration_s": 6.0, "blur": 12}
+    conn = _seed(cfg)
+    s05_cut.build_timeline(cfg, conn)
+    first, second = [dict(r) for r in conn.execute("SELECT * FROM timeline ORDER BY slot_index LIMIT 2")]
+    assert first["kind"] == "card" and first["t_in"] == 0.0 and first["t_out"] == 6.0
+    m = json.loads(first["motion"])
+    assert m["type"] == "title" and m["text"] == "Manaslu Circuit Trek" and m["background"].endswith("title/bg.mp4")
+    assert second["t_in"] == 6.0 and second["beat_id"] == "b_pass", "the cold open follows the title"
+    conn.close()

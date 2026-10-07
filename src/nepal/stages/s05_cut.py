@@ -586,15 +586,25 @@ def _merge_runs(slots: Sequence[dict[str, Any]], rec_of: Mapping[str, str],
                and rec(slots[k + len(run)]) == rec(s)):
             run.append(slots[k + len(run)])
         if len(run) > run_cap:
+            # The run's time is kept; its cuts are not. ``n`` takes of at most
+            # ``take_max_s`` each, contiguous in the recording from the first
+            # slot's own src_in: twelve cuts of two seconds become two takes
+            # of twelve. Capping one take alone cost the acts minutes.
             total = sum(float(x["t_out"]) - float(x["t_in"]) for x in run)
             src_in = float(s["src_in"])
             room = float(rec_len.get(rec(s), math.inf)) - src_in
-            length = max(float(s["t_out"]) - float(s["t_in"]), min(total, take_max_s, room))
-            take = dict(s, src_out=round(src_in + length, 3), take=1)
-            _set_length(take, float(s["t_in"]), float(s["t_in"]) + length)
-            out.append(take)
+            total = max(float(s["t_out"]) - float(s["t_in"]), min(total, room))
+            n = max(1, math.ceil(total / take_max_s - 1e-6))
+            each = total / n
+            t = float(s["t_in"])
+            for k2 in range(n):
+                take = dict(s, src_in=round(src_in + k2 * each, 3), src_out=round(src_in + (k2 + 1) * each, 3),
+                            take=1)
+                _set_length(take, t, t + each)
+                out.append(take)
+                t += each
             runs += 1
-            absorbed += len(run) - 1
+            absorbed += len(run) - n
         else:
             out.extend(run)
         k += len(run)
