@@ -175,6 +175,20 @@ Each of these cost a wrong diagnosis or a wasted multi-hour run.
 - **`pkill -f` matches the shell that runs it.** Over `gcloud compute ssh
   --command`, `pkill -f "nepal.cli"` killed its own `bash -c` and ssh exited
   255, which read as a key problem. Write the pattern as `"[n]epal.cli"`.
+- **The local `work/` is a mirror, never a source.** `nepal remote push`
+  once carried `work/proxies` (the September files, all 960x540) over the
+  box's rebuilt ones in the bucket, and the next draft squeezed every
+  portrait clip again. `sync.PUSH` carries raw data only; anything that
+  must reach `gs://.../work/` goes by hand, one path, only when the local
+  copy is known to be newer (2026-10-07).
+- **A caption cannot hold an escaped quote inside its quotes.** ffmpeg's
+  quoted string ends at the next `'`, escaped or not; the idiom is to
+  close, escape, reopen (`'\''`), which `render.escape_drawtext` now does.
+  The credits' "camera's clock" was the first apostrophe to reach a render
+  and the graph failed to initialise (2026-10-07).
+- **`colorlevels=rimax` brightens; `romax` dims.** Input-max clips the
+  highlights to white, which put white text on a white sky in the title
+  card (2026-10-07).
 
 ## Decisions that are not yours
 
