@@ -76,7 +76,11 @@ def build_proxies(cfg: Config, conn, *, force: bool = False,
     assets_by_rec: dict[str, list[dict]] = {}
     for a in conn.execute(
             "SELECT recording_id, s3_key, container, kind, chapter_index, "
-            "width, height, frame_shape FROM assets WHERE recording_id IS NOT NULL"):
+            "width, height, frame_shape, probe_json FROM assets WHERE recording_id IS NOT NULL"):
+        # probe_json carries the rotation flag ``display_size`` reads. Without
+        # it the shape check saw every rotated phone clip as landscape: the
+        # 21 portrait keller clips were never rebuilt and 218 rotated kulikov
+        # ones were rebuilt on every walk (2026-10-07).
         assets_by_rec.setdefault(a["recording_id"], []).append(dict(a))
 
     work = cfg.work_root

@@ -331,18 +331,20 @@ def _gap_candidates(free: Sequence[Mapping[str, Any]], lo: float | None, hi: flo
 
 def _same_moment(c: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], *,
                  within_s: float) -> bool:
-    """Whether ``c`` is a photograph of a moment a video in ``rows`` already
-    shows, or the reverse. "You show the video, then you pause, then you
-    show the photo, which is the end of the video" (Gate 3, 2026-10-07):
-    the fill lays a gap chronologically, and a still taken seconds after a
-    clip -- or an iPhone Live Photo, whose still and 3 s movie are both
-    shots -- lands right behind it. One of the two carries the moment."""
+    """Whether ``c`` shows a moment another recording in ``rows`` already
+    shows. "You show the video, then you pause, then you show the photo,
+    which is the end of the video", and at 5:51 "a video duplicate of the
+    bridge crossing" from the other phone (Gate 3, 2026-10-07): the fill
+    lays a gap chronologically, and a still taken seconds after a clip, an
+    iPhone Live Photo (still and 3 s movie both shots), or the second
+    phone's take of the same crossing lands right behind the first. One
+    recording carries a moment."""
     tc = anchors_mod._epoch(c.get("start_utc"))
     if tc is None or within_s <= 0:
         return False
     for r in rows:
-        if _is_photo(r) == _is_photo(c):
-            continue
+        if r.get("recording_id") and r.get("recording_id") == c.get("recording_id"):
+            continue                    # the same recording is the run rule's business
         tr = anchors_mod._epoch(r.get("start_utc"))
         if tr is not None and abs(tr - tc) <= within_s:
             return True
@@ -509,6 +511,35 @@ def _drop_empty(slots: Sequence[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
                     float(empty[0]["t_in"]), bool(empty[0].get("locked")))
     return ([s for s in slots if float(s["t_out"]) > float(s["t_in"])],
             sum(1 for s in empty if s.get("locked")))
+
+
+def _chronological(slots: Sequence[dict[str, Any]],
+                   shots_by_id: Mapping[str, Mapping[str, Any]], t0: float) -> list[dict[str, Any]]:
+    """The act's slots in capture order, each keeping its length, laid end
+    to end from ``t0``. "All videos should be purely chronological"
+    (operator, Gate 3, 2026-10-07): the plan places anchors by chronology
+    and fills each gap in order, but a gap's fill may reach a day either
+    side of its hour, the phone-share swap trades clips across the act, and
+    a locked beat keeps its planned place -- so the act read as time going
+    back and forth. A slot with no stamp (a card, an unstamped clip) keeps
+    the time of the slot before it. The beat grid the cuts were snapped to
+    is given up for this; the operator asked for the order."""
+    out: list[tuple[float, int, dict[str, Any]]] = []
+    last = -math.inf
+    for i, s in enumerate(slots):
+        shot = shots_by_id.get(s.get("shot_id") or "")
+        ts = _slot_utc(s, shot) if shot else None
+        last = ts.timestamp() if ts is not None else last
+        out.append((last, i, s))
+    out.sort(key=lambda k: (k[0], k[1]))
+    cursor = t0
+    laid = []
+    for _, _, s in out:
+        length = float(s["t_out"]) - float(s["t_in"])
+        _set_length(s, cursor, cursor + length)
+        cursor += length
+        laid.append(s)
+    return laid
 
 
 def _close_holes(slots: Sequence[dict[str, Any]], t0: float) -> list[dict[str, Any]]:
@@ -811,26 +842,6 @@ def _scene_id_by_time(slot: Mapping[str, Any], scenes: Sequence[scenes_mod.Scene
     return nearest.scene_id if nearest else None
 
 
-def _talk_spans(slots: Sequence[Mapping[str, Any]],
-                shots_by_id: Mapping[str, Mapping[str, Any]]) -> list[tuple[float, float]]:
-    """Every video slot whose shot has someone speaking in it, as a span.
-
-    The speech beats are the sixteen lines the film is built on; they were
-    the only speech the mix knew, so both of Act 3's music windows sat over
-    thirty-eight slots of people talking to the camera with their sound
-    ducked under the bed -- "person on the video speaks something, but I
-    don't hear it" (Gate 3, 2026-10-07). Over these spans the location
-    sound plays full and the music ducks under it, as it does under a
-    beat. Not a blocking span: blocking them left the film with no music
-    at all (0 windows of 25 scenes), which is not what the ruling meant."""
-    out: list[tuple[float, float]] = []
-    for s in slots:
-        shot = shots_by_id.get(s.get("shot_id") or "")
-        if s.get("kind") == "video" and shot and shot.get("has_speech"):
-            out.append((float(s["t_in"]), float(s["t_out"])))
-    return out
-
-
 def _info_spans(cfg: Config, slots: Sequence[Mapping[str, Any]], beats: Sequence[Mapping[str, Any]],
                 natural: Sequence[Mapping[str, Any]], *,
                 cold_open_end_s: float,
@@ -918,6 +929,8 @@ def _scenes_and_map(cfg: Config, slots: Sequence[Mapping[str, Any]], attrs, trac
         credits = cfg.get("music.credits_track", None)
         assignment = music_mod.assign_scenes(
             eligible, tracks,
+            exclude_by_act={int(k): list(v) for k, v in
+                            (cfg.get("music.excluded_tracks_by_act") or {}).items()},
             targets={sc.scene_id: scenes_mod.scene_target(sc, hr_rest=hr_rest, hr_max=hr_max)
                      for sc in eligible},
             weights=cfg.get("music.scene_targets"),
@@ -1131,6 +1144,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
     rows = _shot_rows(conn)
     if not rows:
         return {"n_slots": 0, "note": "nothing survived the gate"}
+    asm.PHOTO_HOLD_MAX_S = float(cfg.get("assemble.photo_max_s"))
     shots_by_id = {r["shot_id"]: r for r in rows}
     recordings = [dict(r) for r in conn.execute("SELECT * FROM recordings")]
     recordings_by_id = {r["recording_id"]: r for r in recordings}
@@ -1329,6 +1343,7 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         # one goes, and what follows it moves up.
         slots = _close_holes(_no_adjacent_photos(
             slots, prev_photo=_is_photo(_last_slot(final, acts, act, act0)), next_photo=False), act_t0)
+        slots = _chronological(slots, shots_by_id, act_t0)
         final[act] = slots
         end = float(slots[-1]["t_out"]) if slots else act_t0
         final_spans[act] = (act_t0, end)
@@ -1482,7 +1497,6 @@ def build_cues(cfg: Config, conn) -> dict[str, Any]:
                 lufs_full=float(cfg.get("render.location_full_lufs")),
                 lufs_under_speech=float(cfg.get("render.location_under_speech_lufs")),
                 speech_spans=cues_mod.speech_spans(slots), windows=natural,
-                talk_spans=_talk_spans(slots, shots_by_id),
                 silence=mmap.get("silence_window"),
                 music_spans=cues_mod.music_spans(mmap),
                 fade_s=float(cfg.get("render.cue_fade_s")),
@@ -1624,9 +1638,7 @@ def _envelopes(cfg: Config, conn, rows: Sequence[Mapping[str, Any]],
         silence = cues_mod.map_on_film_time(json.loads(map_path.read_text()), spans).get("silence_window")
     return {
         "music": mix_mod.volume_expr(mix_mod.music_envelope(
-            total_s=total,
-            speech_spans=[(float(c["t_in"]), float(c["t_out"])) for c in cues if c["track"] == "speech"]
-            + _talk_spans(rows, {r["shot_id"]: dict(r) for r in conn.execute("SELECT shot_id, has_speech FROM shots")}),
+            total_s=total, speech_spans=[(float(c["t_in"]), float(c["t_out"])) for c in cues if c["track"] == "speech"],
             windows=natural, silence=silence,
             under_speech_db=float(cfg.get("render.duck_lufs_speech")) - float(cfg.get("render.music_lufs")),
             window_fade_s=float(cfg.get("render.window_fade_s")), cue_fade_s=float(cfg.get("render.cue_fade_s")))),

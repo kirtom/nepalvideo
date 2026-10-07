@@ -1076,3 +1076,16 @@ def test_a_360_slot_is_viewed_through_a_window_not_shown_as_the_whole_sphere():
     assert chain.index("v360=") < chain.index("scale=")
     flat = render.segment_filters(dict(row, is_360=0), 0, overlay=False)
     assert "v360" not in flat
+
+
+def test_every_leg_is_cut_to_the_frame_grid_so_the_picture_cannot_drift():
+    # Gate 3, 2026-10-07: the picture ran 10.7 ms a slot late against the
+    # sound, ten seconds by the end of the film.
+    rows = [{"shot_id": f"s{i}", "kind": "video", "t_in": i * 2.3337, "t_out": (i + 1) * 2.3337}
+            for i in range(100)]
+    total = sum(render.leg_frames(r, 30) for r in rows)
+    assert abs(total / 30 - 100 * 2.3337) < 1 / 30
+    chain = render.segment_filters(rows[1], 1, overlay=False)
+    assert "trim=end_frame=70" in chain and chain.index("setpts=PTS-STARTPTS") < chain.index("trim=end_frame")
+    still = render.segment_filters({"shot_id": "p", "kind": "photo", "t_in": 0.0, "t_out": 2.5}, 0, overlay=False)
+    assert "loop=loop=-1" in still and "trim=end_frame=75" in still and "trim=duration" not in still

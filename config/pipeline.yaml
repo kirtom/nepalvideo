@@ -192,7 +192,7 @@ process:
   photo_analysis_px: 1024
   # How long a still is held before S06 snaps it to the beat grid. Long enough
   # to read, short enough not to stall the cut; a panorama earns 25% longer.
-  photo_slot_s: 3.0
+  photo_slot_s: 2.0               # "a couple of seconds" (operator, Gate 3, 2026-10-07)
   # Threads for decoding. libheif releases the GIL and decoding dominates the
   # cost, so this scales very nearly linearly -- 3.7x on four cores, with
   # identical measurements. 0 means one per core.
@@ -419,6 +419,10 @@ assemble:
   # is budgeted at, and the length a refill is laid at before the rhythm
   # pass re-cuts it. Re-measure if `rhythm` changes.
   expected_slot_s: 2.5
+  # The most a still is held, whatever asks for more (the B-roll tail of a
+  # line, the low-energy band's 5-8 s): "much shorter, like a couple of
+  # seconds" (operator, Gate 3, 2026-10-07). One photograph ran 56 s.
+  photo_max_s: 2.5
   shot_duration_s:
     1: [3.0, 5.0]
     2: [4.0, 6.0]
@@ -444,14 +448,14 @@ assemble:
                                  # would swap, locked or not -- a run on screen is a run,
                                  # whatever placed the clips either side of it.
   source_alternation_after: 3    # soft: prefer another source after this many in a row
-  # A photograph taken within this many seconds of a video already on screen
-  # in the act is not placed, nor a video beside such a photograph: "you show
-  # the video, then you pause, then you show the photo, which is the end of
-  # the video" (operator, Gate 3, 2026-10-07). The corpus has 308 iPhone Live
-  # Photos whose still and 3 s movie both survive as shots, and the two
-  # phones often shot the same scene seconds apart. One of them carries the
-  # moment.
-  same_moment_s: 90
+  # A shot within this many seconds of another recording already on screen
+  # in the act is not placed: "you show the video, then you pause, then you
+  # show the photo, which is the end of the video", and "a video duplicate of
+  # the bridge crossing" from the other phone three minutes later (operator,
+  # Gate 3, 2026-10-07). The corpus has 308 iPhone Live Photos whose still
+  # and 3 s movie both survive as shots, and the two phones shot the same
+  # scenes minutes apart. One recording carries a moment.
+  same_moment_s: 180
   source_share_min: 0.25         # of an act's phone slots, to each phone that has material
   long_take_s: [60, 90]
   long_take_keywords: ["мост", "мосту", "моста", "bridge", "suspension"]
@@ -503,7 +507,7 @@ render:
   # difference between a bed you hear past and a bed you hear over. Act 4's
   # designed swell keeps the old level (music.placement.swell_lufs).
   music_lufs: -17.0            # the music bed
-  duck_lufs: -28.0             # location audio under the bed
+  duck_lufs: -70.0             # location audio under the bed: mute ("mute videos when music is playing", operator 2026-10-07)
   duck_lufs_speech: -22.0      # music under speech
   # -- Film v2 section 6: the audio graph's own loudness targets, separate
   # from the three levels above (which govern the music bed against what
@@ -589,6 +593,9 @@ music:
   # ("too silly and incorrect"), "The Long Song" (Doctor Who). Matched as a
   # case-insensitive fragment of the title; the assignment never sees them.
   excluded_tracks: ["Lovely Day", "The Long Song"]
+  # Kept out of one act only. "The outro music piece should be used earlier
+  # than the end" (operator, 2026-10-07): M83's Outro closed the last draft.
+  excluded_tracks_by_act: {5: ["Outro"]}
   # Zero while the list is empty, so nothing is silently tilted by a bonus
   # nobody asked for. Was 0.05, sized against the real corpus: the median
   # best-vs-third gap is 0.056, and 0.15 outweighed the whole available gain
@@ -618,12 +625,12 @@ music:
     # nothing arrives, states nothing and leaves. 30 -> 60 with
     # max_windows_per_act below: one arc per act, not a scattering of cues
     # (operator, 2026-09-24).
-    min_window_s: 60
+    min_window_s: 45               # 60 -> 45: "a bit more music" (operator, 2026-10-07)
     # At most this many windows in an act, the rest left on ambience. Two is
     # "one arc per act" with room for a reprise; act 5 takes one, which
     # resolves into the credits instead of returning.
-    max_windows_per_act: 2
-    max_windows_by_act: {5: 1}
+    max_windows_per_act: 3         # 2 -> 3: "a bit more music" (operator, 2026-10-07)
+    max_windows_by_act: {5: 2}
     # Which acts keep their LAST eligible window rather than their longest:
     # act 5 is the descent and the return, and its one cue belongs as late as
     # eligibility allows, running into the credits (operator, 2026-09-24).
@@ -635,7 +642,9 @@ music:
     # by rest -- resting, village and city (a tea-house stop, a meal, a
     # lodge) and transport (sitting in a jeep). A window may only OPEN on one
     # of these; once the cue is established any class may lie inside it.
-    enter_on: [walking, climbing, descending, crossing, summit]
+    # transport and city added 2026-10-07 ("a bit more music"): the jeep roads
+    # of act 2 and Kathmandu/Delhi of act 5 had no window at all.
+    enter_on: [walking, climbing, descending, crossing, summit, transport, city]
     # An arrival is where the trail flattens after a climb -- the pass, the
     # viewpoint, the village reached. A window opening on one is kept ahead
     # of a merely longer window when an act has more than it may keep
@@ -807,7 +816,11 @@ beats:
   # long messages are clipped in the prompt; a card is 180 characters anyway
   chat_max_chars: 500
   # -- Film v2 section 4.4: placing picture against the voice spine --
-  face_hold_s: 2.5               # the speaker's own shot before B-roll takes over
+  # The speaker's own shot holds through the whole line now (was 2.5 s, then
+  # B-roll): a voice over other footage read as "audio not synchronous with
+  # video" at 12:32 and elsewhere (operator, Gate 3, 2026-10-07). B-roll only
+  # when the shot itself runs out before the line does.
+  face_hold_s: 600
   pre_roll_s: 0.4                # picture cuts this much before the utterance starts
   broll_window_s: 7200           # B-roll candidates within +-2 h of the beat, same act
   own_picture_face_score_below: 0.35   # below this the beat is a walking shot: picture stays

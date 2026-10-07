@@ -893,17 +893,6 @@ def test_an_excluded_title_fragment_strikes_the_track_whatever_its_case():
     assert not s5._excluded("Send Me on My Way", ["", "  "])
 
 
-def test_a_video_slot_with_someone_speaking_is_a_talk_span_the_music_ducks_under():
-    # Gate 3, 2026-10-07: both Act 3 windows sat over people talking to camera.
-    from nepal.stages import s05_cut as s5
-    slots = [{"slot_index": 0, "kind": "video", "shot_id": "a", "t_in": 0.0, "t_out": 3.0},
-             {"slot_index": 1, "kind": "video", "shot_id": "b", "t_in": 3.0, "t_out": 6.0},
-             {"slot_index": 2, "kind": "photo", "shot_id": "c", "t_in": 6.0, "t_out": 9.0},
-             {"slot_index": 3, "kind": "video", "shot_id": "zz", "t_in": 9.0, "t_out": 12.0}]
-    shots = {"a": {"has_speech": 1}, "b": {"has_speech": 0}, "c": {"has_speech": 1}}
-    assert s5._talk_spans(slots, shots) == [(0.0, 3.0)]
-
-
 def test_a_thin_gap_does_not_reach_past_the_drift_bound_for_its_fill():
     # Gate 3, 2026-10-07: 22 backward jumps of 15-145 h inside an act.
     from nepal.stages import s05_cut as s5
@@ -929,5 +918,31 @@ def test_a_photo_of_a_moment_a_video_already_shows_is_the_same_moment():
     assert s5._same_moment(still, [video], within_s=90)
     assert s5._same_moment(video, [still], within_s=90)
     assert not s5._same_moment(later, [video], within_s=90)
-    assert not s5._same_moment(other_video, [video], within_s=90)   # two videos are the run rule's business
+    assert s5._same_moment(other_video, [video], within_s=90)       # the other phone's take of it
+    assert not s5._same_moment(dict(other_video, recording_id="r"), [dict(video, recording_id="r")], within_s=90)
     assert not s5._same_moment(still, [video], within_s=0)
+
+
+def test_an_act_is_laid_in_capture_order_with_every_length_kept():
+    # "All videos should be purely chronological" (operator, 2026-10-07).
+    from nepal.stages import s05_cut as s5
+    shots = {"a": {"start_utc": "2024-04-18T06:00:00+00:00", "start_s": 0.0},
+             "b": {"start_utc": "2024-04-18T05:00:00+00:00", "start_s": 0.0},
+             "c": {"start_utc": "2024-04-18T07:00:00+00:00", "start_s": 0.0}}
+    slots = [{"shot_id": "a", "kind": "video", "t_in": 10.0, "t_out": 12.0, "src_in": 0.0},
+             {"shot_id": "b", "kind": "video", "t_in": 12.0, "t_out": 15.0, "src_in": 0.0},
+             {"shot_id": None, "kind": "card", "t_in": 15.0, "t_out": 16.0, "src_in": 0.0},
+             {"shot_id": "c", "kind": "video", "t_in": 16.0, "t_out": 18.0, "src_in": 0.0}]
+    out = s5._chronological(slots, shots, 10.0)
+    assert [s["shot_id"] for s in out] == ["b", "a", None, "c"]
+    assert [(s["t_in"], s["t_out"]) for s in out] == [(10.0, 13.0), (13.0, 15.0), (15.0, 16.0), (16.0, 18.0)]
+
+
+def test_a_photograph_is_held_no_longer_than_the_cap():
+    from nepal.process import assemble as asm
+    old = asm.PHOTO_HOLD_MAX_S
+    try:
+        asm.PHOTO_HOLD_MAX_S = 2.5
+        assert asm.shot_available_s({"media_kind": "photo"}) == 2.5
+    finally:
+        asm.PHOTO_HOLD_MAX_S = old

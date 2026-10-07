@@ -117,6 +117,23 @@ def escape_drawtext(text: str) -> str:
     return out
 
 
+def leg_frames(row: Mapping[str, Any], fps: int = DRAFT_FPS) -> int:
+    """How many frames this slot is on the picture track: the difference of
+    its two boundaries each rounded to the frame grid, so the concat of
+    every leg lands within one frame of the timeline *everywhere*, not just
+    on average.
+
+    A leg trimmed by seconds rounds up to a whole frame, and the audio is
+    placed at exact timeline seconds; the picture therefore ran 10.7 ms a
+    slot late, 0.35 s behind the sound by slot 24 and ten seconds by the
+    end of a 474-slot film -- "audio not synchronous with video in many,
+    many places" (operator, Gate 3, 2026-10-07). Measured by cross-
+    correlating the draft's sound against the source (5 ms off) and
+    matching its frames against the source (0.35-0.45 s late)."""
+    t_in, t_out = float(row["t_in"]), float(row["t_out"])
+    return max(1, round(t_out * fps) - round(t_in * fps))
+
+
 def segment_filters(row: Mapping[str, Any], index: int, *,
                     width: int = DRAFT_W, height: int = DRAFT_H,
                     overlay: bool = True, fps: int = DRAFT_FPS,
@@ -155,11 +172,12 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
                 f":x=(w-text_w)/2:y=(h-text_h)/2:fontsize={CARD_FONTSIZE}"
                 f":fontcolor=white")
         return ",".join(chain)
+    n_frames = leg_frames(row, fps)
     if secondary_index is not None:
         # Each phone fills its half: scaled to cover and cropped, not
         # letterboxed -- a portrait clip letterboxed into a half-width frame
         # would be a stamp in a black field.
-        half = ",".join([f"fps={fps}", "setpts=PTS-STARTPTS",
+        half = ",".join([f"fps={fps}", "setpts=PTS-STARTPTS", f"trim=end_frame={n_frames}",
                          f"scale={width // 2}:{height}:force_original_aspect_ratio=increase"
                          f":force_divisible_by=2",
                          f"crop={width // 2}:{height}", "setsar=1"])
@@ -168,8 +186,7 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
     else:
         chain = []
         if is_still(row):
-            dur = float(row["t_out"]) - float(row["t_in"])
-            chain += [f"loop=loop=-1:size=1:start=0", f"fps={fps}", f"trim=duration={dur:.3f}"]
+            chain += [f"loop=loop=-1:size=1:start=0", f"fps={fps}"]
         else:
             # Every leg of the concat must share a rate: the proxies are 15
             # fps, the phones 30 or 60, and a concat of mixed rates produced
@@ -190,7 +207,7 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
             v_fov = math.degrees(2 * math.atan(math.tan(math.radians(view_h_fov / 2)) * height / width))
             chain += [f"v360=input=e:output=rectilinear:yaw={yaw:g}:h_fov={view_h_fov:g}"
                       f":v_fov={v_fov:.2f}:w={width}:h={height}"]
-        chain += ["setpts=PTS-STARTPTS",
+        chain += ["setpts=PTS-STARTPTS", f"trim=end_frame={n_frames}",
                  f"scale={width}:{height}:force_original_aspect_ratio=decrease"
                  f":force_divisible_by=2",
                  f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black",
@@ -524,9 +541,12 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
                 cmd += ["-i", str(sources[str(r["shot_id"])])]
             else:
                 # -ss and -t BEFORE -i: input seeking, so the decoder starts
-                # near the shot instead of at the head of the recording.
+                # near the shot instead of at the head of the recording. -t
+                # is a bound on decoding, not the cut: the leg is trimmed to
+                # its frame count in the graph, and a -t equal to the length
+                # can deliver one frame fewer than that.
                 cmd += ["-ss", f"{float(r.get('src_in') or 0.0):.3f}",
-                        "-t", f"{dur:.3f}", "-i", str(sources[str(r["shot_id"])])]
+                        "-t", f"{dur + 0.5:.3f}", "-i", str(sources[str(r["shot_id"])])]
             primary, secondary = n, None
             n += 1
             other = r.get("secondary_shot_id")
@@ -534,7 +554,7 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
                 # The other phone's clip, right after its primary, seeked to
                 # the instant the pair was aligned on, for the slot's length.
                 cmd += ["-ss", f"{float(r.get('secondary_src_in') or 0.0):.3f}",
-                        "-t", f"{dur:.3f}", "-i", str(sources[str(other)])]
+                        "-t", f"{dur + 0.5:.3f}", "-i", str(sources[str(other)])]
                 secondary, n = n, n + 1
             elif other:
                 # The same policy as a slot with no media: a split whose other

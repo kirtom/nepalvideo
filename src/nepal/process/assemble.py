@@ -295,6 +295,15 @@ def source_share_repair(chosen: list, pool: Sequence, *, min_share: float,
 # film is now chosen by reading (the beat sheet, S04.5), not by a flag.
 
 
+# The most a still may be held. It used to be unbounded -- "a still is held
+# for as long as the slot asks" -- and the asks were the anchor's B-roll tail
+# stretched to the end of the line (56 s on one photograph) and the low-energy
+# band's 5-8 s. The operator: "duration when you show photos should be much
+# shorter, like a couple of seconds" (Gate 3, 2026-10-07). The stage sets it
+# from ``assemble.photo_max_s`` before the timeline is built.
+PHOTO_HOLD_MAX_S = 2.5
+
+
 def shot_available_s(shot: Mapping[str, Any]) -> float:
     """How many seconds of source the shot actually has.
 
@@ -306,7 +315,7 @@ def shot_available_s(shot: Mapping[str, Any]) -> float:
     length, total runtime, the music layout) is computed from the claim.
     """
     if str(shot.get("media_kind") or "video") == "photo":
-        return math.inf
+        return PHOTO_HOLD_MAX_S
     end = shot.get("end_s")
     if end is None:
         return math.inf

@@ -1062,6 +1062,7 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
                   reuse_gap_s: float, preferred: Sequence[str],
                   preferred_bonus: float, exclude: Sequence[str],
                   act4_swell: bool = True,
+                  exclude_by_act: Mapping[int, Sequence[str]] | None = None,
                   window_starts: Collection[int] = (),
                   max_track_run_s: float = math.inf) -> SceneAssignment:
     """A Viterbi pass over ``scenes`` with (track, section) pairs as states.
@@ -1138,9 +1139,17 @@ def assign_scenes(scenes: Sequence[Scene], tracks: Sequence[Track], *,
     dp: dict[tuple[str, str], float] = {}
     back: list[dict[tuple[str, str], tuple[str, str] | None]] = []
 
+    banned_by_act = {a: _named_track_ids(pool, list(names))[0]
+                     for a, names in (exclude_by_act or {}).items()}
     for i, scene in enumerate(scenes):
         target = targets[scene.scene_id]
         candidates = swell_states if (act4_swell and i == act4_last_idx and swell_states) else states
+        # A track the operator keeps out of one act ("the outro piece should
+        # be used earlier than the end", Gate 3 2026-10-07): off this act's
+        # candidate list, free everywhere else.
+        banned = banned_by_act.get(scene.act) or set()
+        if banned:
+            candidates = [c for c in candidates if c[0] not in banned] or candidates
         wants_callback = last_act_first_idx is not None and i == last_act_first_idx \
             and act1_idx is not None and act1_idx < i
 
