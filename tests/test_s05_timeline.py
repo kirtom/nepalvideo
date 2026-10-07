@@ -991,3 +991,19 @@ def test_a_talking_slot_runs_to_the_end_of_its_sentence():
     capped = [{"kind": "video", "shot_id": "a", "t_in": 0.0, "t_out": 2.0, "src_in": 1.5, "src_out": 3.5}]
     s5._finish_sentences(capped, {"a": shot}, max_extend_s=1.0)
     assert capped[0]["src_out"] == 4.5                                                # the cap holds
+
+
+def test_consecutive_slots_of_one_recording_become_one_take_and_the_run_cap_holds():
+    # Critic's review, 2026-10-07: twelve slots of the jeep, fourteen of the ghat at 1.5 s each.
+    from nepal.stages import s05_cut as s5
+    rec = {"a1": "A", "a2": "A", "a3": "A", "a4": "A", "b1": "B"}
+    def v(sid, t0, t1, s0, s1, **k):
+        return dict({"kind": "video", "shot_id": sid, "t_in": t0, "t_out": t1, "src_in": s0, "src_out": s1, "locked": 0}, **k)
+    slots = [v("a1", 0, 2, 10, 12), v("a2", 2, 4, 12, 14), v("a3", 4, 6, 14.2, 16.2),   # contiguous: one take
+             v("b1", 6, 8, 0, 2),
+             v("a4", 8, 10, 40, 42), v("a1", 10, 12, 50, 52), v("a2", 12, 14, 60, 62)]      # a run of 3, not contiguous
+    out, merged, dropped = s5._merge_runs(slots, rec, run_cap=2)
+    assert merged == 2 and out[0]["src_out"] == 16.2 and out[0]["t_out"] == 6.0
+    assert dropped == 1 and [x["shot_id"] for x in out] == ["a1", "b1", "a4", "a1"]
+    locked = [v("a1", 0, 2, 0, 2, locked=1), v("a2", 2, 4, 2, 4, locked=1)]
+    assert s5._merge_runs(locked, rec, run_cap=1)[1:] == (0, 0), "a locked slot is never merged or dropped"

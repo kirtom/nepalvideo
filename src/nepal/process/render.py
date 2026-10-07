@@ -53,6 +53,15 @@ CARD_COLOR = "black"
 # Read at a glance while the card holds the frame, unlike the small per-shot
 # debug label -- the two are different text at different distances.
 CARD_FONTSIZE = 36
+TITLE_FONTSIZE = 56
+SUBTITLE_FONTSIZE = 30
+# How a frame that is not 16:9 fills the 16:9 picture: "blur" puts a blurred,
+# cover-scaled copy of the same frame behind it (the standard treatment for
+# vertical phone footage), "black" letterboxes. A third of this film is
+# portrait phone clips and Telegram round videos; letterboxed, the frame was
+# mostly black (critic's review, 2026-10-07, enhancement 1).
+FILL_DEFAULT = "blur"
+FILL_BLUR = "boxblur=24:8"
 
 # The speech pass's own ceiling and range. -1.5 dBTP is the ceiling the
 # final pass takes from the config, applied to speech early so that no
@@ -139,7 +148,7 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
                     overlay: bool = True, fps: int = DRAFT_FPS,
                     secondary_index: int | None = None,
                     card_text: str | None = None,
-                    view_h_fov: float = VIEW_H_FOV) -> str:
+                    view_h_fov: float = VIEW_H_FOV, fill: str = FILL_DEFAULT) -> str:
     """The per-slot video chain -- what sits between ``[index:v]`` and the
     leg's output pad: reset timestamps, scale, label.
 
@@ -159,6 +168,29 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
     prefix and output-pad suffix still bracket it like any other leg.
     """
     if is_card(row):
+        bg = card_background(row)
+        if bg:
+            # A title over footage: the background clip cover-scaled, blurred
+            # and dimmed, the title and its subtitle centred, a fade either
+            # end. "Manaslu Circuit Trek, April-May 2024, over a cool Manaslu
+            # video, blurred a bit" (operator, 2026-10-07 07:39).
+            n = leg_frames(row, fps)
+            dur = n / fps
+            blur = int(bg.get("blur") or 12)
+            chain = [f"fps={fps}", "setpts=PTS-STARTPTS", f"trim=end_frame={n}",
+                     f"scale={width}:{height}:force_original_aspect_ratio=increase:force_divisible_by=2",
+                     f"crop={width}:{height}", f"boxblur={blur}:{max(1, blur // 3)}",
+                     "colorlevels=rimax=0.75:gimax=0.75:bimax=0.75",
+                     "fade=t=in:st=0:d=1", f"fade=t=out:st={max(0.0, dur - 1.0):.3f}:d=1", "setsar=1"]
+            if has_drawtext():
+                title, sub = str(bg.get("text") or ""), str(bg.get("subtitle") or "")
+                if title:
+                    chain.append(f"drawtext=text='{escape_drawtext(title)}':x=(w-text_w)/2"
+                                 f":y=(h-text_h)/2-{SUBTITLE_FONTSIZE}:fontsize={TITLE_FONTSIZE}:fontcolor=white")
+                if sub:
+                    chain.append(f"drawtext=text='{escape_drawtext(sub)}':x=(w-text_w)/2"
+                                 f":y=(h-text_h)/2+{TITLE_FONTSIZE // 2 + 12}:fontsize={SUBTITLE_FONTSIZE}:fontcolor=white")
+            return ",".join(chain)
         # The lavfi ``color`` input build_command gives this row is already
         # exactly width x height at ``fps``, so there is no scale/pad step --
         # only the caption, and only when this ffmpeg can burn one in.
@@ -207,11 +239,24 @@ def segment_filters(row: Mapping[str, Any], index: int, *,
             v_fov = math.degrees(2 * math.atan(math.tan(math.radians(view_h_fov / 2)) * height / width))
             chain += [f"v360=input=e:output=rectilinear:yaw={yaw:g}:h_fov={view_h_fov:g}"
                       f":v_fov={v_fov:.2f}:w={width}:h={height}"]
-        chain += ["setpts=PTS-STARTPTS", f"trim=end_frame={n_frames}",
-                 f"scale={width}:{height}:force_original_aspect_ratio=decrease"
-                 f":force_divisible_by=2",
-                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black",
-                 "setsar=1"]
+        chain += ["setpts=PTS-STARTPTS", f"trim=end_frame={n_frames}"]
+        if fill == "blur" and not row.get("is_360"):
+            # The same frame twice: cover-scaled and blurred behind, fitted in
+            # front. A 16:9 source fills the frame and hides its own blur, so
+            # this costs only the blur; a portrait one gets its own colours
+            # around it instead of black.
+            chain += [f"split=2[bg{index}][fg{index}];"
+                      f"[bg{index}]scale={width}:{height}:force_original_aspect_ratio=increase"
+                      f":force_divisible_by=2,crop={width}:{height},{FILL_BLUR}[bgb{index}];"
+                      f"[fg{index}]scale={width}:{height}:force_original_aspect_ratio=decrease"
+                      f":force_divisible_by=2[fgs{index}];"
+                      f"[bgb{index}][fgs{index}]overlay=(W-w)/2:(H-h)/2",
+                      "setsar=1"]
+        else:
+            chain += [f"scale={width}:{height}:force_original_aspect_ratio=decrease"
+                      f":force_divisible_by=2",
+                      f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black",
+                      "setsar=1"]
     if overlay and has_drawtext():
         label = escape_drawtext(f"{row['shot_id']}  {timecode(row['t_in'])}")
         chain.append(
@@ -229,6 +274,17 @@ def is_card(row: Mapping[str, Any]) -> bool:
     """Whether this slot is a caption card (the cold-open title) rather than
     footage -- it has no shot and no source file to read."""
     return str(row.get("kind") or "") == "card"
+
+
+def card_background(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """A card with footage behind it: the ``motion`` JSON carries
+    ``background`` (an absolute path), ``text``, ``subtitle`` and ``blur``.
+    None for the plain black card."""
+    try:
+        m = json.loads(row.get("motion") or "{}")
+    except (TypeError, ValueError):
+        return None
+    return m if isinstance(m, dict) and m.get("background") else None
 
 
 def _card_text(row: Mapping[str, Any]) -> str:
@@ -471,7 +527,7 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
                   envelopes: Mapping[str, str] | None = None,
                   width: int = DRAFT_W, height: int = DRAFT_H,
                   crf: int = DRAFT_CRF, fps: int = DRAFT_FPS, overlay: bool = True,
-                  view_h_fov: float = VIEW_H_FOV,
+                  view_h_fov: float = VIEW_H_FOV, fill: str = FILL_DEFAULT,
                   levels: Mapping[str, float] | None = None,
                   script_path: Path | None = None,
                   loudnorm_measured: Mapping[str, float] | None = None,
@@ -526,7 +582,11 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
                 raise KeyError(f"no source for shot {r['shot_id']}")
         for r in rows:
             dur = float(r["t_out"]) - float(r["t_in"])
-            if is_card(r):
+            if is_card(r) and card_background(r):
+                bg = card_background(r)
+                cmd += ["-ss", f"{float(r.get('src_in') or 0.0):.3f}", "-t", f"{dur + 0.5:.3f}",
+                        "-i", str(bg["background"])]
+            elif is_card(r):
                 # No file backs a card: ffmpeg synthesises the frame from a
                 # lavfi source instead of decoding one, at the row's own length
                 # -- so the draft's length still matches the timeline's.
@@ -608,7 +668,7 @@ def build_command(rows: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Pa
     if not measure_only:
         labels: list[str] = []
         for k, (r, i, si) in enumerate(legs):
-            parts.append(f"[{i}:v]{segment_filters(r, i, width=width, height=height, overlay=overlay, fps=fps, secondary_index=si, view_h_fov=view_h_fov)}[v{k}]")
+            parts.append(f"[{i}:v]{segment_filters(r, i, width=width, height=height, overlay=overlay, fps=fps, secondary_index=si, view_h_fov=view_h_fov, fill=fill)}[v{k}]")
             labels.append(f"[v{k}]")
         parts.append("".join(labels) + f"concat=n={len(legs)}:v=1:a=0[vout]")
     if cues:

@@ -1091,3 +1091,32 @@ def test_every_leg_is_cut_to_the_frame_grid_so_the_picture_cannot_drift():
     assert "trim=end_frame=70" in chain and chain.index("setpts=PTS-STARTPTS") < chain.index("trim=end_frame")
     still = render.segment_filters({"shot_id": "p", "media_kind": "photo", "t_in": 0.0, "t_out": 2.5}, 0, overlay=False)
     assert "loop=loop=-1" in still and "trim=end_frame=75" in still and "trim=duration" not in still
+
+
+def test_a_portrait_frame_is_filled_with_its_own_blur_not_black_bars():
+    # Critic's review, 2026-10-07: a third of the picture was a strip between black bars.
+    row = {"shot_id": "v", "kind": "video", "t_in": 0.0, "t_out": 2.0}
+    chain = render.segment_filters(row, 3, overlay=False, fill="blur")
+    assert "split=2[bg3][fg3]" in chain and "boxblur" in chain and "overlay=(W-w)/2:(H-h)/2" in chain
+    assert "pad=" not in chain
+    black = render.segment_filters(row, 3, overlay=False, fill="black")
+    assert "pad=960:540" in black and "boxblur" not in black
+    sphere = render.segment_filters(dict(row, is_360=1), 3, overlay=False, fill="blur")
+    assert "v360=" in sphere and "boxblur" not in sphere, "a 360 window already fills the frame"
+
+
+def test_a_title_card_reads_its_clip_blurred_with_two_lines_of_text(tmp_path):
+    import json
+    row = {"shot_id": None, "kind": "card", "t_in": 0.0, "t_out": 6.0, "src_in": 1.0,
+           "motion": json.dumps({"type": "title", "text": "Manaslu Circuit Trek",
+                                 "subtitle": "April - May 2024", "background": "/m/bg.mp4", "blur": 12})}
+    cmd = render.build_command([row], sources={}, out_path=tmp_path / "o.mp4")
+    i = cmd.index("-i")
+    assert cmd[i - 4:i + 2] == ["-ss", "1.000", "-t", "6.500", "-i", "/m/bg.mp4"]
+    fc = _graph(cmd)
+    assert "boxblur=12:4" in fc and "trim=end_frame=180" in fc and "fade=t=out:st=5.000:d=1" in fc
+    if render.has_drawtext():
+        assert "Manaslu Circuit Trek" in fc and "April - May 2024" in fc
+    plain = render.build_command([dict(row, motion=json.dumps({"type": "card", "text": "x"}))],
+                                 sources={}, out_path=tmp_path / "p.mp4")
+    assert "lavfi" in plain, "a card without a background is still the black card"

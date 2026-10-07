@@ -24,6 +24,7 @@ PUSH = (
     ("data", "chat_export", "raw/chat_export"),
     ("data", "music", "raw/music"),
     ("data", "strava", "raw/strava"),
+    ("data", "title", "raw/title"),
     ("work", "db", "work/db"),
     ("work", "reports", "work/reports"),
     ("work", "proxies", "work/proxies"),

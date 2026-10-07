@@ -61,6 +61,17 @@ film:
   # The title card's caption, over the cut from cold open to Act 1 -- "three
   # months earlier".
   cold_open_card: "тремя месяцами ранее"
+  # The film's name, before the cold open, over a blurred Himalaya clip
+  # (operator, 2026-10-07 07:39: "Manaslu Circuit Trek, April-May 2024, a cool
+  # background video from Manaslu, blurred a bit"). The clip is Pixabay
+  # 258656 (nepal_data/title/LICENSE.txt); src_in_s is where in it to start.
+  title:
+    text: "Manaslu Circuit Trek"
+    subtitle: "April – May 2024"
+    background: "title/himalaya_title_bg.mp4"
+    src_in_s: 1.0
+    duration_s: 6.0
+    blur: 12
   # How much keepable footage a minute of finished film is cut from. The film
   # counts nothing as surplus until it has this many times its own length in
   # shots that survive the quality gate.
@@ -427,6 +438,10 @@ assemble:
   # the overlap walk and the retime left cuts of 0.14-0.5 s (operator,
   # 2026-10-07: "very, very shortly ... at least a little bit longer").
   min_slot_s: 1.0
+  # A 360 slot is viewed at this yaw unless its shot has speech (then 0, the
+  # speaker): on a selfie stick yaw 0 is the holder's face, 180 the way the
+  # party is going (critic's review, 2026-10-07). Remove the key to keep 0.
+  yaw_away_when_silent: 180
   # A talking shot runs to the end of the sentence it is in: the retime cut
   # lines mid-word ("sometimes the video with the voice track ends abruptly
   # ... the sentences should be continued to the end", operator, 2026-10-07
@@ -509,6 +524,10 @@ render:
   # vertical field follows from the frame's shape. 100 is what S03's framing
   # stills are sampled at.
   view_h_fov: 100
+  # What stands behind a frame that is not 16:9: a blurred, cover-scaled copy
+  # of the same frame ("blur") or black bars. A third of the slots are
+  # portrait phone clips and round videos (critic's review, 2026-10-07).
+  fill: blur
   # How far SHORT of the timeline the rendered draft may fall before the stage
   # calls it a failed render. ffmpeg breaks out of its transcode loop on a
   # mid-graph error, writes a valid trailer and exits 0, so its exit code
@@ -534,8 +553,8 @@ render:
   # plays under it). These are per-track targets the mixer aims each cue at
   # before the final normalisation pass.
   speech_lufs: -16.0
-  location_full_lufs: -18.0
-  location_under_speech_lufs: -24.0
+  location_full_lufs: -16.0        # -18 -> -16: the quiet stretches sat 10 LU under the lines (2026-10-07)
+  location_under_speech_lufs: -22.0
   music_xfade_s: 2.0
   window_fade_s: 1.0             # music out into a natural-sound window or the silence
   cue_fade_s: 0.15
@@ -559,7 +578,7 @@ music:
   # that margin; at 0.05 / 0.01 the same corpus uses 7 tracks with a longest
   # run of 743 s. Re-measure (music-assignment-diagnosis.md) if the targets
   # or the library change.
-  switch_cost: 0.05               # penalty for changing track between adjacent scenes
+  switch_cost: 0.6                # 0.05 -> 0.6: one track per window, not three in 77 s (critic's review, 2026-10-07)
   continuity_bonus: 0.01          # reward for keeping the same track across a cut
   repeat_penalty: 5.0             # a refusal, not a nudge: one play per track (operator, 2026-10-07)
   scene_targets:                  # weights of the distance terms
@@ -692,7 +711,7 @@ music:
     # most powerful move -- so it keeps the level the whole film had before
     # 2026-09-24 put the bed under the location sound. The rest of the film
     # plays at render.music_lufs.
-    swell_lufs: -14.0
+    swell_lufs: -17.0              # -14 -> -17 (the bed's own level): the summit windows measured -7.9 and -9.5 LUFS integrated against -13..-16 for every other window and -14 for the film (2026-10-07)
     # No one piece may hold the film longer than this without a break
     # (operator, 2026-09-24, after one track ran 1814 s unbroken). The
     # recalibrated switch_cost/continuity_bonus above cut the longest run to

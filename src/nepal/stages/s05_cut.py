@@ -554,6 +554,49 @@ def _finish_sentences(slots: Sequence[dict[str, Any]], shots_by_id: Mapping[str,
     return grown
 
 
+def _merge_runs(slots: Sequence[dict[str, Any]], rec_of: Mapping[str, str], *,
+                run_cap: int) -> tuple[list[dict[str, Any]], int, int]:
+    """Consecutive unlocked slots of one recording whose source spans run
+    on from each other become one slot; what is still a run longer than
+    ``run_cap`` loses its surplus. Returns (slots, merged, dropped).
+
+    The run rule holds while a gap is filled, not across the refill rounds
+    or the capture-order re-lay: the 05:43 draft had thirty runs of three
+    or more, twelve slots of the jeep, fourteen of the cremation ghat at
+    1.5 s each, which reads as flicker (critic's review, 2026-10-07,
+    enhancement 2). One take of twelve seconds is one cut; twelve cuts of
+    one second each are twelve cuts and no new information."""
+    def rec(x):
+        return rec_of.get(x.get("shot_id") or "")
+    out: list[dict[str, Any]] = []
+    merged = 0
+    for s in slots:
+        prev = out[-1] if out else None
+        if (prev is not None and s.get("kind") == "video" and prev.get("kind") == "video"
+                and not s.get("locked") and not prev.get("locked")
+                and not s.get("secondary_shot_id") and not prev.get("secondary_shot_id")
+                and rec(s) and rec(s) == rec(prev)
+                and abs(float(s["src_in"]) - float(prev.get("src_out") or -1e9)) <= 0.75):
+            length = float(s["t_out"]) - float(s["t_in"])
+            prev["src_out"] = s.get("src_out")
+            _set_length(prev, float(prev["t_in"]), float(prev["t_out"]) + length)
+            merged += 1
+            continue
+        out.append(s)
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    run = 0
+    for s in out:
+        same = bool(kept) and rec(s) is not None and rec(s) == rec(kept[-1])
+        run = run + 1 if same else 1
+        if run > run_cap and not s.get("locked"):
+            dropped += 1
+            run -= 1
+            continue
+        kept.append(s)
+    return kept, merged, dropped
+
+
 def _chronological(slots: Sequence[dict[str, Any]],
                    shots_by_id: Mapping[str, Mapping[str, Any]], t0: float) -> list[dict[str, Any]]:
     """The act's slots in capture order, each keeping its length, laid end
@@ -776,10 +819,23 @@ def _cold_open(cfg: Config, beats: Sequence[Mapping[str, Any]], rows: Sequence[M
                              transition="dip_black", locked=1)
     out: list[dict[str, Any]] = []
     t = 0.0
+    title = cfg.get("film.title") or {}
+    if title.get("text"):
+        # The film's name over a blurred clip, before the cold open
+        # (operator, 2026-10-07 07:39). A card, so every rule that lets a
+        # card through (no cue, no scene, no shot) lets this one through.
+        bg = cfg.data_root / str(title.get("background") or "")
+        card = _new_slot(kind="card", act=0, locked=1, src_in=float(title.get("src_in_s") or 0.0),
+                         motion=json.dumps({"type": "title", "text": title["text"],
+                                            "subtitle": title.get("subtitle") or "",
+                                            "background": str(bg), "blur": int(title.get("blur") or 12)},
+                                           ensure_ascii=False))
+        out.append(_set_length(card, 0.0, float(title.get("duration_s") or 6.0)))
+        t = card["t_out"]
     if cold is not None:
         cold = dict(cold)
         cold["act"] = 0
-        _set_length(cold, 0.0, float(cold["src_out"]) - float(cold["src_in"]))
+        _set_length(cold, t, t + float(cold["src_out"]) - float(cold["src_in"]))
         out.append(cold)
         t = cold["t_out"]
     card = _new_slot(kind="card", act=0, locked=1,
@@ -1411,6 +1467,23 @@ def build_timeline(cfg: Config, conn) -> dict[str, Any]:
         if grown:
             log.info("S06 act %d: %d talking slot(s) extended to the end of their sentence", act, grown)
         slots = _chronological(slots, shots_by_id, act_t0)
+        rec_of = {sid: r.get("recording_id") for sid, r in shots_by_id.items() if r.get("recording_id")}
+        slots, merged, dropped = _merge_runs(slots, rec_of,
+                                             run_cap=int(cfg.get("assemble.max_consecutive_recording")))
+        if merged or dropped:
+            log.info("S06 act %d: %d consecutive slot(s) of one recording merged into the one before, "
+                     "%d dropped over the run cap", act, merged, dropped)
+            slots = _chronological(slots, shots_by_id, act_t0)
+        # A 360 slot looks away from the holder unless the holder is
+        # speaking: every one of the 38 was the selfie-stick view at yaw 0
+        # (critic's review, 2026-10-07, enhancement 3).
+        away = cfg.get("assemble.yaw_away_when_silent")
+        if away is not None:
+            for x in slots:
+                shot = shots_by_id.get(x.get("shot_id") or "")
+                rec = recordings_by_id.get(shot.get("recording_id")) if shot else None
+                if rec and rec.get("is_360") and x.get("kind") == "video":
+                    x["yaw"] = 0.0 if shot.get("has_speech") else float(away)
         final[act] = slots
         end = float(slots[-1]["t_out"]) if slots else act_t0
         final_spans[act] = (act_t0, end)
@@ -1792,7 +1865,8 @@ def render_draft(cfg: Config, conn) -> dict[str, Any]:
     kw: dict[str, Any] = dict(
         sources=sources, out_path=out, width=int(d["width"]), height=int(d["height"]),
         crf=int(d["crf"]), fps=int(cfg.get("render.fps", render_mod.DRAFT_FPS)),
-        view_h_fov=float(cfg.get("render.view_h_fov", render_mod.VIEW_H_FOV)))
+        view_h_fov=float(cfg.get("render.view_h_fov", render_mod.VIEW_H_FOV)),
+        fill=str(cfg.get("render.fill", render_mod.FILL_DEFAULT)))
     measured = None
     if cues:
         kw.update(cues=cues, audio_sources=audio_sources, music_sources=music_sources,
