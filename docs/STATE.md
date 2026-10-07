@@ -691,6 +691,52 @@ wrong-shaped proxies), `s02 --redo music` (the loudness column), `cut
 --redo timeline,cues,draft`. Results in the next part. Still open for the
 operator: Act 1 at 86 s (the sentence extensions), the film at 34 min.
 
+## Film v2 — step 4, part H: round six verified, the credits, the conform (2026-10-07, 09:50–)
+
+**Round six verified** (09:50 draft, then 10:32 with the lock fix): 365
+of 478 proxies had the wrong shape and were rebuilt; the portrait clips
+stand in their 9:16 strip over their own blur; the title reads white on
+a dimmed sky; every music window measures −13 to −14 LUFS against −14
+for the film (the 08:33 draft had −8.7 to −12.4); the soundtrack is the
+07:42 placement in every window. One defect in the 09:50 draft: scene 23
+straddled act 4's two windows and the lock gave it to the later one, so
+Mind Heist played to its file's end inside the first window and the
+second was silent. A shared scene now goes to the window holding more of
+it, and a sliver of the scene before a window never opens it (2ddead8).
+The 10:32 draft: She Loves 1659–1723, Mind Heist 1749–1832, no track
+restarts anywhere.
+
+**The operator (10:00)** left for six hours with "proceed with all other
+planned tasks … be autonomous". Done in that stretch:
+
+- **The end credits** (spec 1.8 and S09.1; e64c4e7, 47aacb5, 6f24479):
+  90 s after the film, outside the runtime, seven cards (the people, the
+  machine, the tooling, the numbers from the database, two of music, the
+  closing one) over 36 outtakes — one unused shot per recording the film
+  never touched, rejected shaky ones first — with the reserved Marusha
+  track from its start, nothing ducking it, fading with the last card.
+  The lines wrap at 62 characters; music names lose their subtitles.
+- **The conform** (45ff1d0): `nepal cut --redo conform` renders
+  `work/deliver/nepal_20min.mp4` at 1920×1080, crf 20, from the original
+  files for 326 of 366 clip slots (the phones' and the camera's 4K
+  `VID_` files; 360 recordings keep their proxies — no stitcher, spec
+  S08.2's v360 path; no grade, no route map). The render writes a
+  `.progress` file every ten seconds; `remote pull` fetches `deliver/`.
+- **Two traps found by the first credits renders** (309b3d0, d7a0332):
+  an apostrophe in a caption. ffmpeg reads a filter option twice — the
+  graph parser toggles quoting on every quote and keeps backslashes
+  inside quotes literal, the option parser takes `\'` and `\:` as escapes,
+  drawtext's expansion takes `%` — so the quote leaves the quoted string
+  as `\\\'` and re-enters it, measured on the box with four variants.
+  The 11:11 draft had drawn every apostrophe line as its own filter
+  options in small type at the top of the frame.
+
+Not done, deliberately: the 3-minute cut (spec S09; the act minimums sum
+to 655 s, so it needs a scaled constraint profile and a second timeline,
+not a config switch), the route-map overlay and the grade (S08.4–5),
+the critic's items 8 and 9 (taste calls for the operator). Open for the
+operator: Act 1 at 86 s; the film at 35.1 min plus 90 s of credits.
+
 ## The last full run
 
 S01 + S03.0/.1/.2 on the real corpus, 4.5 hours wall clock. These numbers are
