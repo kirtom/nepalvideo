@@ -1075,6 +1075,8 @@ def test_the_credits_roll_after_the_film_over_unused_shots_with_the_reserved_tra
     lines = [json.loads(r["motion"])["lines"] for r in credits]
     assert lines[0][0] == "Filmed and walked by" and any("shots considered" in l for ls in lines for l in ls)
     assert "fade_out_s" in json.loads(credits[-1]["motion"])
+    assert all(len(l) <= s05_cut.CREDIT_LINE_CHARS for ls in lines for l in ls), "every line fits the frame"
+    assert s05_cut._wrap_lines(["a b c d", "ee"], width=3) == ["a b", "c d", "ee"]
     s05_cut.build_cues(cfg, conn)
     cues = [dict(r) for r in conn.execute("SELECT * FROM audio_cues ORDER BY t_in")]
     cc = [c for c in cues if c["cue_id"] == "mu_credits"]

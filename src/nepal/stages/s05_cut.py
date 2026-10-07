@@ -1617,7 +1617,15 @@ def _credits_cards(cfg: Config, conn, mmap: Mapping[str, Any], n_used: int) -> l
         for seg in a.get("segments", []):
             if seg["track_id"] in by_id and seg["track_id"] not in heard:
                 heard.append(seg["track_id"])
-    names = [f"{by_id[t]['artist'] or '?'} – {by_id[t]['title'] or t}" for t in heard]
+    def short(t):
+        # "Hans Zimmer/London Music Works/The City of Prague Philharmonic
+        # Orchestra – Imagine the Fire - From "The Dark Knight Rises"" is a
+        # line and a half at 540p; the first artist and the title's own name
+        title = str(by_id[t]["title"] or t)
+        for cut in (" - From ", " (feat", " (featuring", " - Remastered"):
+            title = title.split(cut)[0]
+        return f"{str(by_id[t]['artist'] or '?').split('/')[0]} – {title}"
+    names = [short(t) for t in heard]
     credits_track = music_mod.pick_credits_track(_tracks(conn), cfg.get("music.credits_track"))
     for k in range(0, max(1, len(names)), 7):
         cards.append((["Music"] + names[k:k + 7], 12))
@@ -1653,6 +1661,27 @@ def _credits_bed(conn, used_recordings: set[str], *, slot_s: float, n: int) -> l
     return picked
 
 
+CREDIT_LINE_CHARS = 62      # what fits a 960-wide frame at render.CREDIT_FONTSIZE
+
+
+def _wrap_lines(lines: Sequence[str], width: int = CREDIT_LINE_CHARS) -> list[str]:
+    """Word-wrap each line to ``width`` characters: the 11:11 draft cut
+    "359 photographs that needed a decoder installed before they could
+    be opened" at both edges of the frame."""
+    out: list[str] = []
+    for line in lines:
+        cur = ""
+        for w in str(line).split(" "):
+            if cur and len(cur) + 1 + len(w) > width:
+                out.append(cur)
+                cur = w
+            else:
+                cur = f"{cur} {w}" if cur else w
+        if cur:
+            out.append(cur)
+    return out
+
+
 def _credits_slots(cfg: Config, conn, mmap: Mapping[str, Any], ordered: Sequence[Mapping[str, Any]]
                    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The end credits (spec sections 1.8 and S09.1): 60-120 s after the
@@ -1669,7 +1698,7 @@ def _credits_slots(cfg: Config, conn, mmap: Mapping[str, Any], ordered: Sequence
     used_recordings = {r[0] for r in conn.execute(
         f"SELECT DISTINCT recording_id FROM shots WHERE shot_id IN ({','.join('?' * len(used))})", sorted(used))
         if r[0]} if used else set()
-    cards = _credits_cards(cfg, conn, mmap, len(used))
+    cards = [(_wrap_lines(lines), w) for lines, w in _credits_cards(cfg, conn, mmap, len(used))]
     bed = _credits_bed(conn, used_recordings, slot_s=slot_s, n=max(1, math.ceil(length / slot_s)))
     if not bed:
         log.warning("S06 credits: no unused shot to lay them over; the film ends without credits")
